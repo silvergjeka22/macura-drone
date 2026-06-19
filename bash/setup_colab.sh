@@ -44,7 +44,10 @@ fi
 
 if [[ -d "${REPO_DIR}/.git" ]]; then
   echo "[1/5] repo already present -> git pull"
-  git -C "${REPO_DIR}" pull --ff-only
+  # the remote URL is tokenless (scrubbed after clone), so authenticate inline
+  # for this one pull without persisting the credential.
+  git -C "${REPO_DIR}" pull --ff-only \
+    "https://${GITHUB_TOKEN}@github.com/${GH_USER}/${REPO_NAME}.git" main
 else
   echo "[1/5] cloning private repo ${GH_USER}/${REPO_NAME}"
   # token is interpolated only for this one command; nothing persisted.
