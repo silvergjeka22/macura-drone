@@ -126,7 +126,7 @@ def macura_rollout(dynamics_model, agent, start_obs: np.ndarray,
         if t == 0:
             kappa = update_kappa(kappa_state, u, zeta, xi)
 
-        next_obs, _ = ens.predict(dynamics_model, obs, act)
+        next_obs = ens.predict(dynamics_model, obs, act)
         rew = reward_fn(obs, act)
         done = done_fn(next_obs)
 

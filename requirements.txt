@@ -1,40 +1,30 @@
 # ── macura-drone requirements ────────────────────────────────────────────────
-# Targeted at Google Colab (Python 3.10/3.11, CUDA GPU).
+# Targeted at Google Colab (Python 3.12, CUDA GPU). All deps below install
+# cleanly on Colab's current runtime + numpy 2.x.
 #
-# IMPORTANT (version sensitivity): mbrl-lib and the authors' MACURA code are
-# pinned to specific gym / hydra / torch versions. The versions below are a
-# known-good starting point, but the FIRST Colab task is to confirm the import
-# chain works end-to-end (see tasks.md → "Environment & dependency bring-up").
-# Keep this file as the single source of truth for dependencies.
+# Backbone note: we build on Stable-Baselines3 (maintained) for the SAC learner,
+# NOT mbrl-lib. mbrl-lib is unmaintained and not installable on Python 3.12; the
+# probabilistic ensemble and the MACURA / MBPO / M2AC rollout logic are our own
+# pure-function modules (models/ensemble.py, algorithms/*.py).
 
 # --- core scientific stack -------------------------------------------------
-numpy>=1.23,<2.0
+# DO NOT cap numpy below 2.0 on Colab: gymnasium/opencv/etc. are compiled
+# against numpy 2.x, so pinning <2 breaks the ABI ("numpy.dtype size changed").
+numpy>=1.26
 scipy>=1.10
 matplotlib>=3.7
 pyyaml>=6.0
+pandas>=2.0
+tqdm>=4.65
 
 # --- deep learning ---------------------------------------------------------
-torch>=2.1            # Colab usually ships a compatible CUDA build already
-omegaconf>=2.3        # config objects used by mbrl-lib
-hydra-core>=1.3       # mbrl-lib uses hydra for config composition
+torch>=2.1            # Colab ships a compatible CUDA build
 
 # --- simulation ------------------------------------------------------------
 mujoco>=3.1           # MuJoCo physics (loads the Skydio X2 MJCF)
 gymnasium>=0.29       # env API for our drone task
-imageio>=2.31         # save rollout videos / frames for the study plots
-imageio-ffmpeg>=0.4   # mp4 encoding of rollouts
+imageio>=2.31         # save rollout frames / videos for the study plots
+imageio-ffmpeg>=0.4   # mp4 encoding
 
-# --- model-based RL backbone ----------------------------------------------
-# NOTE: mbrl-lib is NOT installed here. Its PyPI release predates Python 3.11
-# (Colab's current runtime) and pins old numpy/gym, so `pip install mbrl-lib`
-# fails with "No matching distribution". It is installed separately by
-# setup_colab.sh (step 4b), preferring the authors' cloned repo (which is an
-# mbrl-lib codebase) and falling back to the Facebook source.
-#
-# Everything ABOVE this line is the "core" stack: it installs cleanly on
-# Python 3.11 and is enough to run Part 1 of the notebook (env study + plots)
-# even if the mbrl-lib install needs manual attention.
-
-# --- experiment bookkeeping (optional but handy) ---------------------------
-tqdm>=4.65
-pandas>=2.0           # tidy run logs for the comparison plots
+# --- RL backbone (SAC learner; shared by all four algorithms) --------------
+stable-baselines3>=2.3   # maintained SAC implementation, Colab-compatible

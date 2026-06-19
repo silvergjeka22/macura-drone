@@ -42,7 +42,7 @@ def m2ac_rollout(dynamics_model, agent, start_obs: np.ndarray,
         act = np.stack([select_action(agent, o, evaluate=False) for o in obs])
         means, variances = ens.member_gaussians(dynamics_model, obs, act)
         u = compute_gjs(means, variances)
-        next_obs, _ = ens.predict(dynamics_model, obs, act)
+        next_obs = ens.predict(dynamics_model, obs, act)
         rew = reward_fn(obs, act) - penalty * u       # uncertainty reward penalty
         done = done_fn(next_obs)
         a = alive.copy()

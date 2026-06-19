@@ -16,14 +16,17 @@ Legend of risk: 🔴 blocker · 🟠 fairness/correctness · 🟢 polish.
 
 ---
 
+> **Backbone change (resolved):** `mbrl-lib` is unmaintained and not installable
+> on Colab's Python 3.12. We switched the SAC backbone to **Stable-Baselines3**
+> and implemented the ensemble + rollout strategies ourselves. Phases below
+> reflect that.
+
 ## Phase 1 — Environment & dependency bring-up (Colab)  🔴
 The first time anything runs on Colab. Nothing downstream works until this passes.
 
-- [ ] 🔴 **Dependency import chain.** Run `setup_colab.sh`; confirm
-  `import mbrl`, `mujoco`, `gymnasium` all import together. mbrl-lib is
-  version-pinned — if it fails, install mbrl-lib from source and pin versions in
-  `requirements.txt`. *Why: mbrl-lib/gym version drift is the single most likely
-  breakage.*
+- [x] 🔴 **Dependency import chain.** Whole stack (SB3 + mujoco + gymnasium +
+  torch) installs on Colab Python 3.12 + numpy 2 via `requirements.txt`. *(Do NOT
+  pin numpy<2 — it breaks the gymnasium ABI.)*
 - [ ] 🔴 **Private clone via token.** Verify the `getpass`/Secrets → `setup_colab.sh`
   clone works and the token never lands in git config or disk.
 - [ ] 🔴 **Headless MuJoCo render.** Confirm `MUJOCO_GL=egl` lets `env.render()`
@@ -35,20 +38,20 @@ The first time anything runs on Colab. Nothing downstream works until this passe
 
 ---
 
-## Phase 2 — mbrl-lib binding verification  🔴🟠
-The algorithm wrappers follow mbrl-lib's documented API but must be confirmed
-against the installed version. Fix all bindings in the named files.
+## Phase 2 — SB3 backbone verification  🔴🟠
+Confirm the Stable-Baselines3 manual-training calls against the installed version.
 
-- [ ] 🔴 `models/ensemble.py`: confirm `GaussianMLP`, `OneDTransitionRewardModel`,
-  `ModelTrainer`, `get_basic_buffer_iterators` signatures; confirm
-  `member_gaussians` returns per-member `(mean, logvar)` with the ensemble axis.
-  *Why: GJS depends on getting ALL members' Gaussians, not a sampled one.*
-- [ ] 🔴 `algorithms/sac.py`: confirm `pytorch_sac_pranz24.SAC` constructor args
-  and `update_parameters` return signature; confirm `select_action` / checkpoint API.
-- [ ] 🔴 `training/train.py`: confirm `ReplayBuffer` API (`add`, `sample`,
-  `num_stored`) and field names on the sampled batch.
+- [ ] 🔴 `algorithms/sac.py`: confirm `SAC._setup_learn(total_timesteps=0, ...)`
+  signature and that `agent.train(gradient_steps, batch_size)` runs without
+  `.learn()`. Confirm `replay_buffer.add(obs, next_obs, act, reward, done, infos)`
+  ordering and `replay_buffer.size()`.
+- [ ] 🟠 `models/ensemble.py`: confirm `member_gaussians` returns per-member
+  `(means, variances)` with the ensemble axis first. *Why: GJS needs ALL members.*
+  Unit-tested locally for finite, sensible values; re-check on GPU.
 - [ ] 🟠 Decide **known vs learned reward** consistently (current: known analytic
-  reward, `learned_rewards=False`). Keep identical across all four algorithms.
+  reward via `drone_env.known_reward_fn`). Keep identical across all four.
+- [ ] 🟢 Perf: `_store_model_transitions` adds rows one-by-one — vectorize if the
+  rollout round becomes a bottleneck.
 
 ---
 

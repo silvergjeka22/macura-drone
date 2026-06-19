@@ -40,11 +40,19 @@ attributable to the **rollout strategy alone**.
 
 ## 2. Core concepts (as implemented)
 
-- **SAC backbone** — soft actor-critic, identical for all four (built on
-  `mbrl-lib`'s SAC). See [`algorithms/sac.py`](algorithms/sac.py).
-- **Probabilistic ensemble (PE)** — `mbrl-lib` `GaussianMLP`, predicts next-state
-  Gaussians; member disagreement is the uncertainty signal. Log-variances are
-  bounded for numerically stable uncertainty. See [`models/ensemble.py`](models/ensemble.py).
+> **Backbone note:** the original plan was to build on `mbrl-lib`, but it is
+> unmaintained and **not installable on Colab's current Python 3.12** (it forces
+> ancient `omegaconf`/`gym`, incompatible with numpy 2). We therefore build on
+> **Stable-Baselines3** (maintained) for the SAC learner and implement the
+> probabilistic ensemble + all rollout strategies ourselves. The comparison
+> stays fair: all four algorithms share the same SB3 SAC and the same ensemble.
+
+- **SAC backbone** — soft actor-critic, identical for all four (Stable-Baselines3
+  SAC, driven manually for the Dyna loop). See [`algorithms/sac.py`](algorithms/sac.py).
+- **Probabilistic ensemble (PE)** — a PyTorch ensemble of Gaussian MLPs predicting
+  next-state delta Gaussians; member disagreement is the uncertainty signal.
+  Log-variances are bounded for numerically stable uncertainty. See
+  [`models/ensemble.py`](models/ensemble.py).
 - **GJS uncertainty** — geometric Jensen–Shannon divergence between member
   Gaussians (paper Eq. 15–19), closed-form for diagonal covariances. Implemented
   exactly in [`algorithms/macura.py`](algorithms/macura.py) (`compute_gjs`).
@@ -176,9 +184,9 @@ Start with `total_env_steps` small to validate the pipeline, then scale up.
   "fast wall-clock." Checkpoint/resume is built in for this reason.
 - **Fairness is everything.** Shared backbone/ensemble/seeds/eval; one consistent
   exploration and UTD policy. See `tasks.md` for the traps to control.
-- **mbrl-lib version sensitivity.** The `models/ensemble.py`, `algorithms/sac.py`
-  wrappers follow `mbrl-lib`'s documented API; the first Colab task is to confirm
-  the import/signature chain on the installed version.
+- **SB3 version sensitivity.** `algorithms/sac.py` drives Stable-Baselines3 SAC
+  manually (`replay_buffer.add` + `.train`); confirm the `_setup_learn` /
+  `replay_buffer.add` signatures on the installed SB3 version (see tasks.md).
 - **MuJoCo has no built-in drone task** — we adapt the Skydio X2 MJCF; rotor
   aerodynamics are simplified (smoother and easier to learn, which suits a
   method reproduction).
@@ -191,5 +199,6 @@ Start with `total_env_steps` small to validate the pipeline, then scale up.
   Authors' code: <https://github.com/Data-Science-in-Mechanical-Engineering/macura>
 - Janner et al., *MBPO*, NeurIPS 2019. · Pan et al., *M2AC*, 2020. ·
   Haarnoja et al., *SAC*, 2018.
-- `mbrl-lib`: Pineda et al., 2021 — <https://github.com/facebookresearch/mbrl-lib>
+- Stable-Baselines3: Raffin et al., 2021 — <https://github.com/DLR-RM/stable-baselines3>
 - `mujoco_menagerie` (Skydio X2) — <https://github.com/google-deepmind/mujoco_menagerie>
+- (reference only) `mbrl-lib`: Pineda et al., 2021 — <https://github.com/facebookresearch/mbrl-lib>

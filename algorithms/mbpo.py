@@ -50,7 +50,7 @@ def mbpo_rollout(dynamics_model, agent, start_obs: np.ndarray,
         if not alive.any():
             break
         act = np.stack([select_action(agent, o, evaluate=False) for o in obs])
-        next_obs, _ = ens.predict(dynamics_model, obs, act)
+        next_obs = ens.predict(dynamics_model, obs, act)
         rew = reward_fn(obs, act)
         done = done_fn(next_obs)
         if alive.any():

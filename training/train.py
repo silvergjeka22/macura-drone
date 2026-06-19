@@ -1,22 +1,26 @@
-"""Training orchestration — one function per algorithm run, plus evaluation.
+"""Training orchestration — Dyna loop for all four algorithms, plus evaluation.
 
-This wires together the shared SAC backbone, the shared ensemble, and the
-algorithm-specific rollout strategy. The four algorithms share EVERYTHING except
-which rollout function is called (and SAC calls none).
+Backbone: Stable-Baselines3 SAC (shared learner) + our PyTorch probabilistic
+ensemble + our pure-function rollout strategies. The four algorithms share
+EVERYTHING except which rollout function is called (SAC calls none).
 
-Pure-function library. The Colab notebook calls these; nothing runs on import.
+Data flow:
+  * a small numpy `_RealBuffer` holds real transitions  -> trains the ensemble
+    and supplies rollout start states;
+  * the SB3 agent's own replay buffer holds the data the SAC learner trains on
+    (REAL transitions for the SAC baseline; MODEL transitions for MACURA/MBPO/M2AC).
+
+Pure-function library. The Colab notebook calls these.
 
 Public functions:
     train_one(algo_name, cfg, drive_dir, seed) -> run_dict
-    evaluate(agent, env, eval_episodes) -> metrics
-
-`run_dict` contains the time-series needed for every comparison plot:
-    steps, eval_return, eval_failure_rate, and (MACURA) kappa / rollout_length.
+    evaluate(agent, env, eval_episodes)        -> metrics
 """
 
 from __future__ import annotations
 
 import os
+import json
 import numpy as np
 
 from envs import drone_env
@@ -28,15 +32,35 @@ from algorithms import m2ac as m2ac_mod
 
 try:
     import torch
-    import mbrl.util.replay_buffer as mbrl_rb
 except ImportError:
     torch = None
-    mbrl_rb = None
+
+
+# ── a minimal numpy replay buffer for REAL data ───────────────────────────────
+class _RealBuffer:
+    def __init__(self, capacity, obs_dim, act_dim):
+        self.obs = np.zeros((capacity, obs_dim), np.float32)
+        self.act = np.zeros((capacity, act_dim), np.float32)
+        self.next_obs = np.zeros((capacity, obs_dim), np.float32)
+        self.cap, self.size, self.ptr = capacity, 0, 0
+
+    def add(self, obs, act, next_obs):
+        i = self.ptr
+        self.obs[i], self.act[i], self.next_obs[i] = obs, act, next_obs
+        self.ptr = (self.ptr + 1) % self.cap
+        self.size = min(self.size + 1, self.cap)
+
+    def all(self):
+        s = self.size
+        return {"obs": self.obs[:s], "act": self.act[:s], "next_obs": self.next_obs[:s]}
+
+    def sample_obs(self, n):
+        idx = np.random.randint(0, self.size, size=min(n, self.size))
+        return self.obs[idx]
 
 
 # ── evaluation (identical protocol for all algorithms) ────────────────────────
 def evaluate(agent, env, eval_episodes: int) -> dict:
-    """Greedy evaluation. Returns mean return, mean episode length, failure rate."""
     returns, lengths, failures = [], [], []
     for _ in range(eval_episodes):
         obs, _ = env.reset()
@@ -62,95 +86,76 @@ def evaluate(agent, env, eval_episodes: int) -> dict:
 
 # ── a single training run ─────────────────────────────────────────────────────
 def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
-    """Train one algorithm for `experiment.total_env_steps` and log curves.
-
-    algo_name in {'macura', 'mbpo', 'm2ac', 'sac'}.
-    """
+    """Train one algorithm in {'macura','mbpo','m2ac','sac'} and log curves."""
     if torch is None:
-        raise ImportError("torch/mbrl-lib required for training")
-
+        raise ImportError("torch required for training")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     _seed_everything(seed)
 
-    # env (train + eval use separate seeds; eval seeds shared across algos)
     env, obs_dim, act_dim = drone_env.make_env(cfg["env"], seed=seed)
     eval_env, _, _ = drone_env.make_env(cfg["env"], seed=cfg["experiment"]["eval_seeds"][0])
-
     reward_fn = drone_env.known_reward_fn(cfg["env"])
     done_fn = drone_env.termination_fn(cfg["env"])
 
-    # shared components
-    agent = sac_mod.build_sac(obs_dim, act_dim, cfg["sac"], device)
     model_based = algo_name in ("macura", "mbpo", "m2ac")
-    dynamics_model = (
-        ens.build_ensemble(cfg["ensemble"], obs_dim, act_dim, device)
-        if model_based else None
-    )
+    buf_cap = cfg["rollout"]["model_buffer_capacity"] if model_based else 1_000_000
+    sac_cfg = {**cfg["sac"], "buffer_size": buf_cap}
+    agent = sac_mod.build_sac(obs_dim, act_dim, sac_cfg, device, seed)
+    dynamics_model = ens.build_ensemble(cfg["ensemble"], obs_dim, act_dim, device) if model_based else None
 
-    # buffers
-    env_buffer = mbrl_rb.ReplayBuffer(cfg["experiment"]["total_env_steps"], (obs_dim,), (act_dim,))
-    model_buffer = (
-        mbrl_rb.ReplayBuffer(cfg["rollout"]["model_buffer_capacity"], (obs_dim,), (act_dim,))
-        if model_based else None
-    )
-    train_buffer = model_buffer if model_based else env_buffer
+    total_steps = cfg["experiment"]["total_env_steps"]
+    real_buffer = _RealBuffer(total_steps, obs_dim, act_dim)
+
+    warmup = cfg["experiment"]["warmup_random_steps"]
+    eval_every = cfg["experiment"]["eval_every_steps"]
+    rollout_freq = cfg["rollout"]["freq_steps"]
+    num_rollouts = cfg["rollout"]["num_rollouts"]
+    g_max = cfg["sac"]["gradient_steps_max"]
+    batch = cfg["sac"]["batch_size"]
 
     kappa_state: dict = {}
     log = _empty_log()
 
-    total_steps = cfg["experiment"]["total_env_steps"]
-    warmup = cfg["experiment"]["warmup_random_steps"]
-    eval_every = cfg["experiment"]["eval_every_steps"]
-    rollout_freq = cfg["rollout"]["freq_steps"]
-    g_max = cfg["sac"]["gradient_steps_max"]
-
-    obs, _ = env.reset()
+    obs, _ = env.reset(seed=seed)
     for step in range(total_steps):
         # --- act in the real environment ---
-        if step < warmup:
-            act = env.action_space.sample()
-        else:
-            act = _explore(agent, obs, cfg["exploration"])
+        act = env.action_space.sample() if step < warmup else _explore(agent, obs, cfg["exploration"])
         next_obs, rew, terminated, truncated, info = env.step(act)
-        env_buffer.add(obs, act, next_obs, rew, terminated)
+        real_buffer.add(obs, act, next_obs)
+        if not model_based:
+            sac_mod.add_transition(agent, obs, act, next_obs, rew, terminated)
         obs = next_obs if not (terminated or truncated) else env.reset()[0]
-
         if step < warmup:
             continue
 
-        # --- model-based machinery ---
         num_updates = g_max
-        if model_based and step % cfg["ensemble"]["train_epochs_per_round"] == 0:
-            ens.train_ensemble(dynamics_model, env_buffer, cfg["ensemble"])
 
-        if model_based and step % rollout_freq == 0:
-            start = _sample_starts(env_buffer, cfg["rollout"]["num_rollouts"])
+        # --- model-based: retrain ensemble + generate fresh rollouts ---
+        if model_based and step % rollout_freq == 0 and real_buffer.size >= max(num_rollouts, batch):
+            ens.train_ensemble(dynamics_model, real_buffer.all(), cfg["ensemble"])
+            start = real_buffer.sample_obs(num_rollouts)
             if algo_name == "macura":
                 trans, diag = macura_mod.macura_rollout(
-                    dynamics_model, agent, start, reward_fn, done_fn, kappa_state, cfg
-                )
+                    dynamics_model, agent, start, reward_fn, done_fn, kappa_state, cfg)
                 num_updates = macura_mod.gradient_steps(
-                    model_buffer.num_stored, cfg["rollout"]["model_buffer_capacity"],
-                    g_max, cfg["rollout"]["macura"]["adaptive_gradient_steps"],
-                )
+                    agent.replay_buffer.size(), buf_cap, g_max,
+                    cfg["rollout"]["macura"]["adaptive_gradient_steps"])
                 log["kappa"].append((step, diag["kappa"]))
                 log["rollout_length"].append((step, diag["mean_rollout_length"]))
             elif algo_name == "mbpo":
                 trans, diag = mbpo_mod.mbpo_rollout(
-                    dynamics_model, agent, start, reward_fn, done_fn, step, cfg
-                )
+                    dynamics_model, agent, start, reward_fn, done_fn, step, cfg)
                 num_updates = cfg["rollout"]["mbpo"]["fixed_gradient_steps"]
                 log["rollout_length"].append((step, diag["rollout_length"]))
             else:  # m2ac
                 trans, diag = m2ac_mod.m2ac_rollout(
-                    dynamics_model, agent, start, reward_fn, done_fn, cfg
-                )
+                    dynamics_model, agent, start, reward_fn, done_fn, cfg)
                 num_updates = cfg["rollout"]["m2ac"]["fixed_gradient_steps"]
-            _store_transitions(model_buffer, trans)
+            _store_model_transitions(agent, trans)
 
-        # --- SAC updates (from model buffer if model-based, else env buffer) ---
-        if train_buffer.num_stored >= cfg["sac"]["batch_size"]:
-            sac_mod.sac_update(agent, train_buffer, num_updates, cfg["sac"])
+        # --- SAC updates ---
+        if agent.replay_buffer.size() >= batch:
+            sac_mod.sac_update(agent, num_updates, batch)
 
         # --- periodic evaluation ---
         if step % eval_every == 0:
@@ -159,7 +164,8 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
             log["eval_return"].append(m["eval_return"])
             log["eval_return_std"].append(m["eval_return_std"])
             log["eval_failure_rate"].append(m["eval_failure_rate"])
-            _save_checkpoint(agent, drive_dir, algo_name, seed, step)
+            print(f"[{algo_name} seed{seed}] step {step}  return {m['eval_return']:.1f}"
+                  f"  fail {m['eval_failure_rate']:.2f}")
 
     run = {"algo": algo_name, "seed": seed, **log}
     _save_run(run, drive_dir, algo_name, seed)
@@ -170,10 +176,8 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
 
 # ── small internals ───────────────────────────────────────────────────────────
 def _empty_log():
-    return {
-        "steps": [], "eval_return": [], "eval_return_std": [],
-        "eval_failure_rate": [], "kappa": [], "rollout_length": [],
-    }
+    return {"steps": [], "eval_return": [], "eval_return_std": [],
+            "eval_failure_rate": [], "kappa": [], "rollout_length": []}
 
 
 def _explore(agent, obs, expl_cfg):
@@ -181,21 +185,14 @@ def _explore(agent, obs, expl_cfg):
     act = sac_mod.select_action(agent, obs, evaluate=False)
     if expl_cfg["type"] == "deterministic":
         return act
-    # white/pink noise share the same per-step scale; pink adds temporal
-    # correlation (implemented as a simple AR(1) proxy here for portability).
     noise = np.random.normal(0.0, expl_cfg["scale"], size=np.shape(act))
     return np.clip(act + noise, -1.0, 1.0)
 
 
-def _sample_starts(buffer, num):
-    batch = buffer.sample(num)
-    return np.asarray(batch.obs)
-
-
-def _store_transitions(buffer, transitions):
+def _store_model_transitions(agent, transitions):
     for (obs, act, rew, next_obs, done) in transitions:
         for i in range(len(obs)):
-            buffer.add(obs[i], act[i], next_obs[i], float(rew[i]), bool(done[i]))
+            sac_mod.add_transition(agent, obs[i], act[i], next_obs[i], float(rew[i]), bool(done[i]))
 
 
 def _seed_everything(seed):
@@ -204,17 +201,7 @@ def _seed_everything(seed):
         torch.manual_seed(seed)
 
 
-def _save_checkpoint(agent, drive_dir, algo, seed, step):
-    path = os.path.join(drive_dir, "checkpoints", f"{algo}_seed{seed}")
-    os.makedirs(path, exist_ok=True)
-    try:
-        agent.save_checkpoint(ckpt_path=os.path.join(path, f"step{step}.pt"))
-    except Exception:
-        pass  # checkpoint API varies; logs/plots are the primary deliverable
-
-
 def _save_run(run, drive_dir, algo, seed):
-    import json
     path = os.path.join(drive_dir, "logs")
     os.makedirs(path, exist_ok=True)
     with open(os.path.join(path, f"{algo}_seed{seed}.json"), "w") as f:
