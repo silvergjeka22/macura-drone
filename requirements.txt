@@ -1,0 +1,35 @@
+# ── macura-drone requirements ────────────────────────────────────────────────
+# Targeted at Google Colab (Python 3.10/3.11, CUDA GPU).
+#
+# IMPORTANT (version sensitivity): mbrl-lib and the authors' MACURA code are
+# pinned to specific gym / hydra / torch versions. The versions below are a
+# known-good starting point, but the FIRST Colab task is to confirm the import
+# chain works end-to-end (see tasks.md → "Environment & dependency bring-up").
+# Keep this file as the single source of truth for dependencies.
+
+# --- core scientific stack -------------------------------------------------
+numpy>=1.23,<2.0
+scipy>=1.10
+matplotlib>=3.7
+pyyaml>=6.0
+
+# --- deep learning ---------------------------------------------------------
+torch>=2.1            # Colab usually ships a compatible CUDA build already
+omegaconf>=2.3        # config objects used by mbrl-lib
+hydra-core>=1.3       # mbrl-lib uses hydra for config composition
+
+# --- simulation ------------------------------------------------------------
+mujoco>=3.1           # MuJoCo physics (loads the Skydio X2 MJCF)
+gymnasium>=0.29       # env API for our drone task
+imageio>=2.31         # save rollout videos / frames for the study plots
+imageio-ffmpeg>=0.4   # mp4 encoding of rollouts
+
+# --- model-based RL backbone ----------------------------------------------
+# mbrl-lib provides: GaussianMLP probabilistic ensemble, SAC agent, MBPO loop.
+# We build MACURA / MBPO / M2AC / SAC on top of it for algorithmic fairness.
+# If the PyPI release lags, install from source in setup_colab.sh instead.
+mbrl-lib>=0.2.0
+
+# --- experiment bookkeeping (optional but handy) ---------------------------
+tqdm>=4.65
+pandas>=2.0           # tidy run logs for the comparison plots

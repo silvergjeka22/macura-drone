@@ -1,0 +1,1 @@
+"""macura-drone package."""
