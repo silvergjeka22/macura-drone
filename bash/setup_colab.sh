@@ -78,8 +78,36 @@ else
 fi
 
 # ── 4. install python dependencies ───────────────────────────────────────────
-echo "[4/5] installing requirements"
+# 4a. core stack (always installs on Colab Python 3.11; enables notebook Part 1)
+echo "[4a/5] installing core requirements"
 pip install -q -r "${REPO_DIR}/requirements.txt"
+
+# 4b. mbrl-lib RL backbone (needed for Part 2 / training only).
+# PyPI mbrl-lib predates Python 3.11, so we install it from source. Prefer the
+# authors' cloned repo (it IS an mbrl-lib codebase); fall back to FB source.
+# This step must NOT abort the script if it struggles — Part 1 stays runnable.
+echo "[4b/5] installing mbrl-lib backbone (from source)"
+set +e
+MBRL_OK=0
+if [[ -f "${WORKSPACE}/macura_reference/setup.py" ]] || \
+   [[ -f "${WORKSPACE}/macura_reference/pyproject.toml" ]]; then
+  echo "      -> editable install of authors' repo (${WORKSPACE}/macura_reference)"
+  pip install -q -e "${WORKSPACE}/macura_reference" && MBRL_OK=1
+fi
+if [[ "${MBRL_OK}" -eq 0 ]]; then
+  echo "      -> falling back to Facebook mbrl-lib source"
+  pip install -q "git+https://github.com/facebookresearch/mbrl-lib.git" && MBRL_OK=1
+fi
+if python -c "import mbrl" 2>/dev/null; then
+  echo "      mbrl import OK"
+  MBRL_OK=1
+fi
+set -e
+if [[ "${MBRL_OK}" -eq 0 ]]; then
+  echo "      WARNING: mbrl-lib not installed. Notebook Part 1 (env study) still"
+  echo "      works. For Part 2 (training), see tasks.md Phase 1/2 — you may need"
+  echo "      a Python 3.10 runtime (condacolab) or version-pinned deps."
+fi
 
 # ── 5. create Drive results folders ──────────────────────────────────────────
 echo "[5/5] creating Drive results folders"

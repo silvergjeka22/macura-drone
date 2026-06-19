@@ -25,10 +25,15 @@ imageio>=2.31         # save rollout videos / frames for the study plots
 imageio-ffmpeg>=0.4   # mp4 encoding of rollouts
 
 # --- model-based RL backbone ----------------------------------------------
-# mbrl-lib provides: GaussianMLP probabilistic ensemble, SAC agent, MBPO loop.
-# We build MACURA / MBPO / M2AC / SAC on top of it for algorithmic fairness.
-# If the PyPI release lags, install from source in setup_colab.sh instead.
-mbrl-lib>=0.2.0
+# NOTE: mbrl-lib is NOT installed here. Its PyPI release predates Python 3.11
+# (Colab's current runtime) and pins old numpy/gym, so `pip install mbrl-lib`
+# fails with "No matching distribution". It is installed separately by
+# setup_colab.sh (step 4b), preferring the authors' cloned repo (which is an
+# mbrl-lib codebase) and falling back to the Facebook source.
+#
+# Everything ABOVE this line is the "core" stack: it installs cleanly on
+# Python 3.11 and is enough to run Part 1 of the notebook (env study + plots)
+# even if the mbrl-lib install needs manual attention.
 
 # --- experiment bookkeeping (optional but handy) ---------------------------
 tqdm>=4.65
