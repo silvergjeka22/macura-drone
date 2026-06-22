@@ -228,16 +228,180 @@ class DroneHoverEnv(gym.Env):
             self._renderer = None
 
 
+# ── PyBullet backend (gym-pybullet-drones) ────────────────────────────────────
+class PyBulletDroneHoverEnv(gym.Env):
+    """Same hover task as DroneHoverEnv, but on PyBullet via gym-pybullet-drones.
+
+    Deliberately exposes the IDENTICAL 13-dim observation and the SAME dense
+    reward / termination as the MuJoCo env, so the ONLY difference between the two
+    backends is the physics engine — exactly the cross-simulator comparison.
+
+    Built on the low-level `CtrlAviary` (direct per-rotor RPM control); we read the
+    drone state via `_getDroneStateVector` (a stable API across versions) and
+    compute our own observation/reward/termination on top.
+    """
+
+    metadata = {"render_modes": ["rgb_array"]}
+
+    def __init__(self, cfg: dict, seed: int = 0, render: bool = False):
+        super().__init__()
+        CtrlAviary, DroneModel, Physics = _import_pybullet_drones()
+        self.cfg = cfg
+        self.target = np.asarray(cfg["target_position"], dtype=np.float64)
+        self.action_repeat = int(cfg.get("action_repeat", 1))
+        self.max_episode_steps = int(cfg.get("max_episode_steps", 250))
+        pyb = cfg.get("pybullet", {})
+        self.action_scale = float(pyb.get("action_scale", 0.1))
+        self._rng = np.random.default_rng(seed)
+        self._render = render
+        self._reward_fn = known_reward_fn(cfg)
+        self._done_fn = termination_fn(cfg)
+
+        self.base = CtrlAviary(
+            drone_model=DroneModel.CF2X,
+            num_drones=1,
+            initial_xyzs=self._init_xyz(),
+            physics=Physics.PYB,
+            pyb_freq=int(pyb.get("pyb_freq", 240)),
+            ctrl_freq=int(pyb.get("ctrl_freq", 60)),
+            gui=False,
+        )
+        self.HOVER_RPM = float(self.base.HOVER_RPM)
+        self.MAX_RPM = float(self.base.MAX_RPM)
+        self.client = getattr(self.base, "CLIENT", 0)
+
+        self.observation_space = spaces.Box(-np.inf, np.inf, (13,), np.float32)
+        self.action_space = spaces.Box(-1.0, 1.0, (4,), np.float32)
+        self._step_count = 0
+
+    def _current_target(self):
+        return self.target            # hover target (track not implemented on PyBullet)
+
+    def _init_xyz(self):
+        c = self.cfg
+        pos = self.target + self._rng.uniform(
+            -c["init_pos_noise"], c["init_pos_noise"], size=3)
+        return np.array([pos], dtype=np.float64)
+
+    def _state(self):
+        return np.asarray(self.base._getDroneStateVector(0))
+
+    def _get_obs(self):
+        s = self._state()
+        pos = s[0:3]
+        quat_xyzw = s[3:7]                       # PyBullet order (x, y, z, w)
+        quat_wxyz = np.array([quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]])
+        linvel = s[10:13]
+        angvel = s[13:16]
+        return np.concatenate([pos - self.target, quat_wxyz, linvel, angvel]).astype(np.float32)
+
+    def reset(self, *, seed=None, options=None):
+        if seed is not None:
+            self._rng = np.random.default_rng(seed)
+        self.base.INIT_XYZS = self._init_xyz()
+        try:
+            self.base.reset(seed=seed)
+        except TypeError:
+            self.base.reset()
+        self._step_count = 0
+        return self._get_obs(), {}
+
+    def step(self, action):
+        a = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)
+        rpm = np.clip(self.HOVER_RPM * (1.0 + self.action_scale * a),
+                      0.0, self.MAX_RPM).reshape(1, 4)
+        for _ in range(self.action_repeat):
+            self.base.step(rpm)
+        self._step_count += 1
+        obs = self._get_obs()
+        reward = float(self._reward_fn(obs[None], a[None])[0])
+        terminated = bool(self._done_fn(obs[None])[0])
+        truncated = self._step_count >= self.max_episode_steps
+        info = {
+            "tilt": tilt_angle(obs[3:7]),
+            "pos_error": float(np.linalg.norm(obs[0:3])),
+            "failure": bool(terminated),
+        }
+        return obs, reward, terminated, truncated, info
+
+    def render(self):
+        """Headless RGB frame via the PyBullet camera (DIRECT client)."""
+        import pybullet as p
+        w, h = 640, 480
+        view = p.computeViewMatrixFromYawPitchRoll(
+            cameraTargetPosition=self.target, distance=2.0, yaw=45, pitch=-30,
+            roll=0, upAxisIndex=2, physicsClientId=self.client)
+        proj = p.computeProjectionMatrixFOV(
+            fov=60, aspect=w / h, nearVal=0.1, farVal=100.0, physicsClientId=self.client)
+        _, _, rgb, _, _ = p.getCameraImage(
+            w, h, view, proj, physicsClientId=self.client)
+        return np.asarray(rgb, dtype=np.uint8)[:, :, :3]
+
+    def close(self):
+        try:
+            self.base.close()
+        except Exception:
+            pass
+
+
+class NoisyObsWrapper(gym.Wrapper):
+    """Adds Gaussian sensor noise to observations and/or action noise — used for
+    the robustness/noise study (Part 3). Backend-agnostic (works on either env)."""
+
+    def __init__(self, env, obs_noise_std=0.0, action_noise_std=0.0, seed=0):
+        super().__init__(env)
+        self.obs_noise_std = float(obs_noise_std)
+        self.action_noise_std = float(action_noise_std)
+        self._rng = np.random.default_rng(seed)
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        return self._noisy(obs), info
+
+    def step(self, action):
+        if self.action_noise_std > 0:
+            action = np.clip(action + self._rng.normal(0, self.action_noise_std,
+                                                       size=np.shape(action)), -1, 1)
+        obs, r, terminated, truncated, info = self.env.step(action)
+        return self._noisy(obs), r, terminated, truncated, info
+
+    def _noisy(self, obs):
+        if self.obs_noise_std > 0:
+            obs = obs + self._rng.normal(0, self.obs_noise_std, size=np.shape(obs))
+        return obs.astype(np.float32)
+
+
+def _import_pybullet_drones():
+    """Import gym-pybullet-drones pieces, tolerant of module-path differences."""
+    from gym_pybullet_drones.utils.enums import DroneModel, Physics
+    try:
+        from gym_pybullet_drones.envs.CtrlAviary import CtrlAviary
+    except ImportError:
+        from gym_pybullet_drones.envs import CtrlAviary
+    return CtrlAviary, DroneModel, Physics
+
+
 # ── public builders (function-only contract) ──────────────────────────────────
 def make_env(cfg: dict, seed: int = 0, render: bool = False):
     """Build the drone env. Returns (env, obs_dim, act_dim).
 
-    `cfg` is the `env:` sub-config from configs/macura_drone.yaml.
+    `cfg` is the `env:` sub-config. `cfg['backend']` selects the physics engine:
+    'pybullet' (gym-pybullet-drones) or 'mujoco' (Skydio X2). Both expose the
+    same 13-dim observation and dense reward, so only the physics differs.
+    Optional `cfg['noise']` wraps the env with sensor/action noise (Part 3).
     """
-    env = DroneHoverEnv(cfg, seed=seed, render=render)
-    obs_dim = env.observation_space.shape[0]
-    act_dim = env.action_space.shape[0]
-    return env, obs_dim, act_dim
+    backend = cfg.get("backend", "mujoco")
+    if backend == "pybullet":
+        env = PyBulletDroneHoverEnv(cfg, seed=seed, render=render)
+    else:
+        env = DroneHoverEnv(cfg, seed=seed, render=render)
+
+    noise = cfg.get("noise", {})
+    if noise.get("enabled", False):
+        env = NoisyObsWrapper(
+            env, obs_noise_std=noise.get("obs_noise_std", 0.0),
+            action_noise_std=noise.get("action_noise_std", 0.0), seed=seed)
+    return env, env.observation_space.shape[0], env.action_space.shape[0]
 
 
 def known_reward_fn(cfg: dict):

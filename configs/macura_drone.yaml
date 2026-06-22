@@ -16,11 +16,23 @@ experiment:
 
 # ── environment ───────────────────────────────────────────────────────────────
 env:
+  backend: pybullet           # 'pybullet' (gym-pybullet-drones) | 'mujoco' (Skydio X2)
   task: hover                 # 'hover' | 'track' (track = moving reference)
   mjcf_scene: /content/mujoco_menagerie/skydio_x2/scene.xml
-  target_position: [0.0, 0.0, 1.0]   # hover at 1 m
+  target_position: [0.0, 0.0, 1.0]   # hover / takeoff target at 1 m
   action_repeat: 3            # frame-skip: fewer agent steps to cover the task
   max_episode_steps: 250      # short fixed horizon (after action_repeat)
+  # --- PyBullet (gym-pybullet-drones) backend ---
+  pybullet:
+    drone_model: cf2x         # Crazyflie 2.x (X config)
+    pyb_freq: 240             # physics step frequency (Hz)
+    ctrl_freq: 60             # control frequency (Hz)
+    action_scale: 0.1         # action a in [-1,1] -> rpm = HOVER_RPM*(1 + scale*a)
+  # --- robustness / noise study (Part 3); enabled=false by default ---
+  noise:
+    enabled: false
+    obs_noise_std: 0.0        # Gaussian sensor noise added to observations
+    action_noise_std: 0.0     # Gaussian noise added to actions (delay/jitter proxy)
   # --- near-hover initialization (key low-step lever) ---
   init_pos_noise: 0.10        # m, uniform box around target
   init_ang_noise: 0.10        # rad, small attitude perturbation

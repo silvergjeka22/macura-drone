@@ -123,16 +123,18 @@ def render_frame(env, save_path=None):
 
 
 def plot_action_response(env, save_path=None):
-    """Sweep total thrust and record resulting vertical acceleration proxy —
-    a sanity check that actions move the drone as expected."""
+    """Sweep total thrust and record resulting change in altitude — a sanity
+    check that actions move the drone as expected. Backend-agnostic: reads the
+    altitude from the observation (obs[2] = z - target_z), so it works on both
+    the MuJoCo and PyBullet envs."""
     levels = np.linspace(-1, 1, 9)
     final_z = []
     for lv in levels:
-        env.reset(seed=0)
-        z0 = env.data.qpos[2]
+        obs, _ = env.reset(seed=0)
+        z0 = float(obs[2])
         for _ in range(10):
-            env.step(np.full(env.action_space.shape[0], lv, dtype=np.float32))
-        final_z.append(float(env.data.qpos[2] - z0))
+            obs, *_ = env.step(np.full(env.action_space.shape[0], lv, dtype=np.float32))
+        final_z.append(float(obs[2]) - z0)
     fig, ax = plt.subplots(figsize=(6, 4))
     ax.plot(levels, final_z, "o-")
     ax.set_xlabel("normalized thrust command"); ax.set_ylabel("Δz after 10 steps (m)")
