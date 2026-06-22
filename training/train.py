@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import json
+import time
 import numpy as np
 
 from envs import drone_env
@@ -115,6 +116,7 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
 
     kappa_state: dict = {}
     log = _empty_log()
+    t0 = time.time()
 
     obs, _ = env.reset(seed=seed)
     for step in range(total_steps):
@@ -142,6 +144,8 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
                     cfg["rollout"]["macura"]["adaptive_gradient_steps"])
                 log["kappa"].append((step, diag["kappa"]))
                 log["rollout_length"].append((step, diag["mean_rollout_length"]))
+                log["gjs"].append((step, diag["base_uncertainty"]))
+                log["rollout_length_samples"].append((step, diag["lengths"]))
             elif algo_name == "mbpo":
                 trans, diag = mbpo_mod.mbpo_rollout(
                     dynamics_model, agent, start, reward_fn, done_fn, step, cfg)
@@ -164,10 +168,12 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
             log["eval_return"].append(m["eval_return"])
             log["eval_return_std"].append(m["eval_return_std"])
             log["eval_failure_rate"].append(m["eval_failure_rate"])
+            log["wall_clock"].append((step, time.time() - t0))
             print(f"[{algo_name} seed{seed}] step {step}  return {m['eval_return']:.1f}"
                   f"  fail {m['eval_failure_rate']:.2f}")
 
-    run = {"algo": algo_name, "seed": seed, **log}
+    ckpt = _save_checkpoint(agent, drive_dir, algo_name, seed)
+    run = {"algo": algo_name, "seed": seed, "checkpoint": ckpt, **log}
     _save_run(run, drive_dir, algo_name, seed)
     env.close()
     eval_env.close()
@@ -177,7 +183,8 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
 # ── small internals ───────────────────────────────────────────────────────────
 def _empty_log():
     return {"steps": [], "eval_return": [], "eval_return_std": [],
-            "eval_failure_rate": [], "kappa": [], "rollout_length": []}
+            "eval_failure_rate": [], "kappa": [], "rollout_length": [],
+            "gjs": [], "rollout_length_samples": [], "wall_clock": []}
 
 
 def _explore(agent, obs, expl_cfg):
@@ -199,6 +206,17 @@ def _seed_everything(seed):
     np.random.seed(seed)
     if torch is not None:
         torch.manual_seed(seed)
+
+
+def _save_checkpoint(agent, drive_dir, algo, seed):
+    """Save the SB3 agent so the notebook can reload it for video rollouts."""
+    path = os.path.join(drive_dir, "checkpoints", f"{algo}_seed{seed}")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    try:
+        agent.save(path)
+        return path + ".zip"
+    except Exception:
+        return None
 
 
 def _save_run(run, drive_dir, algo, seed):

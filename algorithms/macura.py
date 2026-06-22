@@ -111,6 +111,7 @@ def macura_rollout(dynamics_model, agent, start_obs: np.ndarray,
     lengths = np.zeros(obs.shape[0], dtype=int)
     transitions = []
     kappa = kappa_state.get("kappa", np.inf)
+    base_u = 0.0  # ζ-quantile of first-step uncertainties (logged for plots 5.5)
 
     from algorithms.sac import select_action
 
@@ -124,6 +125,7 @@ def macura_rollout(dynamics_model, agent, start_obs: np.ndarray,
         u = compute_gjs(means, variances)
 
         if t == 0:
+            base_u = float(np.quantile(u, zeta))
             kappa = update_kappa(kappa_state, u, zeta, xi)
 
         next_obs = ens.predict(dynamics_model, obs, act)
@@ -147,6 +149,8 @@ def macura_rollout(dynamics_model, agent, start_obs: np.ndarray,
         "kappa": float(kappa),
         "mean_rollout_length": float(lengths.mean()),
         "max_rollout_length": int(lengths.max()) if len(lengths) else 0,
+        "base_uncertainty": base_u,        # ζ-quantile first-step GJS (plot 5.5)
+        "lengths": lengths.tolist(),       # per-rollout length distribution (5.6)
     }
     return transitions, diag
 
