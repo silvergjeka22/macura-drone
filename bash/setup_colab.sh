@@ -81,10 +81,24 @@ else
 fi
 
 # ── 4. install python dependencies ───────────────────────────────────────────
-# Single clean install: the whole stack (incl. Stable-Baselines3) is compatible
-# with Colab's Python 3.12 + numpy 2.x. No mbrl-lib, no version gymnastics.
+# Core stack (SB3 + torch + pybullet + mujoco + gymnasium); Python-3.12 friendly.
 echo "[4/5] installing requirements (core + SB3 backbone)"
 pip install -q -r "${REPO_DIR}/requirements.txt"
+
+# 4b. gym-pybullet-drones is NOT on PyPI -> install from GitHub source.
+# Non-fatal: if it fails, the rest of the stack still works and we print guidance
+# (the MuJoCo backend remains usable for the cross-engine comparison).
+echo "[4b/5] installing gym-pybullet-drones from source"
+set +e
+pip install -q "git+https://github.com/utiasDSL/gym-pybullet-drones.git"
+if python -c "import gym_pybullet_drones" 2>/dev/null; then
+  echo "      gym-pybullet-drones import OK"
+else
+  echo "      WARNING: gym-pybullet-drones did not install/import. Options:"
+  echo "        - try a pinned release, e.g. add @v1.0.0 to the git URL above"
+  echo "        - or set env.backend: mujoco in the config to use the MuJoCo backend"
+fi
+set -e
 
 # ── 5. create Drive results folders ──────────────────────────────────────────
 echo "[5/5] creating Drive results folders"

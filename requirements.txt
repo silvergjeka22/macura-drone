@@ -22,10 +22,11 @@ torch>=2.1            # Colab ships a compatible CUDA build
 
 # --- simulation ------------------------------------------------------------
 # PRIMARY backend: PyBullet via gym-pybullet-drones (this notebook benchmarks it
-# against the reference paper's MuJoCo results). MuJoCo is kept as the optional
-# 'mujoco' backend for the cross-engine comparison.
+# against the reference paper's MuJoCo results). MuJoCo is the optional backend.
+#
+# NOTE: gym-pybullet-drones is NOT on PyPI — it is installed from GitHub source
+# by setup_colab.sh (step 4b). Do NOT add it here or `pip install -r` aborts.
 pybullet>=3.2              # PyBullet physics engine
-gym-pybullet-drones>=2.0   # quadrotor envs (CtrlAviary / HoverAviary)
 mujoco>=3.1                # optional MuJoCo backend (Skydio X2)
 gymnasium>=0.29            # env API for our drone task
 imageio>=2.31              # save rollout frames / videos
