@@ -113,12 +113,12 @@ def macura_rollout(dynamics_model, agent, start_obs: np.ndarray,
     kappa = kappa_state.get("kappa", np.inf)
     base_u = 0.0  # ζ-quantile of first-step uncertainties (logged for plots 5.5)
 
-    from algorithms.sac import select_action
+    from algorithms.sac import select_actions
 
     for t in range(t_max):
         if not alive.any():
             break
-        act = np.stack([select_action(agent, o, evaluate=False) for o in obs])
+        act = select_actions(agent, obs, evaluate=False)   # batched (vectorized)
 
         # epistemic uncertainty BEFORE committing the transition
         means, variances = ens.member_gaussians(dynamics_model, obs, act)

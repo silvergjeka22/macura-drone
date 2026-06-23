@@ -30,7 +30,7 @@ def m2ac_rollout(dynamics_model, agent, start_obs: np.ndarray,
     mask_fraction = float(mcfg["mask_fraction"])      # fraction KEPT
     penalty = float(mcfg["uncertainty_penalty"])
 
-    from algorithms.sac import select_action
+    from algorithms.sac import select_actions
 
     obs = np.array(start_obs, dtype=np.float32)
     alive = np.ones(obs.shape[0], dtype=bool)
@@ -39,7 +39,7 @@ def m2ac_rollout(dynamics_model, agent, start_obs: np.ndarray,
     for _ in range(t_max):
         if not alive.any():
             break
-        act = np.stack([select_action(agent, o, evaluate=False) for o in obs])
+        act = select_actions(agent, obs, evaluate=False)   # batched (vectorized)
         means, variances = ens.member_gaussians(dynamics_model, obs, act)
         u = compute_gjs(means, variances)
         next_obs = ens.predict(dynamics_model, obs, act)

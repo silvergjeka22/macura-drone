@@ -28,6 +28,9 @@ tqdm>=4.65
 pybullet>=3.2              # PyBullet physics engine
 mujoco>=3.1                # optional MuJoCo backend (Skydio X2)
 gymnasium>=0.29            # env API for our drone task
+# gym-pybullet-drones is installed --no-deps, so list its runtime deps here:
+transforms3d>=0.4
+pillow>=9.0
 imageio>=2.31              # save rollout frames / videos
 imageio-ffmpeg>=0.4        # mp4 encoding
 

@@ -28,6 +28,24 @@ CLONE_REFERENCE_CODE="${CLONE_REFERENCE_CODE:-1}"   # set to 0 to skip authors' 
 REPO_DIR="${WORKSPACE}/${REPO_NAME}"
 MENAGERIE_DIR="${WORKSPACE}/mujoco_menagerie"
 
+# ── timing helpers ───────────────────────────────────────────────────────────
+# SCRIPT_START: wall-clock at script start. STEP_START: reset before each step.
+# step_done "<label>" prints how long the step just took (and cumulative total).
+SCRIPT_START=$(date +%s)
+STEP_START=$SCRIPT_START
+fmt_secs() {  # pretty-print seconds as "Mm Ss"
+  local s=$1
+  printf '%dm %02ds' $(( s / 60 )) $(( s % 60 ))
+}
+step_done() {
+  local now elapsed total
+  now=$(date +%s)
+  elapsed=$(( now - STEP_START ))
+  total=$(( now - SCRIPT_START ))
+  printf '      ⏱  %s took %s   (total %s)\n' "$1" "$(fmt_secs "$elapsed")" "$(fmt_secs "$total")"
+  STEP_START=$now
+}
+
 echo "==================================================================="
 echo " macura-drone Colab setup"
 echo "   workspace : ${WORKSPACE}"
@@ -55,6 +73,7 @@ else
   # scrub any credential that git might have cached in the remote URL
   git -C "${REPO_DIR}" remote set-url origin "https://github.com/${GH_USER}/${REPO_NAME}.git"
 fi
+step_done "[1/5] project repo clone/pull"
 
 # ── 2. clone mujoco_menagerie (public) for the Skydio X2 model ────────────────
 if [[ -d "${MENAGERIE_DIR}/.git" ]]; then
@@ -64,6 +83,7 @@ else
   git clone --depth 1 https://github.com/google-deepmind/mujoco_menagerie.git "${MENAGERIE_DIR}"
 fi
 echo "      Skydio X2 scene: ${MENAGERIE_DIR}/skydio_x2/scene.xml"
+step_done "[2/5] mujoco_menagerie clone"
 
 # ── 3. clone the authors' MACURA reference code (optional) ────────────────────
 if [[ "${CLONE_REFERENCE_CODE}" == "1" ]]; then
@@ -79,11 +99,13 @@ if [[ "${CLONE_REFERENCE_CODE}" == "1" ]]; then
 else
   echo "[3/5] skipping authors' reference code (CLONE_REFERENCE_CODE=0)"
 fi
+step_done "[3/5] reference code clone"
 
 # ── 4. install python dependencies ───────────────────────────────────────────
 # Core stack (SB3 + torch + pybullet + mujoco + gymnasium); Python-3.12 friendly.
 echo "[4/5] installing requirements (core + SB3 backbone)"
 pip install -q -r "${REPO_DIR}/requirements.txt"
+step_done "[4/5] pip install requirements.txt"
 
 # 4b. gym-pybullet-drones is NOT on PyPI -> install from GitHub source.
 # --no-deps is CRITICAL: it stops the package from downgrading Colab's numpy/
@@ -95,6 +117,7 @@ set +e
 pip install -q --no-deps "git+https://github.com/utiasDSL/gym-pybullet-drones.git"
 GPD_OK=$?
 set -e
+step_done "[4b/5] gym-pybullet-drones source build"
 
 # 4c. Repair numpy consistency. Re-installing packages can leave numpy's Python
 # files newer than its compiled .so (-> "_blas_supports_fpe" AttributeError).
@@ -102,6 +125,7 @@ set -e
 # touching anything else.
 echo "[4c/5] repairing numpy consistency"
 pip install -q --force-reinstall --no-deps "numpy>=2.1"
+step_done "[4c/5] numpy repair"
 
 echo "      verifying scientific stack..."
 python - <<'PY' || echo "      WARNING: stack still inconsistent -> Runtime > Restart session, then re-run"
@@ -118,9 +142,10 @@ echo "[5/5] creating Drive results folders"
 for sub in checkpoints videos plots logs; do
   mkdir -p "${DRIVE_ROOT}/${sub}"
 done
+step_done "[5/5] Drive folders"
 
 echo "==================================================================="
-echo " DONE. Paths:"
+echo " DONE in $(fmt_secs $(( $(date +%s) - SCRIPT_START ))).  Paths:"
 echo "   repo            : ${REPO_DIR}"
 echo "   menagerie (X2)  : ${MENAGERIE_DIR}/skydio_x2/scene.xml"
 echo "   drive results   : ${DRIVE_ROOT}"

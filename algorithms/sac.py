@@ -97,3 +97,10 @@ def select_action(agent, obs: np.ndarray, evaluate: bool = False) -> np.ndarray:
     """Mean action (eval) or a sample from the squashed Gaussian (train)."""
     action, _ = agent.predict(np.asarray(obs, np.float32), deterministic=evaluate)
     return action
+
+
+def select_actions(agent, obs_batch: np.ndarray, evaluate: bool = False) -> np.ndarray:
+    """Batched action selection — one SB3 `predict` over (N, obs_dim) instead of N
+    Python calls. Used to vectorize branched model rollouts (big speedup)."""
+    actions, _ = agent.predict(np.asarray(obs_batch, np.float32), deterministic=evaluate)
+    return actions

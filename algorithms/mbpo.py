@@ -40,7 +40,7 @@ def mbpo_rollout(dynamics_model, agent, start_obs: np.ndarray,
     schedule = cfg["rollout"]["mbpo"]["rollout_schedule"]
     horizon = rollout_length(env_step, schedule)
 
-    from algorithms.sac import select_action
+    from algorithms.sac import select_actions
 
     obs = np.array(start_obs, dtype=np.float32)
     alive = np.ones(obs.shape[0], dtype=bool)
@@ -49,7 +49,7 @@ def mbpo_rollout(dynamics_model, agent, start_obs: np.ndarray,
     for _ in range(horizon):
         if not alive.any():
             break
-        act = np.stack([select_action(agent, o, evaluate=False) for o in obs])
+        act = select_actions(agent, obs, evaluate=False)   # batched (vectorized)
         next_obs = ens.predict(dynamics_model, obs, act)
         rew = reward_fn(obs, act)
         done = done_fn(next_obs)

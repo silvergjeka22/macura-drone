@@ -13,8 +13,10 @@ Data flow:
 Pure-function library. The Colab notebook calls these.
 
 Public functions:
-    train_one(algo_name, cfg, drive_dir, seed) -> run_dict
-    evaluate(agent, env, eval_episodes)        -> metrics
+    train_one(algo_name, cfg, drive_dir, seed)  -> run_dict (saves best ckpt only)
+    evaluate(agent, env, eval_episodes)         -> metrics
+    evaluate_best(cfg, drive_dir, device, ...)  -> [{algo, seed, eval_*}]  (loads best)
+    record_best_videos(cfg, drive_dir, ...)     -> {algo_seed: mp4_path}   (loads best)
 """
 
 from __future__ import annotations
@@ -117,6 +119,8 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
     kappa_state: dict = {}
     log = _empty_log()
     t0 = time.time()
+    best_return = -np.inf
+    best_ckpt = None
 
     obs, _ = env.reset(seed=seed)
     for step in range(total_steps):
@@ -161,7 +165,7 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
         if agent.replay_buffer.size() >= batch:
             sac_mod.sac_update(agent, num_updates, batch)
 
-        # --- periodic evaluation ---
+        # --- periodic evaluation (NOT every step) + best-only checkpointing ---
         if step % eval_every == 0:
             m = evaluate(agent, eval_env, cfg["experiment"]["eval_episodes"])
             log["steps"].append(step)
@@ -169,11 +173,17 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
             log["eval_return_std"].append(m["eval_return_std"])
             log["eval_failure_rate"].append(m["eval_failure_rate"])
             log["wall_clock"].append((step, time.time() - t0))
+            improved = m["eval_return"] > best_return
+            if improved:                       # overwrite best checkpoint on Drive
+                best_return = m["eval_return"]
+                best_ckpt = _save_best(agent, drive_dir, algo_name, seed)
             print(f"[{algo_name} seed{seed}] step {step}  return {m['eval_return']:.1f}"
-                  f"  fail {m['eval_failure_rate']:.2f}")
+                  f"  fail {m['eval_failure_rate']:.2f}{'  <- best' if improved else ''}")
 
-    ckpt = _save_checkpoint(agent, drive_dir, algo_name, seed)
-    run = {"algo": algo_name, "seed": seed, "checkpoint": ckpt, **log}
+    if best_ckpt is None:                       # never improved (e.g. no eval): save final
+        best_ckpt = _save_best(agent, drive_dir, algo_name, seed)
+    run = {"algo": algo_name, "seed": seed, "checkpoint": best_ckpt,
+           "best_return": float(best_return), **log}
     _save_run(run, drive_dir, algo_name, seed)
     env.close()
     eval_env.close()
@@ -197,9 +207,42 @@ def _explore(agent, obs, expl_cfg):
 
 
 def _store_model_transitions(agent, transitions):
-    for (obs, act, rew, next_obs, done) in transitions:
+    """Add all imagined transitions to the SB3 replay buffer in ONE vectorized
+    bulk write (was row-by-row — tasks.md Phase 2). Falls back to per-row add if
+    the buffer layout differs on the installed SB3 version (correctness first)."""
+    if not transitions:
+        return
+    obs = np.concatenate([t[0] for t in transitions]).astype(np.float32)
+    act = np.concatenate([t[1] for t in transitions]).astype(np.float32)
+    rew = np.concatenate([t[2] for t in transitions]).astype(np.float32)
+    nxt = np.concatenate([t[3] for t in transitions]).astype(np.float32)
+    done = np.concatenate([t[4] for t in transitions]).astype(np.float32)
+    try:
+        _bulk_add(agent, obs, act, nxt, rew, done)
+    except Exception:
         for i in range(len(obs)):
-            sac_mod.add_transition(agent, obs[i], act[i], next_obs[i], float(rew[i]), bool(done[i]))
+            sac_mod.add_transition(agent, obs[i], act[i], nxt[i], float(rew[i]), bool(done[i]))
+
+
+def _bulk_add(agent, obs, act, next_obs, rew, done):
+    """Vectorized circular-buffer insert into the SB3 ReplayBuffer (n_envs=1)."""
+    rb = agent.replay_buffer
+    n = len(obs)
+    cap = rb.buffer_size
+    idx = (rb.pos + np.arange(n)) % cap
+    rb.observations[idx, 0] = obs
+    if getattr(rb, "optimize_memory_usage", False):
+        rb.observations[(idx + 1) % cap, 0] = next_obs
+    else:
+        rb.next_observations[idx, 0] = next_obs
+    rb.actions[idx, 0] = act
+    rb.rewards[idx, 0] = rew
+    rb.dones[idx, 0] = done
+    if hasattr(rb, "timeouts"):
+        rb.timeouts[idx, 0] = 0.0
+    if rb.pos + n >= cap:
+        rb.full = True
+    rb.pos = (rb.pos + n) % cap
 
 
 def _seed_everything(seed):
@@ -208,9 +251,9 @@ def _seed_everything(seed):
         torch.manual_seed(seed)
 
 
-def _save_checkpoint(agent, drive_dir, algo, seed):
-    """Save the SB3 agent so the notebook can reload it for video rollouts."""
-    path = os.path.join(drive_dir, "checkpoints", f"{algo}_seed{seed}")
+def _save_best(agent, drive_dir, algo, seed):
+    """Overwrite the single best checkpoint on Drive: <algo>_seed<seed>_best.zip."""
+    path = os.path.join(drive_dir, "checkpoints", f"{algo}_seed{seed}_best")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     try:
         agent.save(path)
@@ -224,3 +267,51 @@ def _save_run(run, drive_dir, algo, seed):
     os.makedirs(path, exist_ok=True)
     with open(os.path.join(path, f"{algo}_seed{seed}.json"), "w") as f:
         json.dump(run, f)
+
+
+# ── final-evaluation helpers (load best models from Drive) ────────────────────
+def evaluate_best(cfg: dict, drive_dir: str, device: str = "cuda",
+                  seeds=None, eval_episodes=None) -> list:
+    """Load every <algo>_seed<seed>_best.zip from Drive and evaluate it.
+    Returns a list of {algo, seed, eval_return, ...} dicts."""
+    from stable_baselines3 import SAC
+    seeds = seeds or cfg["experiment"]["seeds"]
+    n = eval_episodes or cfg["experiment"]["eval_episodes"]
+    eval_env, _, _ = drone_env.make_env(cfg["env"], seed=cfg["experiment"]["eval_seeds"][0])
+    out = []
+    for algo in cfg["experiment"]["algorithms"]:
+        for seed in seeds:
+            ck = os.path.join(drive_dir, "checkpoints", f"{algo}_seed{seed}_best.zip")
+            if not os.path.exists(ck):
+                continue
+            agent = SAC.load(ck, device=device)
+            out.append({"algo": algo, "seed": seed, **evaluate(agent, eval_env, n)})
+    eval_env.close()
+    return out
+
+
+def record_best_videos(cfg: dict, drive_dir: str, device: str = "cuda",
+                       seeds=None, num_steps=None) -> dict:
+    """For EVERY algorithm × seed, load the best model and save a deterministic
+    evaluation episode to {DRIVE}/videos/<algo>_seed<seed>.mp4. Returns paths."""
+    from stable_baselines3 import SAC
+    from viz import plots
+    seeds = seeds or cfg["experiment"]["seeds"]
+    num_steps = num_steps or cfg["env"]["max_episode_steps"]
+    renv, _, _ = drone_env.make_env(cfg["env"], seed=999, render=True)
+    paths = {}
+    for algo in cfg["experiment"]["algorithms"]:
+        for seed in seeds:
+            ck = os.path.join(drive_dir, "checkpoints", f"{algo}_seed{seed}_best.zip")
+            if not os.path.exists(ck):
+                print("no best checkpoint:", algo, seed); continue
+            agent = SAC.load(ck, device=device)
+            out = os.path.join(drive_dir, "videos", f"{algo}_seed{seed}.mp4")
+            try:
+                plots.record_policy_video(agent, renv, num_steps=num_steps, save_path=out, fps=30)
+                paths[f"{algo}_seed{seed}"] = out
+                print("saved", out)
+            except Exception as e:
+                print("video failed:", algo, seed, e)
+    renv.close()
+    return paths

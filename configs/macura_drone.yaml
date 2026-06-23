@@ -116,3 +116,19 @@ exploration:
   scale: 0.1
   # NOTE: paper uses pink noise for MACURA but deterministic for MBPO/M2AC.
   # We apply ONE scheme to all four for a clean comparison (see tasks.md).
+
+# ── speed profile ─────────────────────────────────────────────────────────────
+# 'fast' trims the most expensive knobs for quicker runs at modest fidelity cost.
+# The notebook deep-merges this over the base config when the fast profile is on.
+# Values live HERE (single source of truth), not in the notebook.
+profiles:
+  fast:
+    experiment:
+      eval_every_steps: 2000    # evaluate less often (best-checkpoint tracking only)
+    sac:
+      gradient_steps_max: 8     # fewer SAC updates per step (was 20)
+    ensemble:
+      train_epochs_per_round: 8 # fewer ensemble epochs per round (was 20)
+    rollout:
+      num_rollouts: 200         # fewer parallel branched rollouts (was 400)
+      freq_steps: 500           # regenerate model data less often (was 250)
