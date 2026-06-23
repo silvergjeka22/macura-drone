@@ -8,17 +8,16 @@
 # pure-function modules (models/ensemble.py, algorithms/*.py).
 
 # --- core scientific stack -------------------------------------------------
-# DO NOT cap numpy below 2.0 on Colab: gymnasium/opencv/etc. are compiled
-# against numpy 2.x, so pinning <2 breaks the ABI ("numpy.dtype size changed").
-numpy>=1.26
-scipy>=1.10
+# IMPORTANT: do NOT list numpy / scipy / torch here. Colab already ships a
+# self-consistent, CUDA-matched build of these, and re-installing them is what
+# corrupts the numpy/scipy ABI (e.g. "_blas_supports_fpe" / "dtype size
+# changed"). We only install packages that are genuinely missing, and let pip
+# leave the preinstalled scientific stack untouched. numpy consistency is
+# repaired by setup_colab.sh step 4c.
 matplotlib>=3.7
 pyyaml>=6.0
 pandas>=2.0
 tqdm>=4.65
-
-# --- deep learning ---------------------------------------------------------
-torch>=2.1            # Colab ships a compatible CUDA build
 
 # --- simulation ------------------------------------------------------------
 # PRIMARY backend: PyBullet via gym-pybullet-drones (this notebook benchmarks it

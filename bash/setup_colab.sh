@@ -86,19 +86,32 @@ echo "[4/5] installing requirements (core + SB3 backbone)"
 pip install -q -r "${REPO_DIR}/requirements.txt"
 
 # 4b. gym-pybullet-drones is NOT on PyPI -> install from GitHub source.
-# Non-fatal: if it fails, the rest of the stack still works and we print guidance
-# (the MuJoCo backend remains usable for the cross-engine comparison).
-echo "[4b/5] installing gym-pybullet-drones from source"
+# --no-deps is CRITICAL: it stops the package from downgrading Colab's numpy/
+# scipy (which corrupts the scientific-stack ABI). Its runtime deps (numpy,
+# pybullet, gymnasium, matplotlib, pillow) are already present on Colab.
+# Non-fatal: if it fails, the MuJoCo backend still works.
+echo "[4b/5] installing gym-pybullet-drones from source (--no-deps)"
 set +e
-pip install -q "git+https://github.com/utiasDSL/gym-pybullet-drones.git"
-if python -c "import gym_pybullet_drones" 2>/dev/null; then
-  echo "      gym-pybullet-drones import OK"
-else
-  echo "      WARNING: gym-pybullet-drones did not install/import. Options:"
-  echo "        - try a pinned release, e.g. add @v1.0.0 to the git URL above"
-  echo "        - or set env.backend: mujoco in the config to use the MuJoCo backend"
-fi
+pip install -q --no-deps "git+https://github.com/utiasDSL/gym-pybullet-drones.git"
+GPD_OK=$?
 set -e
+
+# 4c. Repair numpy consistency. Re-installing packages can leave numpy's Python
+# files newer than its compiled .so (-> "_blas_supports_fpe" AttributeError).
+# Force a single consistent numpy>=2.1 (has the symbol scipy expects) without
+# touching anything else.
+echo "[4c/5] repairing numpy consistency"
+pip install -q --force-reinstall --no-deps "numpy>=2.1"
+
+echo "      verifying scientific stack..."
+python - <<'PY' || echo "      WARNING: stack still inconsistent -> Runtime > Restart session, then re-run"
+import numpy, scipy, scipy.sparse  # noqa
+print("      numpy", numpy.__version__, "scipy", scipy.__version__, "OK")
+PY
+if ! python -c "import gym_pybullet_drones" 2>/dev/null; then
+  echo "      WARNING: gym-pybullet-drones not importable. Either pin a release"
+  echo "      (@v1.0.0 on the git URL) or set env.backend: mujoco in the config."
+fi
 
 # ── 5. create Drive results folders ──────────────────────────────────────────
 echo "[5/5] creating Drive results folders"
