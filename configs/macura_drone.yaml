@@ -29,8 +29,8 @@ env:
     ctrl_freq: 60             # control frequency (Hz)
     action_scale: 0.1         # action a in [-1,1] -> rpm = HOVER_RPM*(1 + scale*a)
     render:                   # camera follows the drone, zoomed in for visibility
-      width: 900
-      height: 700
+      width: 896              # multiples of 16 -> no ffmpeg resize warning
+      height: 704
       distance: 0.7           # metres from the drone (small = big drone in frame)
       yaw: 50
       pitch: -25

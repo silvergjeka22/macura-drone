@@ -506,15 +506,17 @@ def plot_return_vs_wallclock(runs, save_path=None):
 # ══════════════════════════════════════════════════════════════════════════════
 # E. POLICY VIDEO  (Part 5b — render a trained agent flying)
 # ══════════════════════════════════════════════════════════════════════════════
-def record_env_video(env, policy="random", num_steps=250, save_path=None,
-                     fps=30, also_gif=False):
-    """Roll out `policy` and encode the rendered frames to mp4 (and optional gif).
-    `policy` in {'random', 'hover', callable(obs)->action}. `env` must render().
-    Returns the saved path. Used for the environment-exploration video."""
+def record_env_video(env, policy="random", seconds=12, fps=30, num_steps=None,
+                     save_path=None, also_gif=False):
+    """Record a fixed-DURATION video (default ~12 s) of `policy` flying the drone.
+    Resets and keeps going on crash/timeout so the clip always fills `seconds`
+    (an untrained policy crashes quickly, so we string episodes together).
+    `policy` in {'random', 'hover', callable(obs)->action}. `env` must render()."""
     import imageio
+    n = int(num_steps) if num_steps is not None else int(seconds * fps)
     obs, _ = env.reset()
-    frames = [env.render()]
-    for _ in range(num_steps):
+    frames = [_pad16(env.render())]
+    for _ in range(n):
         if policy == "random":
             act = env.action_space.sample()
         elif policy == "hover":
@@ -524,24 +526,29 @@ def record_env_video(env, policy="random", num_steps=250, save_path=None,
         else:
             raise ValueError(policy)
         obs, _, terminated, truncated, _ = env.step(act)
-        frames.append(env.render())
+        frames.append(_pad16(env.render()))
         if terminated or truncated:
-            break
+            obs, _ = env.reset()
     if save_path:
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        imageio.mimsave(save_path, frames, fps=fps)
+        imageio.mimsave(save_path, frames, fps=fps)          # dims are /16 -> no resize warn
         if also_gif:
             imageio.mimsave(save_path.replace(".mp4", ".gif"), frames, fps=fps)
     return save_path
 
 
-def record_policy_video(agent, env, num_steps=250, save_path=None, fps=30,
-                        also_gif=False):
-    """Record a deterministic evaluation episode of a trained SB3 agent.
-    Thin wrapper over `record_env_video` using the agent's greedy action."""
+def record_policy_video(agent, env, seconds=12, fps=30, num_steps=None,
+                        save_path=None, also_gif=False):
+    """Record a deterministic evaluation clip (~`seconds`) of a trained SB3 agent."""
     pol = lambda o: agent.predict(np.asarray(o, np.float32), deterministic=True)[0]
-    return record_env_video(env, policy=pol, num_steps=num_steps,
-                            save_path=save_path, fps=fps, also_gif=also_gif)
+    return record_env_video(env, policy=pol, seconds=seconds, fps=fps,
+                            num_steps=num_steps, save_path=save_path, also_gif=also_gif)
+
+
+def _pad16(frame):
+    """Crop H,W down to the nearest multiple of 16 so ffmpeg doesn't warn/resize."""
+    h, w = frame.shape[0] // 16 * 16, frame.shape[1] // 16 * 16
+    return frame[:h, :w]
 
 
 # ── internals ─────────────────────────────────────────────────────────────────

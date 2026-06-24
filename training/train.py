@@ -356,13 +356,12 @@ def evaluate_best(cfg: dict, drive_dir: str, device: str = "cuda",
 
 
 def record_best_videos(cfg: dict, drive_dir: str, device: str = "cuda",
-                       seeds=None, num_steps=None) -> dict:
-    """For EVERY algorithm × seed, load the best model and save a deterministic
-    evaluation episode to {DRIVE}/videos/<algo>_seed<seed>.mp4. Returns paths."""
+                       seeds=None, seconds=12) -> dict:
+    """For EVERY algorithm × seed, load the best model and save a ~`seconds`
+    deterministic evaluation clip to {DRIVE}/videos/<algo>_seed<seed>.mp4."""
     from stable_baselines3 import SAC
     from viz import plots
     seeds = seeds or cfg["experiment"]["seeds"]
-    num_steps = num_steps or cfg["env"]["max_episode_steps"]
     renv, _, _ = drone_env.make_env(cfg["env"], seed=999, render=True)
     paths = {}
     for algo in cfg["experiment"]["algorithms"]:
@@ -373,7 +372,7 @@ def record_best_videos(cfg: dict, drive_dir: str, device: str = "cuda",
             agent = SAC.load(ck, device=device)
             out = os.path.join(drive_dir, "videos", f"{algo}_seed{seed}.mp4")
             try:
-                plots.record_policy_video(agent, renv, num_steps=num_steps, save_path=out, fps=30)
+                plots.record_policy_video(agent, renv, seconds=seconds, save_path=out, fps=30)
                 paths[f"{algo}_seed{seed}"] = out
                 print("saved", out)
             except Exception as e:
