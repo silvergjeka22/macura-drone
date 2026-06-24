@@ -257,21 +257,28 @@ class PyBulletDroneHoverEnv(gym.Env):
         self._reward_fn = known_reward_fn(cfg)
         self._done_fn = termination_fn(cfg)
 
-        self.base = CtrlAviary(
-            drone_model=DroneModel.CF2X,
-            num_drones=1,
-            initial_xyzs=self._init_xyz(),
-            physics=Physics.PYB,
-            pyb_freq=int(pyb.get("pyb_freq", 240)),
-            ctrl_freq=int(pyb.get("ctrl_freq", 60)),
-            gui=False,
-        )
+        # gym-pybullet-drones prints a block of [INFO] lines from the .urdf on
+        # construction; silence them by redirecting stdout for this call only.
+        import contextlib, io
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.base = CtrlAviary(
+                drone_model=DroneModel.CF2X,
+                num_drones=1,
+                initial_xyzs=self._init_xyz(),
+                physics=Physics.PYB,
+                pyb_freq=int(pyb.get("pyb_freq", 240)),
+                ctrl_freq=int(pyb.get("ctrl_freq", 60)),
+                gui=False,
+            )
         self.HOVER_RPM = float(self.base.HOVER_RPM)
         self.MAX_RPM = float(self.base.MAX_RPM)
         self.client = getattr(self.base, "CLIENT", 0)
 
-        self.observation_space = spaces.Box(-np.inf, np.inf, (13,), np.float32)
-        self.action_space = spaces.Box(-1.0, 1.0, (4,), np.float32)
+        # build spaces with float32 bounds to avoid gymnasium's precision warning
+        self.observation_space = spaces.Box(
+            np.full(13, -np.inf, np.float32), np.full(13, np.inf, np.float32), dtype=np.float32)
+        self.action_space = spaces.Box(
+            -np.ones(4, np.float32), np.ones(4, np.float32), dtype=np.float32)
         self._step_count = 0
 
     def _current_target(self):
@@ -299,10 +306,12 @@ class PyBulletDroneHoverEnv(gym.Env):
         if seed is not None:
             self._rng = np.random.default_rng(seed)
         self.base.INIT_XYZS = self._init_xyz()
-        try:
-            self.base.reset(seed=seed)
-        except TypeError:
-            self.base.reset()
+        import contextlib, io
+        with contextlib.redirect_stdout(io.StringIO()):   # silence any [INFO] prints
+            try:
+                self.base.reset(seed=seed)
+            except TypeError:
+                self.base.reset()
         self._step_count = 0
         return self._get_obs(), {}
 

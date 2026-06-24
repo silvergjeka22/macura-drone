@@ -53,8 +53,10 @@ def collect_rollout(env, policy="random", num_steps=250, seed=0):
         else:
             raise ValueError(policy)
         obs, rew, terminated, truncated, info = env.step(act)
+        # env.unwrapped works whether or not the env is wrapped (e.g. NoisyObsWrapper)
+        tgt_z = float(env.unwrapped._current_target()[2])
         rec["t"].append(t)
-        rec["z"].append(float(obs[2] + env._current_target()[2]))
+        rec["z"].append(float(obs[2]) + tgt_z)
         rec["pos_err"].append(info["pos_error"])
         rec["tilt"].append(info["tilt"])
         rec["reward"].append(rew)
@@ -118,6 +120,38 @@ def render_frame(env, save_path=None):
     frame = env.render()
     fig, ax = plt.subplots(figsize=(6, 4.5))
     ax.imshow(frame); ax.axis("off"); ax.set_title("Skydio X2 (MuJoCo)")
+    _maybe_save(fig, save_path)
+    return fig
+
+
+def render_filmstrip(env, policy="random", n_frames=6, steps_between=8, seed=0,
+                     title="rollout", save_path=None):
+    """Capture rendered drone frames across a rollout and show them as a row of
+    photos. `env` must support render() (PyBullet/MuJoCo). `policy` in
+    {'random', 'hover', callable}."""
+    obs, _ = env.reset(seed=seed)
+    frames = [env.render()]
+    for _ in range(n_frames - 1):
+        for _ in range(steps_between):
+            if policy == "random":
+                act = env.action_space.sample()
+            elif policy == "hover":
+                act = np.zeros(env.action_space.shape[0], dtype=np.float32)
+            elif callable(policy):
+                act = policy(obs)
+            else:
+                raise ValueError(policy)
+            obs, _, terminated, truncated, _ = env.step(act)
+            if terminated or truncated:
+                break
+        frames.append(env.render())
+    cols = len(frames)
+    fig, axes = plt.subplots(1, cols, figsize=(2.6 * cols, 2.8))
+    if cols == 1:
+        axes = [axes]
+    for i, (ax, fr) in enumerate(zip(axes, frames)):
+        ax.imshow(fr); ax.axis("off"); ax.set_title(f"step {i * steps_between}")
+    fig.suptitle(title); fig.tight_layout()
     _maybe_save(fig, save_path)
     return fig
 
