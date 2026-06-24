@@ -121,16 +121,22 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
     t0 = time.time()
     best_return = -np.inf
     best_ckpt = None
+    noise = _make_noise(cfg["exploration"], act_dim,
+                        cfg["env"]["max_episode_steps"], seed)
 
     obs, _ = env.reset(seed=seed)
     for step in range(total_steps):
         # --- act in the real environment ---
-        act = env.action_space.sample() if step < warmup else _explore(agent, obs, cfg["exploration"])
+        act = env.action_space.sample() if step < warmup else _explore(agent, obs, noise)
         next_obs, rew, terminated, truncated, info = env.step(act)
         real_buffer.add(obs, act, next_obs)
         if not model_based:
             sac_mod.add_transition(agent, obs, act, next_obs, rew, terminated)
-        obs = next_obs if not (terminated or truncated) else env.reset()[0]
+        if terminated or truncated:
+            obs = env.reset()[0]
+            noise.reset()                       # fresh pink sequence per episode
+        else:
+            obs = next_obs
         if step < warmup:
             continue
 
@@ -197,13 +203,72 @@ def _empty_log():
             "gjs": [], "rollout_length_samples": [], "wall_clock": []}
 
 
-def _explore(agent, obs, expl_cfg):
-    """Exploration applied identically to all algorithms (avoids the confound)."""
-    act = sac_mod.select_action(agent, obs, evaluate=False)
-    if expl_cfg["type"] == "deterministic":
-        return act
-    noise = np.random.normal(0.0, expl_cfg["scale"], size=np.shape(act))
-    return np.clip(act + noise, -1.0, 1.0)
+# ── exploration noise (real pink/white, applied identically to all algorithms) ─
+class _WhiteNoise:
+    """Uncorrelated Gaussian action noise."""
+    def __init__(self, act_dim, scale, seed=0):
+        self.act_dim, self.scale = act_dim, float(scale)
+        self.rng = np.random.default_rng(seed)
+    def reset(self):
+        pass
+    def sample(self):
+        return self.scale * self.rng.normal(size=self.act_dim)
+
+
+class _PinkNoise:
+    """Temporally-correlated 1/f (pink) action noise, per action dim. A pink
+    sequence of length `horizon` is precomputed per episode via FFT (Eberhard
+    et al. 2023, used by MACURA), then replayed one step at a time."""
+    def __init__(self, act_dim, horizon, scale, seed=0):
+        self.act_dim = act_dim
+        self.horizon = max(int(horizon), 2)
+        self.scale = float(scale)
+        self.rng = np.random.default_rng(seed)
+        self.t = 0
+        self.seq = self._gen()
+
+    def _gen(self):
+        n = self.horizon
+        f = np.fft.rfftfreq(n)
+        f[0] = f[1]
+        cols = []
+        for _ in range(self.act_dim):
+            spec = (self.rng.normal(size=f.shape) + 1j * self.rng.normal(size=f.shape)) / np.sqrt(f)
+            x = np.fft.irfft(spec, n=n)
+            cols.append(x / (x.std() + 1e-9))
+        return np.stack(cols, axis=1)        # (horizon, act_dim), unit std per col
+
+    def reset(self):
+        self.t = 0
+        self.seq = self._gen()
+
+    def sample(self):
+        v = self.seq[self.t % self.horizon]
+        self.t += 1
+        return self.scale * v
+
+
+class _NoNoise:
+    def reset(self):
+        pass
+    def sample(self):
+        return 0.0
+
+
+def _make_noise(expl_cfg, act_dim, horizon, seed):
+    t = expl_cfg.get("type", "white_noise")
+    s = float(expl_cfg.get("scale", 0.1))
+    if t == "deterministic":
+        return _NoNoise()
+    if t == "pink_noise":
+        return _PinkNoise(act_dim, horizon, s, seed)
+    return _WhiteNoise(act_dim, s, seed)
+
+
+def _explore(agent, obs, noise_proc):
+    """Deterministic policy mean + exploration noise (same scheme for all algos)."""
+    act = sac_mod.select_action(agent, obs, evaluate=True)
+    return np.clip(act + noise_proc.sample(), -1.0, 1.0)
 
 
 def _store_model_transitions(agent, transitions):

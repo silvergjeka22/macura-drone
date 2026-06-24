@@ -506,20 +506,24 @@ def plot_return_vs_wallclock(runs, save_path=None):
 # ══════════════════════════════════════════════════════════════════════════════
 # E. POLICY VIDEO  (Part 5b — render a trained agent flying)
 # ══════════════════════════════════════════════════════════════════════════════
-def record_policy_video(agent, env, num_steps=250, save_path=None, fps=30,
-                        also_gif=False):
-    """Run one deterministic evaluation episode, capturing MuJoCo frames, and
-    encode to mp4 (and optionally gif). Requires env created with render=True and
-    MUJOCO_GL=egl on the Colab GPU. Returns the saved path.
-
-    The agent is any object with `.predict(obs, deterministic=True)` (SB3 SAC).
-    """
+def record_env_video(env, policy="random", num_steps=250, save_path=None,
+                     fps=30, also_gif=False):
+    """Roll out `policy` and encode the rendered frames to mp4 (and optional gif).
+    `policy` in {'random', 'hover', callable(obs)->action}. `env` must render().
+    Returns the saved path. Used for the environment-exploration video."""
     import imageio
     obs, _ = env.reset()
-    frames = []
+    frames = [env.render()]
     for _ in range(num_steps):
-        action, _ = agent.predict(np.asarray(obs, np.float32), deterministic=True)
-        obs, _, terminated, truncated, _ = env.step(action)
+        if policy == "random":
+            act = env.action_space.sample()
+        elif policy == "hover":
+            act = np.zeros(env.action_space.shape[0], dtype=np.float32)
+        elif callable(policy):
+            act = policy(obs)
+        else:
+            raise ValueError(policy)
+        obs, _, terminated, truncated, _ = env.step(act)
         frames.append(env.render())
         if terminated or truncated:
             break
@@ -529,6 +533,15 @@ def record_policy_video(agent, env, num_steps=250, save_path=None, fps=30,
         if also_gif:
             imageio.mimsave(save_path.replace(".mp4", ".gif"), frames, fps=fps)
     return save_path
+
+
+def record_policy_video(agent, env, num_steps=250, save_path=None, fps=30,
+                        also_gif=False):
+    """Record a deterministic evaluation episode of a trained SB3 agent.
+    Thin wrapper over `record_env_video` using the agent's greedy action."""
+    pol = lambda o: agent.predict(np.asarray(o, np.float32), deterministic=True)[0]
+    return record_env_video(env, policy=pol, num_steps=num_steps,
+                            save_path=save_path, fps=fps, also_gif=also_gif)
 
 
 # ── internals ─────────────────────────────────────────────────────────────────

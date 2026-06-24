@@ -252,6 +252,7 @@ class PyBulletDroneHoverEnv(gym.Env):
         self.max_episode_steps = int(cfg.get("max_episode_steps", 250))
         pyb = cfg.get("pybullet", {})
         self.action_scale = float(pyb.get("action_scale", 0.1))
+        self._render_cfg = pyb.get("render", {})   # width/height/distance/yaw/pitch/fov
         self._rng = np.random.default_rng(seed)
         self._render = render
         self._reward_fn = known_reward_fn(cfg)
@@ -334,17 +335,24 @@ class PyBulletDroneHoverEnv(gym.Env):
         return obs, reward, terminated, truncated, info
 
     def render(self):
-        """Headless RGB frame via the PyBullet camera (DIRECT client)."""
+        """Headless RGB frame. The camera FOLLOWS the drone and zooms in so the
+        quadrotor is large and clearly visible (not a tiny dot). Resolution /
+        distance / angle are configurable via cfg['pybullet']['render']."""
         import pybullet as p
-        w, h = 640, 480
+        rc = self._render_cfg
+        w, h = int(rc.get("width", 900)), int(rc.get("height", 700))
+        drone_pos = self._state()[0:3]            # follow the drone -> stays centered
         view = p.computeViewMatrixFromYawPitchRoll(
-            cameraTargetPosition=self.target, distance=2.0, yaw=45, pitch=-30,
+            cameraTargetPosition=drone_pos.tolist(),
+            distance=float(rc.get("distance", 0.7)),   # close zoom
+            yaw=float(rc.get("yaw", 50)), pitch=float(rc.get("pitch", -25)),
             roll=0, upAxisIndex=2, physicsClientId=self.client)
         proj = p.computeProjectionMatrixFOV(
-            fov=60, aspect=w / h, nearVal=0.1, farVal=100.0, physicsClientId=self.client)
-        _, _, rgb, _, _ = p.getCameraImage(
-            w, h, view, proj, physicsClientId=self.client)
-        return np.asarray(rgb, dtype=np.uint8)[:, :, :3]
+            fov=float(rc.get("fov", 60)), aspect=w / h,
+            nearVal=0.05, farVal=100.0, physicsClientId=self.client)
+        img = p.getCameraImage(w, h, view, proj,
+                               renderer=p.ER_TINY_RENDERER, physicsClientId=self.client)
+        return np.reshape(np.asarray(img[2], dtype=np.uint8), (h, w, 4))[:, :, :3]
 
     def close(self):
         try:

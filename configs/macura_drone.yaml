@@ -28,6 +28,13 @@ env:
     pyb_freq: 240             # physics step frequency (Hz)
     ctrl_freq: 60             # control frequency (Hz)
     action_scale: 0.1         # action a in [-1,1] -> rpm = HOVER_RPM*(1 + scale*a)
+    render:                   # camera follows the drone, zoomed in for visibility
+      width: 900
+      height: 700
+      distance: 0.7           # metres from the drone (small = big drone in frame)
+      yaw: 50
+      pitch: -25
+      fov: 60
   # --- robustness / noise study (Part 3); enabled=false by default ---
   noise:
     enabled: false
@@ -124,7 +131,9 @@ exploration:
 profiles:
   fast:
     experiment:
-      eval_every_steps: 2000    # evaluate less often (best-checkpoint tracking only)
+      total_env_steps: 20000    # ~20k steps: enough for clear curves, quick on GPU
+      warmup_random_steps: 1000
+      eval_every_steps: 2000    # evaluate periodically (best-checkpoint tracking only)
     sac:
       gradient_steps_max: 8     # fewer SAC updates per step (was 20)
     ensemble:
