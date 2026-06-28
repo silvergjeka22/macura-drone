@@ -159,9 +159,11 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
     best_step = None
     best_ckpt = None
     model_trained = False
-    # most-recent realised mixing split (for telemetry rows at eval time)
-    last_rr = {"real_ratio_target": float("nan"), "real_pct": float("nan"),
-               "imagined_pct": float("nan")}
+    # realised mixing split ACCUMULATED over each eval window (per-step reporting is degenerate for
+    # MACURA, whose Eq. 22 UTD scaling does only ~1 update/step early → a single batch is all-real
+    # or all-imagined). Aggregating over the window recovers the true ~real_ratio split.
+    acc_real, acc_model = 0, 0
+    last_target = float("nan")
     noise = _make_noise(cfg["exploration"], act_dim,
                         cfg["env"]["max_episode_steps"], seed)
 
@@ -223,7 +225,9 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
             rr = schedule(step)
             info = sac_mod.sac_update_mixed(agent, real_rb, model_rb,
                                             num_updates, batch, rr, mix_rng)
-            last_rr = {k: info[k] for k in ("real_ratio_target", "real_pct", "imagined_pct")}
+            acc_real += info["n_real"]
+            acc_model += info["n_model"]
+            last_target = rr
 
         # --- periodic GREEDY evaluation on FIXED shared seeds → headline curve + selection ---
         # Best checkpoint = highest periodic greedy-eval return, gated by `selection.start_step`
@@ -235,17 +239,22 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
             log["eval_return_std"].append(m["eval_return_std"])
             log["eval_failure_rate"].append(m["eval_failure_rate"])
             log["wall_clock"].append((step, time.time() - t0))
-            # MBRL telemetry: scheduled target + REALISED real/imagined split (model-based only)
-            log["real_ratio_target"].append((step, last_rr["real_ratio_target"]))
-            log["real_pct"].append((step, last_rr["real_pct"]))
-            log["imagined_pct"].append((step, last_rr["imagined_pct"]))
+            # MBRL telemetry: scheduled target + REALISED real/imagined split aggregated over this
+            # eval window (model-based only). Reset the window after logging.
+            tot = acc_real + acc_model
+            real_pct = 100.0 * acc_real / tot if tot else float("nan")
+            imagined_pct = 100.0 * acc_model / tot if tot else float("nan")
+            log["real_ratio_target"].append((step, last_target))
+            log["real_pct"].append((step, real_pct))
+            log["imagined_pct"].append((step, imagined_pct))
+            acc_real, acc_model = 0, 0
             improved = step >= start_step and m["eval_return"] > best_return
             if improved:                       # overwrite best checkpoint (policy + ensemble + meta)
                 best_return = m["eval_return"]
                 best_step = step
                 best_ckpt = _save_best(agent, dynamics_model, drive_dir, algo_name, seed)
-            split = (f"  real/imag {last_rr['real_pct']:.0f}/{last_rr['imagined_pct']:.0f}%"
-                     if model_based and not np.isnan(last_rr["real_pct"]) else "")
+            split = (f"  real/imag {real_pct:.0f}/{imagined_pct:.0f}%"
+                     if model_based and tot else "")
             print(f"[{algo_name} seed{seed}] step {step}  return {m['eval_return']:.1f}"
                   f"  fail {m['eval_failure_rate']:.2f}{split}"
                   f"{'  <- best' if improved else ''}")
