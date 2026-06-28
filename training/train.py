@@ -4,11 +4,21 @@ Backbone: Stable-Baselines3 SAC (shared learner) + our PyTorch probabilistic
 ensemble + our pure-function rollout strategies. The four algorithms share
 EVERYTHING except which rollout function is called (SAC calls none).
 
-Data flow:
-  * a small numpy `_RealBuffer` holds real transitions  -> trains the ensemble
-    and supplies rollout start states;
-  * the SB3 agent's own replay buffer holds the data the SAC learner trains on
-    (REAL transitions for the SAC baseline; MODEL transitions for MACURA/MBPO/M2AC).
+Data flow (paper-faithful; AGENT_PROMPT_curriculum.md §2):
+  * a numpy `_RealBuffer` holds full real transitions -> trains the ensemble and
+    supplies rollout start states;
+  * SAC baseline: one buffer (the agent's own), 100% REAL, no mixing — unchanged;
+  * model-based (MACURA/MBPO/M2AC): TWO buffers — the agent's own SB3 buffer holds
+    MODEL (imagined) rollouts, a second SB3 `real_rb` holds REAL transitions. Each
+    SAC gradient step draws its WHOLE batch from the real buffer with probability
+    `real_ratio(step)`, else from the model buffer (batch-level mixing). `real_ratio`
+    is a fixed paper value by default (`sac.real_ratio`), or the optional shared
+    real-data-first curriculum when enabled (training/curriculum.py). Rollout length
+    is never touched — each algorithm keeps its own rollout strategy.
+
+Selection: best checkpoint = highest periodic greedy-eval return on fixed shared
+seeds, gated by `selection.start_step`; each new best saves policy + ensemble +
+meta. One larger final greedy eval on the reloaded best is the run summary.
 
 Pure-function library. The Colab notebook calls these.
 
@@ -32,6 +42,7 @@ from algorithms import sac as sac_mod
 from algorithms import macura as macura_mod
 from algorithms import mbpo as mbpo_mod
 from algorithms import m2ac as m2ac_mod
+from training.curriculum import build_schedule
 
 try:
     import torch
@@ -41,21 +52,29 @@ except ImportError:
 
 # ── a minimal numpy replay buffer for REAL data ───────────────────────────────
 class _RealBuffer:
+    """REAL transitions (obs, act, rew, next_obs, done). Trains the ensemble and supplies
+    rollout start states; `rew`/`done` are also stored (AGENT_PROMPT_curriculum §2.1) so the
+    buffer carries full transitions even though the ensemble only consumes (obs, act, next_obs)."""
+
     def __init__(self, capacity, obs_dim, act_dim):
         self.obs = np.zeros((capacity, obs_dim), np.float32)
         self.act = np.zeros((capacity, act_dim), np.float32)
+        self.rew = np.zeros((capacity,), np.float32)
         self.next_obs = np.zeros((capacity, obs_dim), np.float32)
+        self.done = np.zeros((capacity,), np.float32)
         self.cap, self.size, self.ptr = capacity, 0, 0
 
-    def add(self, obs, act, next_obs):
+    def add(self, obs, act, rew, next_obs, done):
         i = self.ptr
         self.obs[i], self.act[i], self.next_obs[i] = obs, act, next_obs
+        self.rew[i], self.done[i] = float(rew), float(done)
         self.ptr = (self.ptr + 1) % self.cap
         self.size = min(self.size + 1, self.cap)
 
     def all(self):
         s = self.size
-        return {"obs": self.obs[:s], "act": self.act[:s], "next_obs": self.next_obs[:s]}
+        return {"obs": self.obs[:s], "act": self.act[:s], "next_obs": self.next_obs[:s],
+                "rew": self.rew[:s], "done": self.done[:s]}
 
     def sample_obs(self, n):
         idx = np.random.randint(0, self.size, size=min(n, self.size))
@@ -109,8 +128,25 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
     total_steps = cfg["experiment"]["total_env_steps"]
     real_buffer = _RealBuffer(total_steps, obs_dim, act_dim)
 
+    # Two-buffer setup for the model-based agents (AGENT_PROMPT_curriculum §2): the agent's own
+    # SB3 buffer holds MODEL (imagined) transitions; a second SB3 buffer holds REAL transitions, so
+    # the SAC update can draw a whole batch from one or the other (batch-level mixing). The SAC
+    # baseline is left exactly as before (one buffer, 100% real). `real_buffer` (numpy) still feeds
+    # the ensemble + rollout start states; `real_rb` mirrors it for the SAC learner.
+    model_rb = agent.replay_buffer if model_based else None
+    real_rb = sac_mod.build_replay_buffer(agent, total_steps) if model_based else None
+
+    # Shared real-data-first curriculum (§3): real_ratio(step). Disabled by default → constant
+    # paper-faithful `sac.real_ratio` (so the headline 4-algorithm comparison is paper-faithful).
+    # Identical for MACURA/MBPO/M2AC — no per-algorithm branching — so it cannot bias the comparison.
+    schedule = build_schedule(cfg) if model_based else None
+    mix_rng = np.random.default_rng(seed)
+
     warmup = cfg["experiment"]["warmup_random_steps"]
-    eval_every = cfg["experiment"]["eval_every_steps"]
+    sel = cfg.get("selection", {})
+    eval_every = int(sel.get("eval_every", cfg["experiment"]["eval_every_steps"]))
+    start_step = int(sel.get("start_step", 0))
+    final_eval_episodes = int(sel.get("final_eval_episodes", cfg["experiment"]["eval_episodes"]))
     rollout_freq = cfg["rollout"]["freq_steps"]
     num_rollouts = cfg["rollout"]["num_rollouts"]
     g_max = cfg["sac"]["gradient_steps_max"]
@@ -120,7 +156,12 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
     log = _empty_log()
     t0 = time.time()
     best_return = -np.inf
+    best_step = None
     best_ckpt = None
+    model_trained = False
+    # most-recent realised mixing split (for telemetry rows at eval time)
+    last_rr = {"real_ratio_target": float("nan"), "real_pct": float("nan"),
+               "imagined_pct": float("nan")}
     noise = _make_noise(cfg["exploration"], act_dim,
                         cfg["env"]["max_episode_steps"], seed)
 
@@ -129,8 +170,10 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
         # --- act in the real environment ---
         act = env.action_space.sample() if step < warmup else _explore(agent, obs, noise)
         next_obs, rew, terminated, truncated, info = env.step(act)
-        real_buffer.add(obs, act, next_obs)
-        if not model_based:
+        real_buffer.add(obs, act, rew, next_obs, terminated)
+        if model_based:
+            sac_mod.add_to_buffer(real_rb, obs, act, next_obs, rew, terminated)
+        else:
             sac_mod.add_transition(agent, obs, act, next_obs, rew, terminated)
         if terminated or truncated:
             obs = env.reset()[0]
@@ -166,12 +209,25 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
                     dynamics_model, agent, start, reward_fn, done_fn, cfg)
                 num_updates = cfg["rollout"]["m2ac"]["fixed_gradient_steps"]
             _store_model_transitions(agent, trans)
+            model_trained = True
 
         # --- SAC updates ---
-        if agent.replay_buffer.size() >= batch:
-            sac_mod.sac_update(agent, num_updates, batch)
+        if not model_based:
+            # model-free baseline: unchanged (one buffer, 100% real)
+            if agent.replay_buffer.size() >= batch:
+                sac_mod.sac_update(agent, num_updates, batch)
+        elif model_trained:
+            # model-based: batch-level real/imagined mixing at real_ratio(step). The SAME mixing
+            # path runs for MACURA/MBPO/M2AC (no per-algorithm branching); only `num_updates` (UTD)
+            # and which rollout produced the model data differ. The SAC math is untouched.
+            rr = schedule(step)
+            info = sac_mod.sac_update_mixed(agent, real_rb, model_rb,
+                                            num_updates, batch, rr, mix_rng)
+            last_rr = {k: info[k] for k in ("real_ratio_target", "real_pct", "imagined_pct")}
 
-        # --- periodic evaluation (NOT every step) + best-only checkpointing ---
+        # --- periodic GREEDY evaluation on FIXED shared seeds → headline curve + selection ---
+        # Best checkpoint = highest periodic greedy-eval return, gated by `selection.start_step`
+        # (don't select during the noisy early phase). Each new best saves policy + ensemble + meta.
         if step % eval_every == 0:
             m = evaluate(agent, eval_env, cfg["experiment"]["eval_episodes"])
             log["steps"].append(step)
@@ -179,17 +235,36 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
             log["eval_return_std"].append(m["eval_return_std"])
             log["eval_failure_rate"].append(m["eval_failure_rate"])
             log["wall_clock"].append((step, time.time() - t0))
-            improved = m["eval_return"] > best_return
-            if improved:                       # overwrite best checkpoint on Drive
+            # MBRL telemetry: scheduled target + REALISED real/imagined split (model-based only)
+            log["real_ratio_target"].append((step, last_rr["real_ratio_target"]))
+            log["real_pct"].append((step, last_rr["real_pct"]))
+            log["imagined_pct"].append((step, last_rr["imagined_pct"]))
+            improved = step >= start_step and m["eval_return"] > best_return
+            if improved:                       # overwrite best checkpoint (policy + ensemble + meta)
                 best_return = m["eval_return"]
-                best_ckpt = _save_best(agent, drive_dir, algo_name, seed)
+                best_step = step
+                best_ckpt = _save_best(agent, dynamics_model, drive_dir, algo_name, seed)
+            split = (f"  real/imag {last_rr['real_pct']:.0f}/{last_rr['imagined_pct']:.0f}%"
+                     if model_based and not np.isnan(last_rr["real_pct"]) else "")
             print(f"[{algo_name} seed{seed}] step {step}  return {m['eval_return']:.1f}"
-                  f"  fail {m['eval_failure_rate']:.2f}{'  <- best' if improved else ''}")
+                  f"  fail {m['eval_failure_rate']:.2f}{split}"
+                  f"{'  <- best' if improved else ''}")
 
-    if best_ckpt is None:                       # never improved (e.g. no eval): save final
-        best_ckpt = _save_best(agent, drive_dir, algo_name, seed)
+    if best_ckpt is None:                       # never improved (e.g. no eval / before start_step)
+        best_ckpt = _save_best(agent, dynamics_model, drive_dir, algo_name, seed)
+
+    # --- one larger final GREEDY eval on the reloaded best checkpoint → run summary ---
+    final_eval = _final_eval(agent, eval_env, best_ckpt, final_eval_episodes)
+    meta = {"algo": algo_name, "seed": seed, "best_step": best_step,
+            "best_return": float(best_return), "final_eval": final_eval}
+    _save_meta(meta, drive_dir, algo_name, seed)
+    print(f"[{algo_name} seed{seed}] FINAL  return {final_eval['eval_return']:.1f}"
+          f"±{final_eval['eval_return_std']:.1f}  fail {final_eval['eval_failure_rate']:.2f}"
+          f"  (best @ step {best_step})")
+
     run = {"algo": algo_name, "seed": seed, "checkpoint": best_ckpt,
-           "best_return": float(best_return), **log}
+           "best_return": float(best_return), "best_step": best_step,
+           "final_eval": final_eval, **log}
     _save_run(run, drive_dir, algo_name, seed)
     env.close()
     eval_env.close()
@@ -200,7 +275,21 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
 def _empty_log():
     return {"steps": [], "eval_return": [], "eval_return_std": [],
             "eval_failure_rate": [], "kappa": [], "rollout_length": [],
-            "gjs": [], "rollout_length_samples": [], "wall_clock": []}
+            "gjs": [], "rollout_length_samples": [], "wall_clock": [],
+            "real_ratio_target": [], "real_pct": [], "imagined_pct": []}
+
+
+def _final_eval(agent, eval_env, best_ckpt, eval_episodes):
+    """Reload the best policy and run ONE larger greedy eval as the run summary.
+
+    Reloading is best-effort: if it fails (or there is no checkpoint) we evaluate the in-memory
+    agent so a summary is always produced."""
+    if best_ckpt:
+        try:
+            agent.set_parameters(best_ckpt, device=agent.device)
+        except Exception:
+            pass
+    return evaluate(agent, eval_env, eval_episodes)
 
 
 # ── exploration noise (real pink/white, applied identically to all algorithms) ─
@@ -316,15 +405,29 @@ def _seed_everything(seed):
         torch.manual_seed(seed)
 
 
-def _save_best(agent, drive_dir, algo, seed):
-    """Overwrite the single best checkpoint on Drive: <algo>_seed<seed>_best.zip."""
+def _save_best(agent, dynamics_model, drive_dir, algo, seed):
+    """Overwrite the single best checkpoint on Drive: <algo>_seed<seed>_best.zip (SB3 policy) and,
+    for model-based agents, <algo>_seed<seed>_best_ensemble.pt (world-model weights + normalizer).
+    Returns the policy .zip path (or None on failure)."""
     path = os.path.join(drive_dir, "checkpoints", f"{algo}_seed{seed}_best")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     try:
         agent.save(path)
-        return path + ".zip"
     except Exception:
         return None
+    if dynamics_model is not None:                  # model-based: also persist the ensemble
+        try:
+            ens.save_ensemble(dynamics_model, path + "_ensemble.pt")
+        except Exception:
+            pass
+    return path + ".zip"
+
+
+def _save_meta(meta, drive_dir, algo, seed):
+    path = os.path.join(drive_dir, "checkpoints")
+    os.makedirs(path, exist_ok=True)
+    with open(os.path.join(path, f"{algo}_seed{seed}_best_meta.json"), "w") as f:
+        json.dump(meta, f, indent=2)
 
 
 def _save_run(run, drive_dir, algo, seed):

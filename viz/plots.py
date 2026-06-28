@@ -450,6 +450,52 @@ def plot_rollout_length_hist(macura_run, save_path=None):
     return fig
 
 
+def plot_real_ratio(run, save_path=None):
+    """(curriculum audit) Scheduled real_ratio target vs REALISED real_pct over training, so the
+    real-data-first curriculum (or the fixed paper default) is auditable. Reads the per-eval
+    telemetry rows logged by train_one for a model-based run."""
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    tgt = run.get("real_ratio_target", [])
+    rp = run.get("real_pct", [])
+    if tgt:
+        s, v = zip(*tgt)
+        ax.plot(s, [100.0 * x for x in v], "k--", label="scheduled target", lw=2)
+    if rp:
+        s, v = zip(*rp)
+        ax.plot(s, v, color=_color(run.get("algo", "macura")), marker="o", ms=3,
+                label="realised real %")
+    ax.set_ylim(-2, 102)
+    ax.set_xlabel("real environment steps"); ax.set_ylabel("real-data share (%)")
+    ax.set_title(f"Real/imagined mixing — {run.get('algo', '').upper()}")
+    ax.legend(); ax.grid(alpha=0.3)
+    _maybe_save(fig, save_path)
+    return fig
+
+
+def plot_real_ratio_comparison(fixed_run, curriculum_run, save_path=None):
+    """(ablation) Fixed paper real_ratio vs the real-data-first curriculum, side by side — the
+    scheduled target and realised real % for the same algorithm under both settings."""
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4.5), sharey=True)
+    for ax, run, title in [(axes[0], fixed_run, "Fixed real_ratio (paper-faithful)"),
+                           (axes[1], curriculum_run, "Real-data-first curriculum")]:
+        if run is None:
+            ax.set_title(title + " (no run)"); continue
+        tgt, rp = run.get("real_ratio_target", []), run.get("real_pct", [])
+        if tgt:
+            s, v = zip(*tgt); ax.plot(s, [100.0 * x for x in v], "k--", label="scheduled", lw=2)
+        if rp:
+            s, v = zip(*rp); ax.plot(s, v, color=_color(run.get("algo", "macura")),
+                                     marker="o", ms=3, label="realised")
+        ax.set_xlabel("real environment steps"); ax.set_title(title)
+        ax.set_ylim(-2, 102); ax.legend(); ax.grid(alpha=0.3)
+    axes[0].set_ylabel("real-data share (%)")
+    fig.suptitle(f"{(fixed_run or curriculum_run or {}).get('algo', '').upper()}: "
+                 f"fixed vs curriculum real_ratio")
+    fig.tight_layout()
+    _maybe_save(fig, save_path)
+    return fig
+
+
 def plot_steps_to_target(runs, target_return, save_path=None):
     """(5.7) Real env steps each algorithm needs to first reach `target_return`."""
     by = _group_by_algo(runs)

@@ -185,6 +185,30 @@ def member_gaussians(ens: dict, obs: np.ndarray, act: np.ndarray):
     return means.cpu().numpy(), np.exp(logvars.cpu().numpy())
 
 
+def save_ensemble(ens: dict, path: str):
+    """Persist the ensemble for a best checkpoint: member weights + the input normalizer
+    statistics (needed at predict time). No logic change — just serialization."""
+    model, norm = ens["model"], ens["normalizer"]
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "norm_mean": norm.mean.detach().cpu(),
+            "norm_std": norm.std.detach().cpu(),
+        },
+        path,
+    )
+    return path
+
+
+def load_ensemble(ens: dict, path: str):
+    """Reload weights + normalizer stats saved by `save_ensemble` into an existing `ens` dict."""
+    ckpt = torch.load(path, map_location=ens["device"])
+    ens["model"].load_state_dict(ckpt["model"])
+    ens["normalizer"].mean = ckpt["norm_mean"].to(ens["device"])
+    ens["normalizer"].std = ckpt["norm_std"].to(ens["device"])
+    return ens
+
+
 def _forward_member(model, x, e):
     out = model.members[e](x)
     mean, logvar = out[..., : model.out_dim], out[..., model.out_dim:]
