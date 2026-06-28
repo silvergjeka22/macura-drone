@@ -1,18 +1,19 @@
-"""Fast correctness tests for the real-data-first curriculum + batch-level real/imagined mixing
-(AGENT_PROMPT_curriculum.md §8). Correctness, not performance — minutes, CPU.
+"""Fast correctness tests for the two-buffer + fixed batch-level real/imagined mixing.
+
+The four algorithms share everything (SAC backbone, ensemble, pink-noise exploration, eval seeds,
+fixed `real_ratio`) EXCEPT their rollout strategy. These tests check the shared mixing machinery and
+that the algorithm rules are untouched. Correctness, not performance — seconds on CPU.
 
 Covers:
-  1. RealRatioSchedule: constant + default knots (start/mid/tail-clamp).
-  2. build_schedule from config (default = constant paper real_ratio).
-  3. sac_update_mixed: rr=1.0 → 0 model batches; rr=0.0 → 0 real; rr=0.5 → ≈50/50.
-  4. Default config → realised real_pct ≈ 5% (the paper-faithful structural fix landed).
-  5. MACURA rollout still κ-truncated (NOT hand-scheduled); Eq. 22 UTD scaler unchanged.
-  6. Best-checkpoint save writes BOTH policy and ensemble for a model-based agent; ensemble reloads.
-  7. (env-gated) one tiny smoke run per model-based algo with the curriculum ON; realised real_pct
-     falls over steps as scheduled. Skipped automatically when no MuJoCo/PyBullet backend is present.
+  1. sac_update_mixed: rr=1.0 → 0 model batches; rr=0.0 → 0 real; rr=0.5 → ≈50/50 (seeded RNG).
+  2. Paper-faithful default: config real_ratio → realised real_pct ≈ that value.
+  3. Config sanity: sac.real_ratio present, selection block present, no curriculum left over.
+  4. MACURA unchanged: Eq. 22 UTD scaler + κ-truncated rollout (not hand-scheduled).
+  5. Best-checkpoint save writes BOTH policy and ensemble for a model-based agent; ensemble reloads.
+  6. (env-gated) tiny smoke run per model-based algo; realised real_pct ≈ the fixed target. Skipped
+     automatically when no MuJoCo/PyBullet backend is present.
 
-Run directly (`python3 tests/test_curriculum_mixing.py`) for a PASS/FAIL + wall-time summary, or
-under pytest (`python3 -m pytest tests/test_curriculum_mixing.py`).
+Run directly (`python3 tests/test_mixing.py`) for a PASS/FAIL + wall-time summary, or under pytest.
 """
 import os
 import sys
@@ -25,7 +26,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import yaml  # noqa: E402
 
-from training.curriculum import RealRatioSchedule, build_schedule  # noqa: E402
 from algorithms import sac as sac_mod  # noqa: E402
 from models import ensemble as ens  # noqa: E402
 
@@ -52,52 +52,15 @@ def _tiny_ens_cfg():
             "deterministic": False, "propagation": "random_member"}
 
 
-def _fill(buf, n, batch_dim=ACT_DIM, seed=0):
+def _fill(buf, n, seed=0):
     rng = np.random.default_rng(seed)
     for _ in range(n):
         o = rng.normal(size=OBS_DIM).astype(np.float32)
-        a = rng.uniform(-1, 1, size=batch_dim).astype(np.float32)
+        a = rng.uniform(-1, 1, size=ACT_DIM).astype(np.float32)
         no = o + 0.01 * rng.normal(size=OBS_DIM).astype(np.float32)
         sac_mod.add_to_buffer(buf, o, a, no, float(rng.normal()), False)
 
 
-# ── 1. RealRatioSchedule ──────────────────────────────────────────────────────────
-def test_schedule_constant():
-    s = RealRatioSchedule.constant(0.05)
-    for x in (-100, 0, 7, 12345, 10 ** 9):
-        assert abs(s(x) - 0.05) < 1e-12
-
-
-def test_schedule_default_knots():
-    s = RealRatioSchedule([(0, 0.90), (8000, 0.90), (16000, 0.20), (24000, 0.05)])
-    assert abs(s(0) - 0.90) < 1e-9           # start = ~90% real
-    assert abs(s(8000) - 0.90) < 1e-9        # plateau
-    assert abs(s(16000) - 0.20) < 1e-9       # mid knot
-    assert abs(s(12000) - 0.55) < 1e-9       # interpolated halfway
-    assert abs(s(24000) - 0.05) < 1e-9       # steady state
-    assert abs(s(50000) - 0.05) < 1e-9       # clamped beyond range
-    assert abs(s(-10) - 0.90) < 1e-9         # clamped before range
-
-
-# ── 2. build_schedule from config ──────────────────────────────────────────────────
-def test_build_schedule_default_is_constant():
-    cfg = _load_cfg()
-    assert cfg["curriculum"]["enabled"] is False, "curriculum must default OFF"
-    s = build_schedule(cfg)
-    rr = float(cfg["sac"]["real_ratio"])
-    for x in (0, 5000, 30000):
-        assert abs(s(x) - rr) < 1e-12, "disabled curriculum must be constant sac.real_ratio"
-
-
-def test_build_schedule_enabled_ramps():
-    cfg = _load_cfg()
-    cfg["curriculum"]["enabled"] = True
-    s = build_schedule(cfg)
-    assert s(0) > s(30000), "enabled curriculum must ramp DOWN from mostly-real to steady state"
-    assert abs(s(0) - 0.90) < 1e-9
-
-
-# ── 3 & 4. batch-level mixing split ────────────────────────────────────────────────
 def _mix_split(rr, num_updates, seed=0):
     agent = sac_mod.build_sac(OBS_DIM, ACT_DIM, _tiny_sac_cfg(), "cpu", seed)
     model_rb = agent.replay_buffer
@@ -105,10 +68,10 @@ def _mix_split(rr, num_updates, seed=0):
     _fill(real_rb, 100, seed=seed)
     _fill(model_rb, 100, seed=seed + 1)
     rng = np.random.default_rng(seed)
-    info = sac_mod.sac_update_mixed(agent, real_rb, model_rb, num_updates, 32, rr, rng)
-    return info
+    return sac_mod.sac_update_mixed(agent, real_rb, model_rb, num_updates, 32, rr, rng)
 
 
+# ── 1. batch-level mixing split ─────────────────────────────────────────────────────
 def test_mixing_all_real():
     info = _mix_split(1.0, 40)
     assert info["n_model"] == 0 and info["n_real"] == 40
@@ -125,15 +88,24 @@ def test_mixing_half():
     assert 0.42 < frac < 0.58, f"expected ≈50/50, got {frac:.3f}"
 
 
-def test_mixing_paper_default_5pct():
-    cfg = _load_cfg()
-    rr = float(cfg["sac"]["real_ratio"])           # 0.05 paper default
+# ── 2. paper-faithful fixed default ─────────────────────────────────────────────────
+def test_mixing_paper_default():
+    rr = float(_load_cfg()["sac"]["real_ratio"])
     info = _mix_split(rr, 1000, seed=7)
     assert abs(info["real_pct"] - 100.0 * rr) < 3.0, \
         f"realised real_pct {info['real_pct']:.1f}% should be ≈ {100 * rr:.0f}%"
 
 
-# ── 5. MACURA rollout unchanged (κ-truncated, not hand-scheduled) ───────────────────
+# ── 3. config sanity ────────────────────────────────────────────────────────────────
+def test_config_is_fixed_no_curriculum():
+    cfg = _load_cfg()
+    assert "real_ratio" in cfg["sac"], "sac.real_ratio must be set (fixed mixing)"
+    assert 0.0 <= cfg["sac"]["real_ratio"] <= 1.0
+    assert "selection" in cfg, "selection block (start_step/eval_every/final_eval_episodes) required"
+    assert "curriculum" not in cfg, "curriculum was removed — config must not reference it"
+
+
+# ── 4. MACURA rule unchanged (κ-truncated, not hand-scheduled) ───────────────────────
 def test_macura_utd_scaler_unchanged():
     from algorithms import macura as macura_mod
     # Eq. 22 scales with model-buffer fullness, NOT env-step → not a length schedule.
@@ -161,7 +133,7 @@ def test_macura_rollout_is_kappa_truncated():
     assert diag["mean_rollout_length"] <= cfg["rollout"]["macura"]["t_max"]
 
 
-# ── 6. best-checkpoint save persists policy + ensemble ──────────────────────────────
+# ── 5. best-checkpoint save persists policy + ensemble ──────────────────────────────
 def test_save_best_writes_policy_and_ensemble():
     from training import train as train_mod
     agent = sac_mod.build_sac(OBS_DIM, ACT_DIM, _tiny_sac_cfg(), "cpu", 0)
@@ -179,7 +151,7 @@ def test_save_best_writes_policy_and_ensemble():
         assert not os.path.exists(os.path.join(d, "checkpoints", "sac_seed0_best_ensemble.pt"))
 
 
-# ── 7. (env-gated) tiny smoke run per model-based algo, curriculum ON ────────────────
+# ── 6. (env-gated) tiny smoke run per model-based algo ───────────────────────────────
 def _env_available(cfg):
     try:
         from envs import drone_env
@@ -190,30 +162,28 @@ def _env_available(cfg):
         return False
 
 
-def test_smoke_curriculum_real_pct_falls():
+def test_smoke_fixed_real_pct_near_target():
     from training import train as train_mod
     cfg = _load_cfg()
     if not _env_available(cfg):
         print("  [skip] no MuJoCo/PyBullet backend — smoke run is Colab/GPU only")
         return
-    # tiny, fast config with the curriculum ON and knots scaled to the smoke horizon
-    cfg["experiment"]["total_env_steps"] = 500
+    cfg["experiment"]["total_env_steps"] = 600
     cfg["experiment"]["warmup_random_steps"] = 150
-    cfg["experiment"]["eval_every_steps"] = 100
     cfg["experiment"]["eval_episodes"] = 1
-    cfg["selection"] = {"start_step": 0, "eval_every": 100, "final_eval_episodes": 1}
-    cfg["sac"]["gradient_steps_max"] = 4
+    cfg["selection"] = {"start_step": 0, "eval_every": 150, "final_eval_episodes": 1}
+    cfg["sac"]["gradient_steps_max"] = 6
+    cfg["sac"]["real_ratio"] = 0.05
     cfg["ensemble"]["train_epochs_per_round"] = 2
     cfg["rollout"]["freq_steps"] = 100
     cfg["rollout"]["num_rollouts"] = 50
-    cfg["curriculum"] = {"enabled": True, "real_ratio_knots": [
-        {"step": 150, "real_ratio": 0.95}, {"step": 500, "real_ratio": 0.05}]}
     with tempfile.TemporaryDirectory() as d:
         for algo in ("macura", "mbpo", "m2ac"):
             run = train_mod.train_one(algo, cfg, d, seed=0)
-            tgt = [v for _, v in run["real_ratio_target"] if not np.isnan(v)]
-            assert tgt, f"{algo}: no real_ratio telemetry logged"
-            assert tgt[0] > tgt[-1] + 0.1, f"{algo}: real_ratio target should fall over training"
+            rp = [v for _, v in run["real_pct"] if not np.isnan(v)]
+            assert rp, f"{algo}: no real_pct telemetry logged"
+            # realised share should sit near the fixed 5% target (loose bound for a tiny run)
+            assert np.mean(rp) < 25.0, f"{algo}: realised real% {np.mean(rp):.0f} far above target"
 
 
 # ── runner ──────────────────────────────────────────────────────────────────────────

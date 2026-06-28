@@ -87,10 +87,10 @@ sac:
   batch_size: 256
   target_update_interval: 1
   gradient_steps_max: 20      # Gmax in Eq. 22 (model-based UTD ceiling)
-  real_ratio: 0.05            # paper-faithful FIXED batch-level real mixing (DEFAULT; Janner/MBPO,
-                              # MACURA inherits). Model-based SAC updates draw a whole batch from the
-                              # REAL buffer with prob real_ratio, else the MODEL buffer. SAC baseline
-                              # is model-free (always 100% real) and ignores this.
+  real_ratio: 0.05            # paper-faithful FIXED batch-level real mixing (Janner/MBPO; MACURA
+                              # inherits). IDENTICAL for MACURA/MBPO/M2AC. Each model-based SAC update
+                              # draws a whole batch from the REAL buffer with prob real_ratio, else
+                              # the MODEL buffer. SAC baseline is model-free (always 100% real).
 
 # ── checkpoint selection & final eval (best = highest periodic greedy-eval return) ─
 selection:
@@ -98,19 +98,6 @@ selection:
   eval_every: 1000           # periodic greedy-eval cadence (selection signal; falls back to
                              # experiment.eval_every_steps if omitted)
   final_eval_episodes: 10    # one larger greedy eval on the reloaded best checkpoint (run summary)
-
-# ── shared real-data-first curriculum (OPTIONAL ablation; OFF by default) ─────────
-# A DOCUMENTED DEVIATION from the paper's fixed real_ratio. When enabled, real_ratio ramps with
-# env-step (start mostly REAL while the model matures, phase in imagined rollouts as it gets
-# reliable). Shared by MACURA/MBPO/M2AC (one schedule, no per-algorithm branching) and controls
-# real_ratio ONLY — never rollout length. Disabled → constant sac.real_ratio (paper-faithful).
-curriculum:
-  enabled: false             # set true to run the curriculum ablation (report separately)
-  real_ratio_knots:
-    - {step: 0,     real_ratio: 0.90}   # phase 1: ~90% real — model matures, agent bootstraps
-    - {step: 8000,  real_ratio: 0.90}
-    - {step: 16000, real_ratio: 0.20}   # phase 2: phase imagined rollouts in as model gets reliable
-    - {step: 24000, real_ratio: 0.05}   # phase 3: paper-ish steady state (~5% real / 95% imagined)
 
 # ── rollout strategies (the ONLY thing that differs across algorithms) ────────
 rollout:
