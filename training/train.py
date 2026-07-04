@@ -145,6 +145,13 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
     num_rollouts = cfg["rollout"]["num_rollouts"]
     g_max = cfg["sac"]["gradient_steps_max"]
     batch = cfg["sac"]["batch_size"]
+    # UTD (tasks.md Phase 4): the model-free SAC baseline runs a STANDARD ~1
+    # update per real step (`baseline_gradient_steps`), not the model-based
+    # ceiling g_max — UTD-20 plain SAC destabilizes and would be a strawman.
+    # Model-based agents carry their per-round UTD (MACURA Eq. 22 adaptive,
+    # MBPO/M2AC fixed) BETWEEN rollout rounds instead of resetting to g_max.
+    baseline_g = int(cfg["sac"].get("baseline_gradient_steps", 1))
+    num_updates = g_max if model_based else baseline_g
 
     kappa_state: dict = {}
     log = _empty_log()
@@ -177,8 +184,6 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
             obs = next_obs
         if step < warmup:
             continue
-
-        num_updates = g_max
 
         # --- model-based: retrain ensemble + generate fresh rollouts ---
         if model_based and step % rollout_freq == 0 and real_buffer.size >= max(num_rollouts, batch):

@@ -290,7 +290,10 @@ def plot_ensemble_toy_1d(ensemble_cfg, device="cpu", save_path=None):
     nxt = (xtr + f(xtr)).astype("float32")          # delta = f(x)
     ens.train_ensemble(e, {"obs": xtr, "act": atr, "next_obs": nxt}, cfg)
     xg = np.linspace(-6, 6, 300).reshape(-1, 1).astype("float32")
-    means, _ = ens.member_gaussians(e, xg, np.zeros((300, 1), "float32"))  # (E,B,1)
+    # denormalize: members predict in normalized delta space (scale-balanced GJS);
+    # for display we want raw physical deltas comparable to f(x).
+    means, _ = ens.member_gaussians(e, xg, np.zeros((300, 1), "float32"),
+                                    denormalize=True)                     # (E,B,1)
     fig, ax = plt.subplots(figsize=(7, 4.5))
     ax.axvspan(-3, 3, color="#cccccc", alpha=0.3, label="training region")
     for m in range(means.shape[0]):
@@ -525,6 +528,24 @@ def plot_return_vs_wallclock(runs, save_path=None):
     return fig
 
 
+def plot_utd_ablation(adaptive_run, fixed_run, save_path=None):
+    """(5.9) UTD control: MACURA with adaptive gradient steps (Eq. 22) vs the same
+    MACURA with G fixed at Gmax. If the two curves are close, the MACURA win over
+    MBPO/M2AC is attributable to rollout adaptation, not to extra SAC updates
+    (tasks.md Phase 4, UTD confound)."""
+    c = ALGO_COLORS["macura"]
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    ax.plot(adaptive_run["steps"], adaptive_run["eval_return"], color=c, lw=2.2,
+            label="MACURA, adaptive G (Eq. 22)")
+    ax.plot(fixed_run["steps"], fixed_run["eval_return"], color=c, lw=2.2, ls="--",
+            label="MACURA, fixed G = Gmax")
+    ax.set_xlabel("real environment steps"); ax.set_ylabel("evaluation return")
+    ax.set_title("UTD control: adaptive vs fixed gradient steps")
+    ax.legend(); ax.grid(alpha=0.3)
+    _maybe_save(fig, save_path)
+    return fig
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # E. POLICY VIDEO  (Part 5b — render a trained agent flying)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -571,6 +592,59 @@ def _pad16(frame):
     """Crop H,W down to the nearest multiple of 16 so ffmpeg doesn't warn/resize."""
     h, w = frame.shape[0] // 16 * 16, frame.shape[1] // 16 * 16
     return frame[:h, :w]
+
+
+def stitch_videos_grid(video_paths: dict, save_path: str, fps=30, cols=2, downscale=2):
+    """Side-by-side demo reel: tile the given {label: mp4_path} clips into one
+    grid video with each label burned into its tile. Shorter clips hold their
+    last frame so every tile runs the full length. Frames are downscaled by
+    `downscale` on read to keep memory bounded. Returns save_path."""
+    import imageio
+    clips, names = [], []
+    for name, path in video_paths.items():
+        rd = imageio.get_reader(path)
+        frames = [np.asarray(f)[::downscale, ::downscale, :3] for f in rd]
+        rd.close()
+        if frames:
+            clips.append(frames)
+            names.append(name)
+    if not clips:
+        raise ValueError("no readable clips in video_paths")
+
+    h = max(c[0].shape[0] for c in clips)
+    w = max(c[0].shape[1] for c in clips)
+    T = max(len(c) for c in clips)
+    rows = int(np.ceil(len(clips) / cols))
+
+    try:                                   # burn labels in with PIL if available
+        from PIL import Image, ImageDraw
+
+        def _label(img, text):
+            im = Image.fromarray(img)
+            d = ImageDraw.Draw(im)
+            d.rectangle([0, 0, 14 + 8 * len(text), 22], fill=(0, 0, 0))
+            d.text((7, 5), text, fill=(255, 255, 255))
+            return np.asarray(im)
+    except ImportError:
+        def _label(img, text):
+            return img
+
+    def _tile(clip, t, name):
+        f = clip[min(t, len(clip) - 1)]
+        out = np.zeros((h, w, 3), np.uint8)
+        out[: f.shape[0], : f.shape[1]] = f
+        return _label(out, name.upper())
+
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    writer = imageio.get_writer(save_path, fps=fps)
+    blank = np.zeros((h, w, 3), np.uint8)
+    for t in range(T):
+        tiles = [_tile(c, t, n) for c, n in zip(clips, names)]
+        tiles += [blank] * (rows * cols - len(tiles))
+        grid = np.vstack([np.hstack(tiles[r * cols:(r + 1) * cols]) for r in range(rows)])
+        writer.append_data(_pad16(grid))
+    writer.close()
+    return save_path
 
 
 # ── internals ─────────────────────────────────────────────────────────────────

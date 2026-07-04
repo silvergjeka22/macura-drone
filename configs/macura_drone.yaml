@@ -82,11 +82,13 @@ sac:
   tau: 0.005
   alpha: auto                 # automatic temperature tuning
   actor_lr: 3.0e-4
-  critic_lr: 3.0e-4
+  critic_lr: 3.0e-4           # NOTE: ignored — SB3 SAC uses ONE learning_rate (= actor_lr); kept for reference
   hidden_size: 256
   batch_size: 256
   target_update_interval: 1
   gradient_steps_max: 20      # Gmax in Eq. 22 (model-based UTD ceiling)
+  baseline_gradient_steps: 1  # model-free SAC baseline UTD (~1 = standard SAC; UTD-20 plain SAC
+                              # destabilizes -> would be a strawman baseline. tasks.md Phase 4)
   real_ratio: 0.05            # paper-faithful FIXED batch-level real mixing (Janner/MBPO; MACURA
                               # inherits). IDENTICAL for MACURA/MBPO/M2AC. Each model-based SAC update
                               # draws a whole batch from the REAL buffer with prob real_ratio, else
@@ -114,7 +116,11 @@ rollout:
 
   # MBPO: fixed truncated-linear schedule (must be tuned, else strawman)
   mbpo:
-    rollout_schedule: [1, 15, 1, 15000]   # [min_len, max_len, start_step, end_step]
+    # [min_len, max_len, start_step, end_step] — tuned for the 20k run (tasks.md
+    # Phase 4): ramp 1 -> 10 between end-of-warmup and 12k, so MBPO actually uses
+    # its schedule within the budget. max_len matches MACURA/M2AC t_max=10 for a
+    # fair fixed-horizon competitor. (The old [1,15,1,15000] barely left length 1.)
+    rollout_schedule: [1, 10, 1000, 12000]
     adaptive_gradient_steps: false
     fixed_gradient_steps: 20
 
@@ -156,3 +162,10 @@ profiles:
     rollout:
       num_rollouts: 200         # fewer parallel branched rollouts (was 400)
       freq_steps: 500           # regenerate model data less often (was 250)
+      # UTD parity: fixed UTD must equal gradient_steps_max (8 in fast), else
+      # MBPO/M2AC would get MORE updates than MACURA's Eq. 22 ceiling allows.
+      # NOTE: requires a DEEP merge of this profile (the notebook does one).
+      mbpo:
+        fixed_gradient_steps: 8
+      m2ac:
+        fixed_gradient_steps: 8

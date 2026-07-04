@@ -20,6 +20,14 @@ numpy arrays {obs, act, next_obs}.
 Note on the uncertainty: we predict the next-state DELTA (next_obs - obs). The
 GJS divergence between members is invariant to the shared +obs shift, so
 computing it on deltas equals computing it on next-states.
+
+Normalization (tasks.md Phase 4, high): BOTH the inputs (obs, act) AND the delta
+targets are normalized to zero mean / unit std of the real data. The members
+therefore predict in NORMALIZED delta space, and `member_gaussians` returns
+normalized-space Gaussians by default — so the GJS uncertainty sums comparable,
+scale-balanced per-dimension terms instead of being dominated by whichever obs
+dims happen to have the largest physical magnitude (position vs angular
+velocity). `predict` un-normalizes internally, so rollouts are unaffected.
 """
 
 from __future__ import annotations
@@ -109,6 +117,8 @@ def build_ensemble(cfg: dict, obs_dim: int, act_dim: int, device: str = "cuda"):
         "model": model,
         "optimizer": optim,
         "normalizer": _Normalizer(obs_dim + act_dim, device),
+        # delta targets are normalized too (scale-balanced GJS — tasks.md Phase 4)
+        "target_normalizer": _Normalizer(obs_dim, device),
         "device": device,
         "cfg": cfg,
     }
@@ -128,6 +138,8 @@ def train_ensemble(ens: dict, data: dict, cfg: dict):
     y = nxt - obs                                   # predict the delta
     ens["normalizer"].fit(x)
     xn = ens["normalizer"](x)
+    ens["target_normalizer"].fit(y)                 # normalize targets (scale-balanced GJS)
+    yn = ens["target_normalizer"](y)
 
     n, E = xn.shape[0], len(model.members)
     bs = min(cfg["batch_size"], n)
@@ -144,7 +156,7 @@ def train_ensemble(ens: dict, data: dict, cfg: dict):
                 bi = boot[e][idx]
                 mean_e, logvar_e = _forward_member(model, xn[bi], e)
                 inv_var = torch.exp(-logvar_e)
-                nll = 0.5 * ((mean_e - y[bi]) ** 2 * inv_var + logvar_e).sum(-1).mean()
+                nll = 0.5 * ((mean_e - yn[bi]) ** 2 * inv_var + logvar_e).sum(-1).mean()
                 loss = loss + nll
             loss = loss / E
             loss.backward()
@@ -165,16 +177,22 @@ def predict(ens: dict, obs: np.ndarray, act: np.ndarray):
     pick = torch.randint(0, E, (B,), device=device)
     mean = means[pick, torch.arange(B)]
     std = torch.exp(0.5 * logvars[pick, torch.arange(B)])
-    delta = mean + std * torch.randn_like(std)
-    next_obs = obs_t + delta
+    delta_n = mean + std * torch.randn_like(std)    # sample in normalized target space
+    tn = ens["target_normalizer"]
+    next_obs = obs_t + (tn.mean + tn.std * delta_n)  # un-normalize the delta
     return next_obs.cpu().numpy()
 
 
-def member_gaussians(ens: dict, obs: np.ndarray, act: np.ndarray):
+def member_gaussians(ens: dict, obs: np.ndarray, act: np.ndarray,
+                     denormalize: bool = False):
     """Per-member predictive Gaussians (means, variances), each (E, B, obs_dim).
 
-    Returned in DELTA space — valid for GJS (shift-invariant). Feeds the GJS
-    uncertainty in algorithms/macura.py.
+    By default returned in NORMALIZED delta space — every obs dim contributes on
+    a comparable scale, so the GJS uncertainty in algorithms/macura.py is
+    scale-balanced (tasks.md Phase 4) instead of dominated by large-magnitude
+    dims. GJS itself is shift-invariant, so the normalization offset is
+    irrelevant; the per-dim rescaling is exactly the point of the fix.
+    Pass denormalize=True to get raw physical-delta Gaussians (for plotting).
     """
     model, device = ens["model"], ens["device"]
     obs_t = torch.as_tensor(np.atleast_2d(obs), dtype=torch.float32, device=device)
@@ -182,18 +200,24 @@ def member_gaussians(ens: dict, obs: np.ndarray, act: np.ndarray):
     x = ens["normalizer"](torch.cat([obs_t, act_t], dim=-1))
     with torch.no_grad():
         means, logvars = model(x)
+        if denormalize:
+            tn = ens["target_normalizer"]
+            means = tn.mean + tn.std * means
+            logvars = logvars + 2.0 * torch.log(tn.std)
     return means.cpu().numpy(), np.exp(logvars.cpu().numpy())
 
 
 def save_ensemble(ens: dict, path: str):
     """Persist the ensemble for a best checkpoint: member weights + the input normalizer
     statistics (needed at predict time). No logic change — just serialization."""
-    model, norm = ens["model"], ens["normalizer"]
+    model, norm, tnorm = ens["model"], ens["normalizer"], ens["target_normalizer"]
     torch.save(
         {
             "model": model.state_dict(),
             "norm_mean": norm.mean.detach().cpu(),
             "norm_std": norm.std.detach().cpu(),
+            "tnorm_mean": tnorm.mean.detach().cpu(),
+            "tnorm_std": tnorm.std.detach().cpu(),
         },
         path,
     )
@@ -206,6 +230,9 @@ def load_ensemble(ens: dict, path: str):
     ens["model"].load_state_dict(ckpt["model"])
     ens["normalizer"].mean = ckpt["norm_mean"].to(ens["device"])
     ens["normalizer"].std = ckpt["norm_std"].to(ens["device"])
+    if "tnorm_mean" in ckpt:                        # older checkpoints: identity target norm
+        ens["target_normalizer"].mean = ckpt["tnorm_mean"].to(ens["device"])
+        ens["target_normalizer"].std = ckpt["tnorm_std"].to(ens["device"])
     return ens
 
 
