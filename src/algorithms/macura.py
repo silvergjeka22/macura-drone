@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from models import ensemble as ens
+from src.models import ensemble as ens
 
 
 # ── uncertainty: geometric Jensen-Shannon divergence (Eq. 15-19) ──────────────
@@ -113,7 +113,7 @@ def macura_rollout(dynamics_model, agent, start_obs: np.ndarray,
     kappa = kappa_state.get("kappa", np.inf)
     base_u = 0.0  # ζ-quantile of first-step uncertainties (logged for plots 5.5)
 
-    from algorithms.sac import select_actions
+    from src.algorithms.sac import select_actions
 
     for t in range(t_max):
         if not alive.any():
@@ -171,7 +171,7 @@ def build_macura(obs_dim: int, act_dim: int, cfg: dict, device: str = "cuda"):
     The rollout logic above is stateless; training/train.py wires it together
     with `kappa_state = {}` carried across rounds.
     """
-    from algorithms.sac import build_sac
+    from src.algorithms.sac import build_sac
 
     agent = build_sac(obs_dim, act_dim, cfg["sac"], device)
     dynamics_model = ens.build_ensemble(cfg["ensemble"], obs_dim, act_dim, device)

@@ -1,28 +1,12 @@
-# ── macura-backflip requirements ─────────────────────────────────────────────
-# Targeted at Google Colab (Python 3.12, CUDA GPU) for training, and macOS
-# (CPU/MPS) for the live viewer. All deps install cleanly on both.
-#
-# Backbone note: we build on Stable-Baselines3 (maintained) for the SAC learner,
-# NOT mbrl-lib. The probabilistic ensemble and the MACURA / MBPO / M2AC rollout
-# logic are our own pure-function modules (models/ensemble.py, algorithms/*.py).
-# The Pogo body ships in the repo (envs/assets/pogo.xml) — no external robot
-# model or menagerie is needed.
+# macura-backflip requirements (Colab for training; macOS for the live viewer).
+# On Colab, numpy/scipy/torch are preinstalled and CUDA-matched - do NOT reinstall
+# them here. The Pogo body ships in the repo (src/envs/assets/pogo.xml), so there
+# is nothing external to fetch.
 
-# --- core scientific stack -------------------------------------------------
-# IMPORTANT: do NOT list numpy / scipy / torch here on Colab. Colab already ships
-# a self-consistent, CUDA-matched build; re-installing them corrupts the ABI.
-# numpy consistency is repaired by setup_colab.sh if needed.
-matplotlib>=3.7
-pyyaml>=6.0
-pandas>=2.0
-tqdm>=4.65
-
-# --- simulation ------------------------------------------------------------
 mujoco>=3.1                # MuJoCo physics (runs the Pogo model; native viewer on macOS)
 gymnasium>=0.29            # env API
-imageio>=2.31             # save rollout frames / videos
+stable-baselines3>=2.3   # SAC learner (shared by all four algorithms)
+matplotlib>=3.7           # figures
+imageio>=2.31             # save videos
 imageio-ffmpeg>=0.4       # mp4 encoding
 pillow>=9.0               # labels on the stitched demo reel
-
-# --- RL backbone (SAC learner; shared by all four algorithms) --------------
-stable-baselines3>=2.3   # maintained SAC implementation

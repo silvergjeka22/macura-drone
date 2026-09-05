@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from models import ensemble as ens
+from src.models import ensemble as ens
 
 
 def rollout_length(env_step: int, schedule) -> int:
@@ -40,7 +40,7 @@ def mbpo_rollout(dynamics_model, agent, start_obs: np.ndarray,
     schedule = cfg["rollout"]["mbpo"]["rollout_schedule"]
     horizon = rollout_length(env_step, schedule)
 
-    from algorithms.sac import select_actions
+    from src.algorithms.sac import select_actions
 
     obs = np.array(start_obs, dtype=np.float32)
     alive = np.ones(obs.shape[0], dtype=bool)
@@ -64,7 +64,7 @@ def mbpo_rollout(dynamics_model, agent, start_obs: np.ndarray,
 
 
 def build_mbpo(obs_dim: int, act_dim: int, cfg: dict, device: str = "cuda"):
-    from algorithms.sac import build_sac
+    from src.algorithms.sac import build_sac
 
     agent = build_sac(obs_dim, act_dim, cfg["sac"], device)
     dynamics_model = ens.build_ensemble(cfg["ensemble"], obs_dim, act_dim, device)

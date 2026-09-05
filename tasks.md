@@ -5,7 +5,7 @@ Priority tags: (high) / (med) / (low).
 
 Backbone: **Stable-Baselines3 SAC** + our probabilistic ensemble + our rollout
 strategies. Env: **Pogo**, a custom planar one-legged MuJoCo body
-(`envs/assets/pogo.xml`) learning a backflip. The four algorithms share
+(`src/envs/assets/pogo.xml`) learning a backflip. The four algorithms share
 everything except the rollout strategy.
 
 ---
@@ -23,13 +23,13 @@ everything except the rollout strategy.
 ## Phase 1 — Colab bring-up (high)
 - [ ] (high) Rename the GitHub repo to `macura-backflip` (or set `REPO_NAME`) so
   the notebook clone works; confirm the private clone + token scrub.
-- [ ] (high) Run `colab.ipynb` top-to-bottom under `SMOKE = True` on a GPU runtime
-  with zero errors; confirm at least one `.mp4` renders inline.
+- [ ] (high) Run `notebooks/backflip.ipynb` top-to-bottom on a GPU runtime with zero
+  errors; confirm at least one `.mp4` renders inline.
 - [ ] (med) Confirm `MUJOCO_GL=egl` offscreen rendering works for the videos.
 
 ## Phase 2 — Learn the flip (high)
-- [ ] (high) Train the full matrix (`SMOKE = False`, 3 seeds) and check that Pogo
-  reaches a real rotation (`eval_flips` climbing, some `landed_flip`).
+- [ ] (high) Train the full matrix (3 seeds) and check that Pogo reaches a real
+  rotation (`eval_flips` climbing, some `landed_flip`).
 - [ ] (high) If a full flip is not discovered from scratch, run the **curriculum**
   (`curriculum.stage1_boing` → `stage2_halfflip` → `stage3_flip`), warm-starting
   each stage with `train_one(..., init_ckpt=<prev best>)`.

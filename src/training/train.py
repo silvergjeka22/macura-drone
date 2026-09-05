@@ -37,12 +37,12 @@ import os
 import json
 import numpy as np
 
-from envs import pogo_env
-from models import ensemble as ens
-from algorithms import sac as sac_mod
-from algorithms import macura as macura_mod
-from algorithms import mbpo as mbpo_mod
-from algorithms import m2ac as m2ac_mod
+from src.envs import pogo_env
+from src.models import ensemble as ens
+from src.algorithms import sac as sac_mod
+from src.algorithms import macura as macura_mod
+from src.algorithms import mbpo as mbpo_mod
+from src.algorithms import m2ac as m2ac_mod
 
 try:
     import torch
@@ -462,7 +462,7 @@ def record_best_videos(cfg: dict, drive_dir: str, device: str = "cuda",
     """For EVERY algorithm × seed, load the best model and save a ~`seconds`
     deterministic evaluation clip to {DRIVE}/videos/<algo>_seed<seed>.mp4."""
     from stable_baselines3 import SAC
-    from viz import plots
+    from src.viz import plots
     seeds = seeds or cfg["experiment"]["seeds"]
     renv, _, _ = pogo_env.make_env(cfg["env"], seed=999, render=True)
     paths = {}

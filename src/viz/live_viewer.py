@@ -24,7 +24,7 @@ from __future__ import annotations
 import time
 import numpy as np
 
-from envs import pogo_env
+from src.envs import pogo_env
 
 
 def load_policy(ckpt_path: str, device: str = "cpu"):

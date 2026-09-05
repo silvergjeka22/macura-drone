@@ -35,7 +35,7 @@ is most uncertain exactly at the aggressive airborne/landing phase.
 ## 3. The task
 
 - **Body:** Pogo — a planar one-legged pogo-stick with a face (custom MuJoCo model,
-  `envs/assets/pogo.xml`). Motion in the x–z plane; the torso hinge is unlimited so
+  `src/envs/assets/pogo.xml`). Motion in the x–z plane; the torso hinge is unlimited so
   it can rotate a full 360°.
 - **Observation:** torso height, torso angle (as sin/cos), the three leg-joint
   angles, foot clearance, and all six velocities (13-dim).

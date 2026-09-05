@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from models import ensemble as ens
-from algorithms.macura import compute_gjs
+from src.models import ensemble as ens
+from src.algorithms.macura import compute_gjs
 
 
 def m2ac_rollout(dynamics_model, agent, start_obs: np.ndarray,
@@ -30,7 +30,7 @@ def m2ac_rollout(dynamics_model, agent, start_obs: np.ndarray,
     mask_fraction = float(mcfg["mask_fraction"])      # fraction KEPT
     penalty = float(mcfg["uncertainty_penalty"])
 
-    from algorithms.sac import select_actions
+    from src.algorithms.sac import select_actions
 
     obs = np.array(start_obs, dtype=np.float32)
     alive = np.ones(obs.shape[0], dtype=bool)
@@ -72,7 +72,7 @@ def m2ac_rollout(dynamics_model, agent, start_obs: np.ndarray,
 
 
 def build_m2ac(obs_dim: int, act_dim: int, cfg: dict, device: str = "cuda"):
-    from algorithms.sac import build_sac
+    from src.algorithms.sac import build_sac
 
     agent = build_sac(obs_dim, act_dim, cfg["sac"], device)
     dynamics_model = ens.build_ensemble(cfg["ensemble"], obs_dim, act_dim, device)
