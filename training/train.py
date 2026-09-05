@@ -35,10 +35,9 @@ from __future__ import annotations
 
 import os
 import json
-import time
 import numpy as np
 
-from envs import drone_env
+from envs import pogo_env
 from models import ensemble as ens
 from algorithms import sac as sac_mod
 from algorithms import macura as macura_mod
@@ -80,46 +79,63 @@ class _RealBuffer:
 
 # ── evaluation (identical protocol for all algorithms) ────────────────────────
 def evaluate(agent, env, eval_episodes: int) -> dict:
-    returns, lengths, failures = [], [], []
+    returns, lengths, failures, successes, flips = [], [], [], [], []
     for _ in range(eval_episodes):
         obs, _ = env.reset()
         done = False
-        ep_ret, ep_len, failed = 0.0, 0, False
+        ep_ret, ep_len, failed, landed, ep_flips = 0.0, 0, False, False, 0.0
         while not done:
             act = sac_mod.select_action(agent, obs, evaluate=True)
             obs, rew, terminated, truncated, info = env.step(act)
             ep_ret += rew
             ep_len += 1
             failed = failed or info.get("failure", False)
+            landed = landed or info.get("landed_flip", False)   # a full flip, landed upright
+            ep_flips = max(ep_flips, info.get("flips", 0.0))     # peak rotation this episode
             done = terminated or truncated
         returns.append(ep_ret)
         lengths.append(ep_len)
         failures.append(float(failed))
+        successes.append(float(landed))
+        flips.append(ep_flips)
     return {
         "eval_return": float(np.mean(returns)),
         "eval_return_std": float(np.std(returns)),
         "eval_length": float(np.mean(lengths)),
-        "eval_failure_rate": float(np.mean(failures)),
+        "eval_failure_rate": float(np.mean(failures)),   # faceplant / collapse rate
+        "eval_success_rate": float(np.mean(successes)),  # stuck-backflip rate
+        "eval_flips": float(np.mean(flips)),             # mean peak rotation (turns)
     }
 
 
 # ── a single training run ─────────────────────────────────────────────────────
-def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
-    """Train one algorithm in {'macura','mbpo','m2ac','sac'} and log curves."""
+def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0,
+              init_ckpt: str = None) -> dict:
+    """Train one algorithm in {'macura','mbpo','m2ac','sac'} and log curves.
+
+    `init_ckpt` (optional): path to a previous best .zip whose SAC policy is
+    loaded before training — used to warm-start a later curriculum stage
+    (jump -> half-flip -> full flip) from the earlier one.
+    """
     if torch is None:
         raise ImportError("torch required for training")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     _seed_everything(seed)
 
-    env, obs_dim, act_dim = drone_env.make_env(cfg["env"], seed=seed)
-    eval_env, _, _ = drone_env.make_env(cfg["env"], seed=cfg["experiment"]["eval_seeds"][0])
-    reward_fn = drone_env.known_reward_fn(cfg["env"])
-    done_fn = drone_env.termination_fn(cfg["env"])
+    env, obs_dim, act_dim = pogo_env.make_env(cfg["env"], seed=seed)
+    eval_env, _, _ = pogo_env.make_env(cfg["env"], seed=cfg["experiment"]["eval_seeds"][0])
+    reward_fn = pogo_env.known_reward_fn(cfg["env"])
+    done_fn = pogo_env.termination_fn(cfg["env"])
 
     model_based = algo_name in ("macura", "mbpo", "m2ac")
     buf_cap = cfg["rollout"]["model_buffer_capacity"] if model_based else 1_000_000
     sac_cfg = {**cfg["sac"], "buffer_size": buf_cap}
     agent = sac_mod.build_sac(obs_dim, act_dim, sac_cfg, device, seed)
+    if init_ckpt:                                   # curriculum warm-start: load prior policy
+        try:
+            agent.set_parameters(init_ckpt, device=device)
+        except Exception:
+            pass
     dynamics_model = ens.build_ensemble(cfg["ensemble"], obs_dim, act_dim, device) if model_based else None
 
     total_steps = cfg["experiment"]["total_env_steps"]
@@ -155,16 +171,10 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
 
     kappa_state: dict = {}
     log = _empty_log()
-    t0 = time.time()
     best_return = -np.inf
     best_step = None
     best_ckpt = None
     model_trained = False
-    # Realised real/imagined split, counted in batches. `win_*` reset each eval window; `cum_*` are
-    # run totals. Per-step reporting is degenerate for MACURA (Eq. 22 UTD does ~1 update/step early →
-    # a single batch is all-real or all-imagined), so we aggregate to recover the true ~real_ratio.
-    win_real, win_model = 0, 0
-    cum_real, cum_model = 0, 0
     noise = _make_noise(cfg["exploration"], act_dim,
                         cfg["env"]["max_episode_steps"], seed)
 
@@ -197,8 +207,6 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
                     cfg["rollout"]["macura"]["adaptive_gradient_steps"])
                 log["kappa"].append((step, diag["kappa"]))
                 log["rollout_length"].append((step, diag["mean_rollout_length"]))
-                log["gjs"].append((step, diag["base_uncertainty"]))
-                log["rollout_length_samples"].append((step, diag["lengths"]))
             elif algo_name == "mbpo":
                 trans, diag = mbpo_mod.mbpo_rollout(
                     dynamics_model, agent, start, reward_fn, done_fn, step, cfg)
@@ -220,10 +228,7 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
             # model-based: batch-level real/imagined mixing at the FIXED real_ratio. The SAME path
             # runs for MACURA/MBPO/M2AC; only `num_updates` (UTD) and which rollout produced the
             # model data differ. The SAC math is untouched.
-            info = sac_mod.sac_update_mixed(agent, real_rb, model_rb,
-                                            num_updates, batch, real_ratio, mix_rng)
-            win_real += info["n_real"];   win_model += info["n_model"]
-            cum_real += info["n_real"];   cum_model += info["n_model"]
+            sac_mod.sac_update_mixed(agent, real_rb, model_rb, num_updates, batch, real_ratio, mix_rng)
 
         # --- periodic GREEDY evaluation on FIXED shared seeds → headline curve + selection ---
         # Best checkpoint = highest periodic greedy-eval return, gated by `selection.start_step`
@@ -234,35 +239,16 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
             log["eval_return"].append(m["eval_return"])
             log["eval_return_std"].append(m["eval_return_std"])
             log["eval_failure_rate"].append(m["eval_failure_rate"])
-            log["wall_clock"].append((step, time.time() - t0))
-            # MBRL telemetry: target real_ratio + REALISED real/imagined split (model-based only),
-            # aggregated over this eval window. `real_pct` feeds viz.plots.plot_real_ratio.
-            win_tot = win_real + win_model
-            real_pct = 100.0 * win_real / win_tot if win_tot else float("nan")
-            imagined_pct = 100.0 * win_model / win_tot if win_tot else float("nan")
-            log["real_ratio_target"].append((step, real_ratio if model_based else float("nan")))
-            log["real_pct"].append((step, real_pct))
-            log["imagined_pct"].append((step, imagined_pct))
-            win_real, win_model = 0, 0
+            log["eval_success_rate"].append(m["eval_success_rate"])
+            log["eval_flips"].append(m["eval_flips"])
             improved = step >= start_step and m["eval_return"] > best_return
             if improved:                       # overwrite best checkpoint (policy + ensemble + meta)
                 best_return = m["eval_return"]
                 best_step = step
                 best_ckpt = _save_best(agent, dynamics_model, drive_dir, algo_name, seed)
-            # Real-vs-imaginary, made prominent: window split, cumulative split, and target.
-            if model_based and win_tot:
-                cum_tot = cum_real + cum_model
-                cum_pct = 100.0 * cum_real / cum_tot if cum_tot else float("nan")
-                data = (f"  REAL/IMAG win {real_pct:.0f}/{imagined_pct:.0f}%"
-                        f"  cum {cum_pct:.0f}/{100 - cum_pct:.0f}%"
-                        f"  (target {100 * real_ratio:.0f}%)")
-            elif model_based:
-                data = "  REAL/IMAG (no model updates yet)"
-            else:
-                data = "  REAL 100% (model-free)"
             print(f"[{algo_name} seed{seed}] step {step:>6}  return {m['eval_return']:7.1f}"
-                  f"  fail {m['eval_failure_rate']:.2f}{data}"
-                  f"{'  <- best' if improved else ''}")
+                  f"  flips {m['eval_flips']:.2f}  land {m['eval_success_rate']:.2f}"
+                  f"  fail {m['eval_failure_rate']:.2f}{'  <- best' if improved else ''}")
 
     if best_ckpt is None:                       # never improved (e.g. no eval / before start_step)
         best_ckpt = _save_best(agent, dynamics_model, drive_dir, algo_name, seed)
@@ -288,9 +274,8 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
 # ── small internals ───────────────────────────────────────────────────────────
 def _empty_log():
     return {"steps": [], "eval_return": [], "eval_return_std": [],
-            "eval_failure_rate": [], "kappa": [], "rollout_length": [],
-            "gjs": [], "rollout_length_samples": [], "wall_clock": [],
-            "real_ratio_target": [], "real_pct": [], "imagined_pct": []}
+            "eval_failure_rate": [], "eval_success_rate": [], "eval_flips": [],
+            "kappa": [], "rollout_length": []}
 
 
 def _final_eval(agent, eval_env, best_ckpt, eval_episodes):
@@ -459,7 +444,7 @@ def evaluate_best(cfg: dict, drive_dir: str, device: str = "cuda",
     from stable_baselines3 import SAC
     seeds = seeds or cfg["experiment"]["seeds"]
     n = eval_episodes or cfg["experiment"]["eval_episodes"]
-    eval_env, _, _ = drone_env.make_env(cfg["env"], seed=cfg["experiment"]["eval_seeds"][0])
+    eval_env, _, _ = pogo_env.make_env(cfg["env"], seed=cfg["experiment"]["eval_seeds"][0])
     out = []
     for algo in cfg["experiment"]["algorithms"]:
         for seed in seeds:
@@ -479,7 +464,7 @@ def record_best_videos(cfg: dict, drive_dir: str, device: str = "cuda",
     from stable_baselines3 import SAC
     from viz import plots
     seeds = seeds or cfg["experiment"]["seeds"]
-    renv, _, _ = drone_env.make_env(cfg["env"], seed=999, render=True)
+    renv, _, _ = pogo_env.make_env(cfg["env"], seed=999, render=True)
     paths = {}
     for algo in cfg["experiment"]["algorithms"]:
         for seed in seeds:

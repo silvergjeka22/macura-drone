@@ -1,53 +1,31 @@
 #!/usr/bin/env bash
 # ── setup_colab.sh ───────────────────────────────────────────────────────────
-# One-shot Colab bootstrap:
+# One-shot Colab bootstrap for macura-backflip:
 #   1. clone THIS (private) repo into the Colab workspace using a GitHub token
-#   2. clone mujoco_menagerie (public) to get the Skydio X2 MJCF model
-#   3. (optionally) clone the authors' MACURA reference code + mbrl-lib source
-#   4. pip install -r requirements.txt
-#   5. create the Google Drive results folders and print all paths
+#   2. pip install -r requirements.txt
+#   3. repair numpy consistency if a reinstall left it inconsistent
+#   4. create the Google Drive results folders and print all paths
+#
+# The Pogo body ships in the repo (envs/assets/pogo.xml), so there is NOTHING
+# external to fetch — no mujoco_menagerie, no PyBullet source build.
 #
 # SECURITY: the GitHub token is read from the environment variable GITHUB_TOKEN,
-# which the notebook sets at runtime via getpass / Colab Secrets. The token is
-# NEVER written to disk and NEVER baked into this script. The clone URL with the
-# token is used only for the single git command and not stored in git config.
+# set by the notebook at runtime (getpass / Colab Secrets). It is NEVER written
+# to disk or baked into this script, and is scrubbed from the git remote.
 #
 # Usage (from the notebook):
-#   !GITHUB_TOKEN=$TOKEN bash macura-drone/bash/setup_colab.sh
-# or, if the repo is not yet cloned, the notebook downloads this script first.
+#   !GITHUB_TOKEN=$TOKEN bash macura-backflip/bash/setup_colab.sh
 
 set -euo pipefail
 
-# ── configurable paths ───────────────────────────────────────────────────────
 GH_USER="${GH_USER:-silvergjeka22}"
-REPO_NAME="${REPO_NAME:-macura-drone}"
+REPO_NAME="${REPO_NAME:-macura-backflip}"   # <-- rename the GitHub repo to this (see README)
 WORKSPACE="${WORKSPACE:-/content}"
-DRIVE_ROOT="${DRIVE_ROOT:-/content/drive/MyDrive/macura-drone}"
-CLONE_REFERENCE_CODE="${CLONE_REFERENCE_CODE:-1}"   # set to 0 to skip authors' code
-
+DRIVE_ROOT="${DRIVE_ROOT:-/content/drive/MyDrive/macura-backflip}"
 REPO_DIR="${WORKSPACE}/${REPO_NAME}"
-MENAGERIE_DIR="${WORKSPACE}/mujoco_menagerie"
-
-# ── timing helpers ───────────────────────────────────────────────────────────
-# SCRIPT_START: wall-clock at script start. STEP_START: reset before each step.
-# step_done "<label>" prints how long the step just took (and cumulative total).
-SCRIPT_START=$(date +%s)
-STEP_START=$SCRIPT_START
-fmt_secs() {  # pretty-print seconds as "Mm Ss"
-  local s=$1
-  printf '%dm %02ds' $(( s / 60 )) $(( s % 60 ))
-}
-step_done() {
-  local now elapsed total
-  now=$(date +%s)
-  elapsed=$(( now - STEP_START ))
-  total=$(( now - SCRIPT_START ))
-  printf '      ⏱  %s took %s   (total %s)\n' "$1" "$(fmt_secs "$elapsed")" "$(fmt_secs "$total")"
-  STEP_START=$now
-}
 
 echo "==================================================================="
-echo " macura-drone Colab setup"
+echo " macura-backflip Colab setup"
 echo "   workspace : ${WORKSPACE}"
 echo "   repo      : ${GH_USER}/${REPO_NAME}"
 echo "   drive     : ${DRIVE_ROOT}"
@@ -55,98 +33,43 @@ echo "==================================================================="
 
 # ── 1. clone (or update) the private project repo ────────────────────────────
 if [[ -z "${GITHUB_TOKEN:-}" ]]; then
-  echo "ERROR: GITHUB_TOKEN is not set. The notebook must export it before"
+  echo "ERROR: GITHUB_TOKEN is not set. The notebook must export it before" >&2
   echo "       running this script (it is a PRIVATE repository)." >&2
   exit 1
 fi
 
 if [[ -d "${REPO_DIR}/.git" ]]; then
-  echo "[1/5] repo already present -> git pull"
-  # the remote URL is tokenless (scrubbed after clone), so authenticate inline
-  # for this one pull without persisting the credential.
+  echo "[1/3] repo present -> git pull"
   git -C "${REPO_DIR}" pull --ff-only \
     "https://${GITHUB_TOKEN}@github.com/${GH_USER}/${REPO_NAME}.git" main
 else
-  echo "[1/5] cloning private repo ${GH_USER}/${REPO_NAME}"
-  # token is interpolated only for this one command; nothing persisted.
+  echo "[1/3] cloning private repo ${GH_USER}/${REPO_NAME}"
   git clone "https://${GITHUB_TOKEN}@github.com/${GH_USER}/${REPO_NAME}.git" "${REPO_DIR}"
-  # scrub any credential that git might have cached in the remote URL
+  # scrub the token from the remote URL
   git -C "${REPO_DIR}" remote set-url origin "https://github.com/${GH_USER}/${REPO_NAME}.git"
 fi
-step_done "[1/5] project repo clone/pull"
 
-# ── 2. clone mujoco_menagerie (public) for the Skydio X2 model ────────────────
-if [[ -d "${MENAGERIE_DIR}/.git" ]]; then
-  echo "[2/5] mujoco_menagerie already present -> skip"
-else
-  echo "[2/5] cloning mujoco_menagerie (Skydio X2 MJCF)"
-  git clone --depth 1 https://github.com/google-deepmind/mujoco_menagerie.git "${MENAGERIE_DIR}"
-fi
-echo "      Skydio X2 scene: ${MENAGERIE_DIR}/skydio_x2/scene.xml"
-step_done "[2/5] mujoco_menagerie clone"
-
-# ── 3. clone the authors' MACURA reference code (optional) ────────────────────
-if [[ "${CLONE_REFERENCE_CODE}" == "1" ]]; then
-  if [[ -d "${WORKSPACE}/macura_reference/.git" ]]; then
-    echo "[3/5] authors' MACURA code already present -> skip"
-  else
-    echo "[3/5] cloning authors' MACURA reference code"
-    git clone --depth 1 \
-      https://github.com/Data-Science-in-Mechanical-Engineering/macura.git \
-      "${WORKSPACE}/macura_reference" || \
-      echo "      (warning: could not clone reference code; continuing)"
-  fi
-else
-  echo "[3/5] skipping authors' reference code (CLONE_REFERENCE_CODE=0)"
-fi
-step_done "[3/5] reference code clone"
-
-# ── 4. install python dependencies ───────────────────────────────────────────
-# Core stack (SB3 + torch + pybullet + mujoco + gymnasium); Python-3.12 friendly.
-echo "[4/5] installing requirements (core + SB3 backbone)"
+# ── 2. install python dependencies ───────────────────────────────────────────
+echo "[2/3] installing requirements"
 pip install -q -r "${REPO_DIR}/requirements.txt"
-step_done "[4/5] pip install requirements.txt"
 
-# 4b. gym-pybullet-drones is NOT on PyPI -> install from GitHub source.
-# --no-deps is CRITICAL: it stops the package from downgrading Colab's numpy/
-# scipy (which corrupts the scientific-stack ABI). Its runtime deps (numpy,
-# pybullet, gymnasium, matplotlib, pillow) are already present on Colab.
-# Non-fatal: if it fails, the MuJoCo backend still works.
-echo "[4b/5] installing gym-pybullet-drones from source (--no-deps)"
-set +e
-pip install -q --no-deps "git+https://github.com/utiasDSL/gym-pybullet-drones.git"
-GPD_OK=$?
-set -e
-step_done "[4b/5] gym-pybullet-drones source build"
-
-# 4c. Repair numpy consistency. Re-installing packages can leave numpy's Python
-# files newer than its compiled .so (-> "_blas_supports_fpe" AttributeError).
-# Force a single consistent numpy>=2.1 (has the symbol scipy expects) without
-# touching anything else.
-echo "[4c/5] repairing numpy consistency"
-pip install -q --force-reinstall --no-deps "numpy>=2.1"
-step_done "[4c/5] numpy repair"
-
-echo "      verifying scientific stack..."
-python - <<'PY' || echo "      WARNING: stack still inconsistent -> Runtime > Restart session, then re-run"
-import numpy, scipy, scipy.sparse  # noqa
-print("      numpy", numpy.__version__, "scipy", scipy.__version__, "OK")
+# 2b. Repair numpy consistency (a reinstall can leave numpy's .py newer than its
+# compiled .so -> AttributeError). Force a single consistent numpy without
+# touching anything else. Non-fatal.
+pip install -q --force-reinstall --no-deps "numpy>=2.1" || true
+python - <<'PY' || echo "WARNING: stack inconsistent -> Runtime > Restart session, then re-run"
+import numpy, mujoco  # noqa
+print("      numpy", numpy.__version__, "mujoco", mujoco.__version__, "OK")
 PY
-if ! python -c "import gym_pybullet_drones" 2>/dev/null; then
-  echo "      WARNING: gym-pybullet-drones not importable. Either pin a release"
-  echo "      (@v1.0.0 on the git URL) or set env.backend: mujoco in the config."
-fi
 
-# ── 5. create Drive results folders ──────────────────────────────────────────
-echo "[5/5] creating Drive results folders"
+# ── 3. create Drive results folders ──────────────────────────────────────────
+echo "[3/3] creating Drive results folders"
 for sub in checkpoints videos plots logs; do
   mkdir -p "${DRIVE_ROOT}/${sub}"
 done
-step_done "[5/5] Drive folders"
 
 echo "==================================================================="
-echo " DONE in $(fmt_secs $(( $(date +%s) - SCRIPT_START ))).  Paths:"
-echo "   repo            : ${REPO_DIR}"
-echo "   menagerie (X2)  : ${MENAGERIE_DIR}/skydio_x2/scene.xml"
-echo "   drive results   : ${DRIVE_ROOT}"
+echo " DONE.  Paths:"
+echo "   repo          : ${REPO_DIR}"
+echo "   drive results : ${DRIVE_ROOT}"
 echo "==================================================================="

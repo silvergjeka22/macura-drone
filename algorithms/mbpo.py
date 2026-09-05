@@ -6,8 +6,8 @@ difference is the rollout length, which follows a pre-scheduled linear ramp
 
 IMPORTANT (fairness): MBPO's result depends on a *tuned* schedule. An untuned
 ramp makes MBPO look artificially bad and turns the comparison into a strawman.
-The schedule lives in configs/macura_drone.yaml → rollout.mbpo.rollout_schedule
-and should be tuned on the drone (see tasks.md).
+The schedule lives in configs/macura_backflip.yaml -> rollout.mbpo.rollout_schedule
+and should be tuned on the backflip task (see tasks.md).
 
 Pure-function library.
 """

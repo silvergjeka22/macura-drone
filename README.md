@@ -1,204 +1,153 @@
-# MACURA on Drones
+# MACURA learns a Backflip
 
-**Reproducing and stress-testing the MACURA algorithm on an unstable quadrotor,
-and comparing all four algorithms from the paper (MACURA, MBPO, M2AC, SAC).**
+**Teaching "Pogo" — a planar one-legged gymnast — to backflip, and using it to
+compare the four algorithms from the MACURA paper (MACURA, MBPO, M2AC, SAC) on
+an aggressive, unstable maneuver.**
 
 > Paper: *Trust the Model Where It Trusts Itself — Model-Based Actor-Critic with
 > Uncertainty-Aware Rollout Adaption* (MACURA), Frauenknecht, Eisele, Subhasish,
 > Solowjow, Trimpe — **ICML 2024**, [arXiv:2405.19014](https://arxiv.org/abs/2405.19014).
 
+Train on **Google Colab** (free GPU), then **watch the trained policy backflip
+live on your Mac** in a native MuJoCo window.
+
 ---
 
-## 1. Project overview
+## 1. Why a backflip
 
-Model-based RL (MBRL) is sample-efficient because the agent trains on *imagined*
-rollouts from a learned dynamics model instead of expensive real interaction. The
-risk is **model exploitation**: imagine too far and the model's small errors
-compound, so the policy learns to exploit fantasy dynamics.
+Model-based RL (MBRL) trains the policy on *imagined* rollouts from a learned
+dynamics model, which is sample-efficient but risks **model exploitation**:
+imagine too far and the model's errors compound, so the policy learns to exploit
+fantasy dynamics.
 
 **MACURA's idea** — *"trust the model where it trusts itself"* — makes the rollout
 length **adaptive to the model's own uncertainty**: a branched rollout continues
-while the probabilistic ensemble's members agree (low epistemic uncertainty) and
-**truncates the instant they disagree**.
+while the probabilistic ensemble's members agree and **truncates the instant they
+disagree**.
 
-This project transfers that mechanism to a domain *not* in the paper — an
-**unstable Skydio X2 quadrotor** (MuJoCo) — where model errors compound fast, so
-adaptive truncation is put under real stress. We run **all four** paper
-algorithms with a shared SAC backbone and shared ensemble so any difference is
-attributable to the **rollout strategy alone**.
+A **backflip is the ideal stress test**. It is an aggressive, unstable maneuver;
+early in training the ensemble is very uncertain about the airborne/landing phase.
+A **fixed-horizon** method (MBPO) keeps imagining the whole flight from a shaky
+model, the policy exploits the fantasy, and Pogo **face-plants**. MACURA truncates
+at the uncertain moment and learns the flip from trustworthy pieces — so it should
+land the flip with fewer real crashes. This is not a paper benchmark (the paper
+uses MuJoCo locomotion), so it is a genuine transfer to a new, unstable task.
 
-### The four algorithms
+### The four algorithms (shared SAC backbone + shared ensemble — only the rollout differs)
 
-| Algorithm | Type | Rollout strategy | Uncertainty use | Role |
-|---|---|---|---|---|
-| **MACURA** | Model-based | **Adaptive** truncation (per-rollout, κ vs GJS divergence) | drives an adaptive κ threshold | the proposed method |
-| **MBPO** | Model-based | **Fixed** truncated-linear schedule | none | no-adaptivity baseline |
-| **M2AC** | Model-based | fixed length, **mask** least-trustworthy steps | filter, not length | alternative uncertainty use |
-| **SAC** | Model-free | **no model rollouts** | — | model-free reference |
+| Algorithm | Type | Rollout strategy | Role |
+|---|---|---|---|
+| **MACURA** | Model-based | **Adaptive** truncation (κ vs GJS divergence) | the proposed method |
+| **MBPO** | Model-based | **Fixed** truncated-linear schedule | no-adaptivity baseline |
+| **M2AC** | Model-based | fixed length, **mask** least-trustworthy steps | alternative uncertainty use |
+| **SAC** | Model-free | **no model rollouts** | model-free reference |
 
 ---
 
-## 2. Core concepts (as implemented)
+## 2. The task (Pogo)
 
-> **Backbone note:** the original plan was to build on `mbrl-lib`, but it is
-> unmaintained and **not installable on Colab's current Python 3.12** (it forces
-> ancient `omegaconf`/`gym`, incompatible with numpy 2). We therefore build on
-> **Stable-Baselines3** (maintained) for the SAC learner and implement the
-> probabilistic ensemble + all rollout strategies ourselves. The comparison
-> stays fair: all four algorithms share the same SB3 SAC and the same ensemble.
-
-- **SAC backbone** — soft actor-critic, identical for all four (Stable-Baselines3
-  SAC, driven manually for the Dyna loop). See [`algorithms/sac.py`](algorithms/sac.py).
-- **Probabilistic ensemble (PE)** — a PyTorch ensemble of Gaussian MLPs predicting
-  next-state delta Gaussians; member disagreement is the uncertainty signal.
-  Log-variances are bounded for numerically stable uncertainty. See
-  [`models/ensemble.py`](models/ensemble.py).
-- **GJS uncertainty** — geometric Jensen–Shannon divergence between member
-  Gaussians (paper Eq. 15–19), closed-form for diagonal covariances. Implemented
-  exactly in [`algorithms/macura.py`](algorithms/macura.py) (`compute_gjs`).
-- **Adaptive threshold κ** — running mean of `ξ · (ζ-quantile of first-step
-  uncertainties)` (Eq. 21); `update_kappa`.
-- **Update-to-data scaling** — SAC gradient steps scale with model-buffer
-  fullness (Eq. 22); `gradient_steps`.
-- **Known reward + termination** — analytic dense quadratic reward and the
-  failure envelope are shared by all model-based rollouts for fairness. See
-  `known_reward_fn` / `termination_fn` in [`envs/drone_env.py`](envs/drone_env.py).
-
-### The drone task (low-step by design)
-- **Env:** Skydio X2 (MuJoCo, from `mujoco_menagerie`), hover at `(0,0,1)` m;
-  optional path-following.
-- **Observation (13):** `[pos_error(3), quaternion(4), linear_vel(3), angular_vel(3)]`.
-- **Action (4):** per-rotor thrust in `[-1,1]`, mapped to the model's ctrl ranges.
-- **Reward (dense quadratic):** penalizes position error, velocity, tilt, angular
-  velocity, control effort; plus an alive bonus.
-- **Three low-step levers:** **near-hover initialization**, **action repeat
-  (frame-skip)**, and a **smooth dense reward** — so meaningful curves emerge in
-  ~tens of thousands of *real* steps.
+- **Body** ([`envs/assets/pogo.xml`](envs/assets/pogo.xml)): a planar one-legged
+  pogo-stick with a little face. Motion is in the x–z plane; the root is two
+  slide joints plus one **unlimited** hinge (the flip axis, free to rotate 360°),
+  and three actuated leg hinges (hip / knee / ankle).
+- **Observation (13):** `[torso_z, sin(θ), cos(θ), hip, knee, ankle, foot_clearance,
+  x_vel, z_vel, θ_vel, hip_vel, knee_vel, ankle_vel]` — the torso angle enters as
+  sin/cos so it is smooth across the 360° wrap.
+- **Action (3):** normalized torque in `[-1,1]` on hip / knee / ankle.
+- **Reward (dense, shaped, analytic):** alive bonus + foot-clearance (jump) +
+  spin-while-airborne (the flip) + upright-while-grounded (land and hold) −
+  control effort. It is a pure function of `(obs, action)`, so **imagined and real
+  transitions are scored identically** — see `known_reward_fn` in
+  [`envs/pogo_env.py`](envs/pogo_env.py). `w_rotation` is the curriculum knob.
+- **Failure:** the torso dropping below `fail_torso_height` (a collapse/face-plant)
+  ends the episode and is logged.
+- **Success metric:** a full 360° rotation landed upright (`landed_flip`).
 
 ---
 
 ## 3. Repository structure
 
 ```
-macura-drone/
-├── README.md                  # this file
-├── tasks.md                   # actionable roadmap / checklist
-├── requirements.txt           # dependencies (Colab-targeted)
-├── colab.ipynb                # THE place code runs: clone → env study → train → plot
-├── bash/
-│   └── setup_colab.sh         # clone repo + Skydio X2 + install + Drive folders
-├── configs/
-│   └── macura_drone.yaml      # ALL hyperparameters (single source of truth)
+macura-backflip/
+├── README.md
+├── project.md / tasks.md          # idea + roadmap
+├── requirements.txt
+├── colab.ipynb                    # TRAIN here: setup -> study -> train 4 algos -> save -> plots -> videos
+├── run_live_mac.py                # WATCH here: fly a saved policy live on macOS (mjpython)
+├── bash/setup_colab.sh            # clone repo + pip install + Drive folders
+├── configs/macura_backflip.yaml   # ALL hyperparameters (single source of truth)
 ├── envs/
-│   └── drone_env.py           # make_env(), known_reward_fn(), termination_fn()
-├── models/
-│   └── ensemble.py            # build/train/predict + per-member Gaussians
+│   ├── assets/pogo.xml            # the Pogo MuJoCo body
+│   └── pogo_env.py                # make_env(), known_reward_fn(), termination_fn()
+├── models/ensemble.py             # probabilistic ensemble + per-member Gaussians
 ├── algorithms/
-│   ├── sac.py                 # shared SAC backbone
-│   ├── macura.py              # GJS uncertainty + adaptive-κ rollout (the method)
-│   ├── mbpo.py                # fixed truncated-linear rollout
-│   └── m2ac.py                # masking rollout
-├── training/
-│   └── train.py               # train_one(algo, cfg, drive, seed), evaluate(...)
+│   ├── sac.py                     # shared SAC backbone
+│   ├── macura.py                  # GJS uncertainty + adaptive-κ rollout (the method)
+│   ├── mbpo.py                    # fixed truncated-linear rollout
+│   └── m2ac.py                    # masking rollout
+├── training/train.py              # train_one(algo, cfg, drive, seed), evaluate(...)
 └── viz/
-    └── plots.py               # environment-study + comparison figures
+    ├── plots.py                   # env-study + comparison figures + video helpers
+    └── live_viewer.py             # real-time macOS viewer (fly_policy / fly_sequence)
 ```
 
 **Convention:** every `.py` is a **library of pure functions** — no top-level
-execution, no argparse. The Colab notebook imports and orchestrates them.
+execution. `colab.ipynb` orchestrates training; `run_live_mac.py` is the one
+executable entry point (the local analogue of the notebook, for the Mac viewer).
 
 ---
 
-## 4. Installation & setup (Google Colab)
+## 4. How to run
 
-Training runs on **Colab** (free GPU); results mirror to **Google Drive**.
+### Train on Colab
+1. **GitHub token** — this repo is private. Store a PAT in Colab Secrets as
+   `GITHUB_TOKEN`, or enter it at the notebook's hidden prompt.
+2. Open [`colab.ipynb`](colab.ipynb) in Colab (Runtime → GPU) and run top to
+   bottom. `SMOKE = True` runs the whole notebook in minutes; `SMOKE = False`
+   trains the real matrix (4 algorithms × seeds) and saves the best checkpoints,
+   plots, and flight videos to Google Drive.
 
-1. **GitHub token** — this repo is private. Create a PAT with `repo` scope and
-   store it in **Colab Secrets** as `GITHUB_TOKEN` (recommended), or enter it at
-   the notebook's hidden `getpass` prompt. **Never commit or paste it into code.**
-2. Open [`colab.ipynb`](colab.ipynb) in Colab (Runtime → GPU).
-3. Run cells **0–3**: mount Drive → load token → run `bash/setup_colab.sh`
-   (clones this repo + `mujoco_menagerie` for the Skydio X2, installs
-   `requirements.txt`, creates Drive folders) → load the config.
-
-> The setup script reads `GITHUB_TOKEN` from the environment for a single clone
-> and scrubs it from the git remote afterward — it is never written to disk.
-
-### Local (optional, env study only)
+### Watch on your Mac
 ```bash
-python -m pip install mujoco gymnasium numpy matplotlib pyyaml imageio
-# then import envs.drone_env / viz.plots in a Python session
+python -m pip install mujoco stable-baselines3 torch gymnasium pyyaml numpy imageio
+# copy the best .zip checkpoints from Drive into ./runs/checkpoints/, then:
+mjpython run_live_mac.py --ckpt runs/checkpoints/macura_seed0_best.zip
+mjpython run_live_mac.py --compare runs/checkpoints        # fly all four in turn
 ```
+Use `mjpython` (bundled with the `mujoco` pip package), not plain `python` —
+MuJoCo's interactive viewer must own the main thread on macOS.
 
 ---
 
-## 5. How to run
+## 5. Expected result — honest
 
-**Part 1 — environment study (ready to run):** notebook cells 4–10 create the
-env and produce the study figures (random-policy instability, free dynamics,
-state distribution, reward landscape, action response, a rendered frame). These
-need only MuJoCo + Gymnasium, so they validate the env before any training.
+- **Sample efficiency** — MACURA/MBPO should reach a competent flip in fewer real
+  steps than SAC.
+- **Stability** — MACURA is expected to have the **highest stuck-backflip rate and
+  lowest faceplant rate**, where fixed-horizon MBPO over-imagines the flight and
+  crashes more.
 
-**Part 2 — four-algorithm comparison:**
-```python
-from training import train as trainer
-# smoke test first (short!)
-run = trainer.train_one('macura', cfg_smoke, DRIVE, seed=0)
-# then the full matrix
-runs = [trainer.train_one(a, cfg, DRIVE, seed=s)
-        for a in cfg['experiment']['algorithms']
-        for s in cfg['experiment']['seeds']]
-```
-Then the comparison figures:
-```python
-from viz import plots
-plots.plot_sample_efficiency(runs)   # return vs real steps, mean ± std
-plots.plot_failure_rate(runs)        # crashes while learning
-plots.plot_final_quality(runs)       # best policy per algorithm
-plots.plot_rollout_depth(macura_run) # MACURA signature: κ & rollout length
-```
-
-All hyperparameters live in [`configs/macura_drone.yaml`](configs/macura_drone.yaml).
-Start with `total_env_steps` small to validate the pipeline, then scale up.
+This is a **faithful reproduction of the paper's mechanism on a new, unstable
+task**, not a guaranteed win. A backflip is hard to discover from scratch, so the
+config supports a **curriculum** (jump → half-flip → full flip). If, after a fair
+run, MACURA does not win, that is reported honestly and diagnosed — numbers are
+never doctored. See [`tasks.md`](tasks.md).
 
 ---
 
-## 6. Expected results
+## 6. Renaming note
 
-- **Sample efficiency** — MACURA reaches a target return in fewer *real* steps
-  than SAC; model-based methods take off faster.
-- **Stability** — on the unstable drone, fixed-horizon **MBPO is expected to
-  wobble/collapse** where MACURA's adaptive truncation stays stable.
-- **Signature figure** — MACURA's rollout length is short early (uncertain model)
-  and grows as the model becomes reliable; κ decreases over training.
-
-> This is a faithful **reproduction + transfer**, not a claim to beat the paper's
-> numbers. A mixed/negative result on the drone is still a valid finding.
+The internal project name is **macura-backflip**. To make the Colab clone work,
+rename the GitHub repo to `macura-backflip` (GitHub → Settings → rename), or set
+`REPO_NAME=<your-repo>` before running `bash/setup_colab.sh`. Renaming the local
+folder (`mv macura-drone macura-backflip`) is optional/cosmetic.
 
 ---
 
-## 7. Honest caveats
-
-- **Compute, not samples, is the bottleneck on Colab.** MBRL is sample-efficient
-  but does heavy ensemble retraining + many SAC updates per step. "Few steps" ≠
-  "fast wall-clock." Checkpoint/resume is built in for this reason.
-- **Fairness is everything.** Shared backbone/ensemble/seeds/eval; one consistent
-  exploration and UTD policy. See `tasks.md` for the traps to control.
-- **SB3 version sensitivity.** `algorithms/sac.py` drives Stable-Baselines3 SAC
-  manually (`replay_buffer.add` + `.train`); confirm the `_setup_learn` /
-  `replay_buffer.add` signatures on the installed SB3 version (see tasks.md).
-- **MuJoCo has no built-in drone task** — we adapt the Skydio X2 MJCF; rotor
-  aerodynamics are simplified (smoother and easier to learn, which suits a
-  method reproduction).
-
----
-
-## 8. References
+## 7. References
 
 - Frauenknecht et al., *MACURA*, ICML 2024 — [arXiv:2405.19014](https://arxiv.org/abs/2405.19014).
-  Authors' code: <https://github.com/Data-Science-in-Mechanical-Engineering/macura>
 - Janner et al., *MBPO*, NeurIPS 2019. · Pan et al., *M2AC*, 2020. ·
   Haarnoja et al., *SAC*, 2018.
-- Stable-Baselines3: Raffin et al., 2021 — <https://github.com/DLR-RM/stable-baselines3>
-- `mujoco_menagerie` (Skydio X2) — <https://github.com/google-deepmind/mujoco_menagerie>
-- (reference only) `mbrl-lib`: Pineda et al., 2021 — <https://github.com/facebookresearch/mbrl-lib>
+- Stable-Baselines3 — <https://github.com/DLR-RM/stable-baselines3>
+- MuJoCo — <https://mujoco.org>

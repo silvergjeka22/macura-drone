@@ -1,1 +1,1 @@
-"""macura-drone package."""
+"""macura-backflip package."""

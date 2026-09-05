@@ -1,38 +1,28 @@
-# ── macura-drone requirements ────────────────────────────────────────────────
-# Targeted at Google Colab (Python 3.12, CUDA GPU). All deps below install
-# cleanly on Colab's current runtime + numpy 2.x.
+# ── macura-backflip requirements ─────────────────────────────────────────────
+# Targeted at Google Colab (Python 3.12, CUDA GPU) for training, and macOS
+# (CPU/MPS) for the live viewer. All deps install cleanly on both.
 #
 # Backbone note: we build on Stable-Baselines3 (maintained) for the SAC learner,
-# NOT mbrl-lib. mbrl-lib is unmaintained and not installable on Python 3.12; the
-# probabilistic ensemble and the MACURA / MBPO / M2AC rollout logic are our own
-# pure-function modules (models/ensemble.py, algorithms/*.py).
+# NOT mbrl-lib. The probabilistic ensemble and the MACURA / MBPO / M2AC rollout
+# logic are our own pure-function modules (models/ensemble.py, algorithms/*.py).
+# The Pogo body ships in the repo (envs/assets/pogo.xml) — no external robot
+# model or menagerie is needed.
 
 # --- core scientific stack -------------------------------------------------
-# IMPORTANT: do NOT list numpy / scipy / torch here. Colab already ships a
-# self-consistent, CUDA-matched build of these, and re-installing them is what
-# corrupts the numpy/scipy ABI (e.g. "_blas_supports_fpe" / "dtype size
-# changed"). We only install packages that are genuinely missing, and let pip
-# leave the preinstalled scientific stack untouched. numpy consistency is
-# repaired by setup_colab.sh step 4c.
+# IMPORTANT: do NOT list numpy / scipy / torch here on Colab. Colab already ships
+# a self-consistent, CUDA-matched build; re-installing them corrupts the ABI.
+# numpy consistency is repaired by setup_colab.sh if needed.
 matplotlib>=3.7
 pyyaml>=6.0
 pandas>=2.0
 tqdm>=4.65
 
 # --- simulation ------------------------------------------------------------
-# PRIMARY backend: PyBullet via gym-pybullet-drones (this notebook benchmarks it
-# against the reference paper's MuJoCo results). MuJoCo is the optional backend.
-#
-# NOTE: gym-pybullet-drones is NOT on PyPI — it is installed from GitHub source
-# by setup_colab.sh (step 4b). Do NOT add it here or `pip install -r` aborts.
-pybullet>=3.2              # PyBullet physics engine
-mujoco>=3.1                # optional MuJoCo backend (Skydio X2)
-gymnasium>=0.29            # env API for our drone task
-# gym-pybullet-drones is installed --no-deps, so list its runtime deps here:
-transforms3d>=0.4
-pillow>=9.0
-imageio>=2.31              # save rollout frames / videos
-imageio-ffmpeg>=0.4        # mp4 encoding
+mujoco>=3.1                # MuJoCo physics (runs the Pogo model; native viewer on macOS)
+gymnasium>=0.29            # env API
+imageio>=2.31             # save rollout frames / videos
+imageio-ffmpeg>=0.4       # mp4 encoding
+pillow>=9.0               # labels on the stitched demo reel
 
 # --- RL backbone (SAC learner; shared by all four algorithms) --------------
-stable-baselines3>=2.3   # maintained SAC implementation, Colab-compatible
+stable-baselines3>=2.3   # maintained SAC implementation

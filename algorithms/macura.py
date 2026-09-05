@@ -15,7 +15,7 @@ We implement:
   * `gradient_steps(...)`— update-to-data scaling (paper Eq. 22).
 
 Pure-function library. Uses the shared ensemble (models.ensemble) and the known
-analytic reward / termination (envs.drone_env) for fairness.
+analytic reward / termination (envs.pogo_env) for fairness.
 """
 
 from __future__ import annotations
