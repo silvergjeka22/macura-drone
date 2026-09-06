@@ -6,15 +6,30 @@ import os
 # aggressive, unstable maneuver where a fixed-horizon rollout over-imagines the
 # flight, so MACURA's uncertainty-adaptive truncation has a real job.
 
-# EXPERIMENT
+# EXPERIMENT  (FAST warm-started demo: a shared jump policy is pretrained once, then
+# all four algorithms train the full flip from it - see CURRICULUM below.)
 SEED                = 0
-SEEDS               = [0, 1, 2]          # raise to 5 for final figures
+SEEDS               = [0, 1, 2]          # raise to 5 for final figures; set [0] for a quick smoke
 ALGORITHMS          = ["macura", "mbpo", "m2ac", "sac"]
-TOTAL_ENV_STEPS     = 20000              # a backflip is hard; raise for the full run
-WARMUP_RANDOM_STEPS = 1000
-EVAL_EVERY_STEPS    = 2000
-EVAL_EPISODES       = 5
+TOTAL_ENV_STEPS     = 12000              # flip stage per run (warm-started); raise for a fuller run
+WARMUP_RANDOM_STEPS = 500
+EVAL_EVERY_STEPS    = 1000
+EVAL_EPISODES       = 3
 EVAL_SEEDS          = [100, 101, 102, 103, 104]   # SAME across all algorithms (fairness)
+
+# CURRICULUM / shared warm-start (the fast, FAIR head start).
+# Stage 1 pretrains ONE jump-and-balance policy (w_rotation = 0) with the shared SAC
+# backbone; stage 2 warm-starts ALL FOUR algorithms from that SAME checkpoint for the
+# full-flip reward (w_rotation = REWARD["w_rotation"]). Identical init for every
+# algorithm keeps the fairness invariant, and the flip becomes reachable in a small
+# real-step budget so MACURA's adaptive truncation has room to show on the hard phase.
+CURRICULUM = {
+    "enabled":             True,   # False -> train the full flip from scratch (slower, harder)
+    "pretrain_algo":       "sac",  # model-free: a neutral warm-start none of the four "owns"
+    "pretrain_steps":      8000,   # real env steps for the shared jump policy (one-time)
+    "pretrain_w_rotation": 0.0,    # stage 1 reward: just jump & balance (no flip yet)
+    "pretrain_seed":       0,
+}
 
 # DRIVE  -  bootstrap.setup() makes these folders; only small things go here.
 DRIVE_ROOT = os.environ.get("MACURA_DRIVE_ROOT", "/content/drive/MyDrive/macura-backflip")
@@ -62,11 +77,16 @@ SAC = {
 }
 
 # checkpoint selection & final eval (best = highest periodic greedy-eval return)
-SELECTION = {"start_step": 4000, "eval_every": 2000, "final_eval_episodes": 10}
+SELECTION = {"start_step": 2000, "eval_every": 1000, "final_eval_episodes": 10}
 
 # ROLLOUT strategies (the ONLY thing that differs across algorithms)
+# model_buffer_capacity is sized to the STEP BUDGET: MACURA's UTD (Eq. 22) scales with
+# model-buffer fullness, so an over-large capacity would keep MACURA at ~1-3 updates
+# while MBPO/M2AC do the fixed 8 - throttling MACURA for the whole run. At 25k it fills
+# by mid-run, so MACURA reaches the same UTD as the others and the comparison is about
+# the ROLLOUT STRATEGY, not the update budget. Raise it in proportion to TOTAL_ENV_STEPS.
 ROLLOUT = {
-    "freq_steps": 500, "num_rollouts": 200, "model_buffer_capacity": 200000,
+    "freq_steps": 500, "num_rollouts": 200, "model_buffer_capacity": 25000,
     # MACURA: uncertainty-adaptive truncation (Algorithm 2)
     "macura": {"t_max": 10, "zeta": 0.95, "xi": 5.0, "adaptive_gradient_steps": True},
     # MBPO: fixed truncated-linear schedule (max_len matches MACURA t_max for fairness)
@@ -91,4 +111,5 @@ CFG = {
     },
     "env": ENV, "ensemble": ENSEMBLE, "sac": SAC,
     "selection": SELECTION, "rollout": ROLLOUT, "exploration": EXPLORATION,
+    "curriculum": CURRICULUM,
 }

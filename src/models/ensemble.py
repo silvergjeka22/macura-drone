@@ -175,8 +175,9 @@ def predict(ens: dict, obs: np.ndarray, act: np.ndarray):
         means, logvars = model(x)                   # (E, B, D)
     E, B, _ = means.shape
     pick = torch.randint(0, E, (B,), device=device)
-    mean = means[pick, torch.arange(B)]
-    std = torch.exp(0.5 * logvars[pick, torch.arange(B)])
+    rows = torch.arange(B, device=device)           # index on the model's device (CUDA-safe)
+    mean = means[pick, rows]
+    std = torch.exp(0.5 * logvars[pick, rows])
     delta_n = mean + std * torch.randn_like(std)    # sample in normalized target space
     tn = ens["target_normalizer"]
     next_obs = obs_t + (tn.mean + tn.std * delta_n)  # un-normalize the delta

@@ -1,13 +1,41 @@
-# Python
+# ── Python ────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
+*$py.class
 *.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Notebooks ─────────────────────────────────────────────────────────────
 .ipynb_checkpoints/
 
-# local env / OS
+# ── Virtual environments / tooling ────────────────────────────────────────
 .venv/
 venv/
-.DS_Store
+env/
+.python-version
 
-# stray
+# ── Secrets (the GitHub token lives here; NEVER commit it) ─────────────────
 /private
+.env
+*.token
+
+# ── Training outputs (checkpoints, videos, plots, logs -> Drive or ./runs) ─
+# The notebook writes results to Google Drive; a local run writes to ./runs.
+runs/
+checkpoints/
+*.zip
+*.pt
+*.ckpt
+*.mp4
+*.gif
+
+# ── OS / editor cruft ─────────────────────────────────────────────────────
+.DS_Store
+*.swp
+.idea/
+.vscode/

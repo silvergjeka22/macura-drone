@@ -28,7 +28,12 @@ def _color(algo):
 def render_filmstrip(env, policy="random", n_frames=6, steps_between=6, seed=0,
                      title="rollout", save_path=None):
     """Capture rendered frames across a rollout and show them as a row of photos.
-    `policy` in {'random', 'still', callable(obs)->action}. `env` must render()."""
+    `policy` in {'random', 'still', callable(obs)->action}. `env` must render().
+    Returns None (skips) if the env has no working renderer, so a headless Colab
+    still runs the rest of the notebook."""
+    if not getattr(env, "render_enabled", True):
+        print("render_filmstrip: rendering unavailable, skipping.")
+        return None
     obs, _ = env.reset(seed=seed)
     frames = [env.render()]
     for _ in range(n_frames - 1):

@@ -116,7 +116,15 @@ class PogoBackflipEnv(gym.Env):
         self.render_enabled = render
         self._renderer = None
         if render:
-            self._renderer = mujoco.Renderer(self.model, height=480, width=640)
+            # Rendering is eye-candy, not training: if the headless GL context cannot
+            # be built (a backend issue), disable rendering instead of failing env
+            # creation, so training and evaluation still run. bootstrap.setup() already
+            # picks a working MUJOCO_GL backend; this is the secondary safety net.
+            try:
+                self._renderer = mujoco.Renderer(self.model, height=480, width=640)
+            except Exception as e:
+                self.render_enabled = False
+                print(f"[pogo_env] rendering disabled (GL unavailable): {e}")
 
         self._rng = np.random.default_rng(seed)
         self._step_count = 0
@@ -185,7 +193,8 @@ class PogoBackflipEnv(gym.Env):
 
     def render(self):
         if self._renderer is None:
-            raise RuntimeError("env was created with render=False")
+            raise RuntimeError("rendering unavailable (env made with render=False, "
+                               "or no headless GL backend)")
         self._renderer.update_scene(self.data, camera=-1)
         return self._renderer.render()
 

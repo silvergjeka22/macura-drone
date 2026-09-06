@@ -34,6 +34,7 @@ Public functions:
 from __future__ import annotations
 
 import os
+import copy
 import json
 import numpy as np
 
@@ -110,16 +111,21 @@ def evaluate(agent, env, eval_episodes: int) -> dict:
 
 # ── a single training run ─────────────────────────────────────────────────────
 def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0,
-              init_ckpt: str = None) -> dict:
+              init_ckpt: str = None, tag: str = None) -> dict:
     """Train one algorithm in {'macura','mbpo','m2ac','sac'} and log curves.
 
     `init_ckpt` (optional): path to a previous best .zip whose SAC policy is
     loaded before training — used to warm-start a later curriculum stage
     (jump -> half-flip -> full flip) from the earlier one.
+    `tag` (optional): overrides the checkpoint / log basename (default
+    ``<algo>_seed<seed>``) — used for the shared pretrain so it does not collide
+    with the algorithm runs. Only the SAVE names change; the algorithm logic and
+    the printed labels stay keyed on `algo_name`/`seed`.
     """
     if torch is None:
         raise ImportError("torch required for training")
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    run_name = tag or f"{algo_name}_seed{seed}"
     _seed_everything(seed)
 
     env, obs_dim, act_dim = pogo_env.make_env(cfg["env"], seed=seed)
@@ -245,19 +251,19 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0,
             if improved:                       # overwrite best checkpoint (policy + ensemble + meta)
                 best_return = m["eval_return"]
                 best_step = step
-                best_ckpt = _save_best(agent, dynamics_model, drive_dir, algo_name, seed)
+                best_ckpt = _save_best(agent, dynamics_model, drive_dir, run_name)
             print(f"[{algo_name} seed{seed}] step {step:>6}  return {m['eval_return']:7.1f}"
                   f"  flips {m['eval_flips']:.2f}  land {m['eval_success_rate']:.2f}"
                   f"  fail {m['eval_failure_rate']:.2f}{'  <- best' if improved else ''}")
 
     if best_ckpt is None:                       # never improved (e.g. no eval / before start_step)
-        best_ckpt = _save_best(agent, dynamics_model, drive_dir, algo_name, seed)
+        best_ckpt = _save_best(agent, dynamics_model, drive_dir, run_name)
 
     # --- one larger final GREEDY eval on the reloaded best checkpoint → run summary ---
     final_eval = _final_eval(agent, eval_env, best_ckpt, final_eval_episodes)
     meta = {"algo": algo_name, "seed": seed, "best_step": best_step,
             "best_return": float(best_return), "final_eval": final_eval}
-    _save_meta(meta, drive_dir, algo_name, seed)
+    _save_meta(meta, drive_dir, run_name)
     print(f"[{algo_name} seed{seed}] FINAL  return {final_eval['eval_return']:.1f}"
           f"±{final_eval['eval_return_std']:.1f}  fail {final_eval['eval_failure_rate']:.2f}"
           f"  (best @ step {best_step})")
@@ -265,10 +271,52 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0,
     run = {"algo": algo_name, "seed": seed, "checkpoint": best_ckpt,
            "best_return": float(best_return), "best_step": best_step,
            "final_eval": final_eval, **log}
-    _save_run(run, drive_dir, algo_name, seed)
+    _save_run(run, drive_dir, run_name)
     env.close()
     eval_env.close()
     return run
+
+
+# ── curriculum / shared warm-start ────────────────────────────────────────────
+def stage_cfg(cfg: dict, *, w_rotation=None, total_env_steps=None, warmup=None) -> dict:
+    """Deep-copy `cfg` with the curriculum knobs overridden for one stage.
+
+    Only the SHARED reward's `w_rotation` and the step budget change, so the reward
+    stays a single analytic function (real == imagined) and every algorithm still
+    receives one identical cfg. Used to build the jump (w_rotation=0) pretrain stage.
+    """
+    c = copy.deepcopy(cfg)
+    if w_rotation is not None:
+        c["env"]["reward"]["w_rotation"] = float(w_rotation)
+    if total_env_steps is not None:
+        c["experiment"]["total_env_steps"] = int(total_env_steps)
+    if warmup is not None:
+        c["experiment"]["warmup_random_steps"] = int(warmup)
+    return c
+
+
+def pretrain_shared_policy(cfg: dict, drive_dir: str) -> str:
+    """Pretrain ONE jump-and-balance policy and return its best `.zip` path.
+
+    Stage 1 of the curriculum: train the shared SAC backbone on the jump reward
+    (`curriculum.pretrain_w_rotation`, default 0 = jump & balance, no flip), then
+    hand the resulting checkpoint to ALL FOUR algorithms as `init_ckpt` for the
+    full-flip stage. The four inherit the SAME weights, so the fairness invariant
+    holds and the flip is reachable in a small real-step budget. Idempotent: reuses
+    the checkpoint (and skips retraining) if it already exists on Drive.
+    """
+    cur = cfg["curriculum"]
+    path = os.path.join(drive_dir, "checkpoints", "pretrain_jump_best.zip")
+    if os.path.exists(path):
+        print(f"[pretrain] reusing shared warm-start {path}")
+        return path
+    stage = stage_cfg(cfg, w_rotation=cur["pretrain_w_rotation"],
+                      total_env_steps=cur["pretrain_steps"])
+    print(f"[pretrain] jump policy: {cur['pretrain_algo']} x {cur['pretrain_steps']} steps"
+          f" (w_rotation={cur['pretrain_w_rotation']})")
+    train_one(cur["pretrain_algo"], stage, drive_dir,
+              seed=cur["pretrain_seed"], tag="pretrain_jump")
+    return path
 
 
 # ── small internals ───────────────────────────────────────────────────────────
@@ -404,11 +452,12 @@ def _seed_everything(seed):
         torch.manual_seed(seed)
 
 
-def _save_best(agent, dynamics_model, drive_dir, algo, seed):
-    """Overwrite the single best checkpoint on Drive: <algo>_seed<seed>_best.zip (SB3 policy) and,
-    for model-based agents, <algo>_seed<seed>_best_ensemble.pt (world-model weights + normalizer).
+def _save_best(agent, dynamics_model, drive_dir, name):
+    """Overwrite the single best checkpoint on Drive: <name>_best.zip (SB3 policy) and,
+    for model-based agents, <name>_best_ensemble.pt (world-model weights + normalizer).
+    `name` is ``<algo>_seed<seed>`` for a run, or the pretrain tag for the shared warm-start.
     Returns the policy .zip path (or None on failure)."""
-    path = os.path.join(drive_dir, "checkpoints", f"{algo}_seed{seed}_best")
+    path = os.path.join(drive_dir, "checkpoints", f"{name}_best")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     try:
         agent.save(path)
@@ -422,17 +471,17 @@ def _save_best(agent, dynamics_model, drive_dir, algo, seed):
     return path + ".zip"
 
 
-def _save_meta(meta, drive_dir, algo, seed):
+def _save_meta(meta, drive_dir, name):
     path = os.path.join(drive_dir, "checkpoints")
     os.makedirs(path, exist_ok=True)
-    with open(os.path.join(path, f"{algo}_seed{seed}_best_meta.json"), "w") as f:
+    with open(os.path.join(path, f"{name}_best_meta.json"), "w") as f:
         json.dump(meta, f, indent=2)
 
 
-def _save_run(run, drive_dir, algo, seed):
+def _save_run(run, drive_dir, name):
     path = os.path.join(drive_dir, "logs")
     os.makedirs(path, exist_ok=True)
-    with open(os.path.join(path, f"{algo}_seed{seed}.json"), "w") as f:
+    with open(os.path.join(path, f"{name}.json"), "w") as f:
         json.dump(run, f)
 
 
@@ -465,6 +514,11 @@ def record_best_videos(cfg: dict, drive_dir: str, device: str = "cuda",
     from src.viz import plots
     seeds = seeds or cfg["experiment"]["seeds"]
     renv, _, _ = pogo_env.make_env(cfg["env"], seed=999, render=True)
+    if not getattr(renv, "render_enabled", True):      # headless GL: skip videos, keep the run
+        print("record_best_videos: rendering unavailable, skipping videos "
+              "(watch the flip on your Mac via run_live_mac.py).")
+        renv.close()
+        return {}
     paths = {}
     for algo in cfg["experiment"]["algorithms"]:
         for seed in seeds:
