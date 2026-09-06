@@ -9,7 +9,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-os.environ.setdefault("MUJOCO_GL", "egl")   # headless rendering on Colab
+os.environ.setdefault("MUJOCO_GL", "disable")   # safe: import works, no GL, no egl+CUDA segfault
 
 import copy
 import glob

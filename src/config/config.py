@@ -34,6 +34,13 @@ CURRICULUM = {
 # DRIVE  -  bootstrap.setup() makes these folders; only small things go here.
 DRIVE_ROOT = os.environ.get("MACURA_DRIVE_ROOT", "/content/drive/MyDrive/macura-backflip")
 
+# RENDERING - OFF on Colab by default. Workflow: TRAIN on Colab (GPU), then WATCH
+# the flip on your Mac (mjpython run_live_mac.py, native viewer). MuJoCo's headless
+# GPU renderer (EGL) segfaults next to a live CUDA context, so we simply do not
+# render on Colab - the result plots are matplotlib and need no GL. Set the env var
+# MACURA_RENDER=1 to force headless rendering on Colab (uses a CUDA-safe backend).
+RENDER = os.environ.get("MACURA_RENDER", "0") == "1"
+
 # ENV (Pogo backflip)
 # The dense shaped reward is identical for real and imagined transitions.
 # w_rotation is the CURRICULUM knob: 0 = just jump & balance, large = full flip.

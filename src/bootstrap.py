@@ -34,8 +34,18 @@ def install(root: str = DEFAULT_ROOT):
 # and we keep the first backend that actually renders a frame.
 def _probe_gl(backend: str, root: str) -> bool:
     asset = os.path.join(root, "src", "envs", "assets", "pogo.xml")
+    # Reproduce the REAL kernel condition: torch has already created a CUDA context
+    # by the time the render cell runs, and an EGL rendering context on a GPU that
+    # already has a live CUDA context is exactly what segfaults. So the probe inits
+    # CUDA first - otherwise egl passes here but dies in the notebook (false positive).
     code = (
         "import os; os.environ['MUJOCO_GL'] = %r\n"
+        "try:\n"
+        "    import torch\n"
+        "    if torch.cuda.is_available():\n"
+        "        torch.zeros(1, device='cuda'); torch.cuda.synchronize()\n"
+        "except Exception:\n"
+        "    pass\n"
         "import mujoco\n"
         "m = mujoco.MjModel.from_xml_path(%r)\n"
         "d = mujoco.MjData(m)\n"
@@ -82,22 +92,40 @@ def ensure_render_backend(root: str = DEFAULT_ROOT) -> str:
                   f"{' (software)' if backend == 'osmesa' else ''}.")
             return backend
 
-    print("Render backend: none available - training/plots still run; "
-          "the Meet-Pogo and video cells will be skipped.")
+    # Nothing probed clean. Pin MUJOCO_GL=disable: `import mujoco` still works and no
+    # GL context is created, so nothing can segfault; a render attempt raises a
+    # CATCHABLE error (handled in pogo_env) and the visual cells skip gracefully.
+    os.environ["MUJOCO_GL"] = "disable"
+    print("Render backend: none probed clean - rendering disabled; training and "
+          "plots still run, and the Meet-Pogo / video cells skip gracefully.")
     return ""
 
 
 # One-call setup
 def setup(drive: bool = True, install_deps: bool = True, root: str = DEFAULT_ROOT):
-    """Mount Drive, install deps, pick a working render backend, make Drive folders."""
+    """Mount Drive, install deps, set the render backend, make Drive folders.
+
+    Default workflow: TRAIN on Colab, WATCH the flip on your Mac (run_live_mac.py).
+    So rendering is OFF here (cfg.RENDER) and MUJOCO_GL is pinned to "disable" - no
+    GL context is ever created, so egl can't segfault next to CUDA. Set
+    MACURA_RENDER=1 to render on Colab; setup() then probes for a CUDA-safe backend.
+    """
     if drive:
         mount_drive()
     if install_deps:
         install(root)
 
-    ensure_render_backend(root)                        # sets MUJOCO_GL (segfault-safe)
-
     from src.config import config as cfg
+    if cfg.RENDER:
+        ensure_render_backend(root)                    # opt-in: pick a CUDA-safe backend
+    else:
+        # MUJOCO_GL=disable: `import mujoco` still works, but no GL context is ever
+        # created - so no egl+CUDA segfault. Training and the matplotlib result plots
+        # are unaffected; the visual cells skip cleanly.
+        os.environ["MUJOCO_GL"] = "disable"
+        print("Rendering: OFF (train on Colab, watch on your Mac via run_live_mac.py). "
+              "Set MACURA_RENDER=1 to render on Colab.")
+
     for d in ("checkpoints", "videos", "plots", "logs"):
         os.makedirs(f"{cfg.DRIVE_ROOT}/{d}", exist_ok=True)
 
