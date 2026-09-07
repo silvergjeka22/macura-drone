@@ -11,10 +11,10 @@ import os
 SEED                = 0
 SEEDS               = [0, 1, 2]          # raise to 5 for final figures; set [0] for a quick smoke
 ALGORITHMS          = ["macura", "mbpo", "m2ac", "sac"]
-TOTAL_ENV_STEPS     = 12000              # flip stage per run (warm-started); raise for a fuller run
+TOTAL_ENV_STEPS     = 5000               # flip stage per run (warm-started); raise for a fuller run
 WARMUP_RANDOM_STEPS = 500
-EVAL_EVERY_STEPS    = 1000
-EVAL_EPISODES       = 3
+EVAL_EVERY_STEPS    = 500                 # ~10 eval points over the 5k-step run
+EVAL_EPISODES       = 2
 EVAL_SEEDS          = [100, 101, 102, 103, 104]   # SAME across all algorithms (fairness)
 
 # CURRICULUM / shared warm-start (the fast, FAIR head start).
@@ -26,7 +26,7 @@ EVAL_SEEDS          = [100, 101, 102, 103, 104]   # SAME across all algorithms (
 CURRICULUM = {
     "enabled":             True,   # False -> train the full flip from scratch (slower, harder)
     "pretrain_algo":       "sac",  # model-free: a neutral warm-start none of the four "owns"
-    "pretrain_steps":      8000,   # real env steps for the shared jump policy (one-time)
+    "pretrain_steps":      5000,   # real env steps for the shared jump policy (one-time)
     "pretrain_w_rotation": 0.0,    # stage 1 reward: just jump & balance (no flip yet)
     "pretrain_seed":       0,
 }
@@ -84,7 +84,7 @@ SAC = {
 }
 
 # checkpoint selection & final eval (best = highest periodic greedy-eval return)
-SELECTION = {"start_step": 2000, "eval_every": 1000, "final_eval_episodes": 10}
+SELECTION = {"start_step": 1000, "eval_every": 500, "final_eval_episodes": 10}
 
 # ROLLOUT strategies (the ONLY thing that differs across algorithms)
 # model_buffer_capacity is sized to the STEP BUDGET: MACURA's UTD (Eq. 22) scales with
@@ -93,7 +93,7 @@ SELECTION = {"start_step": 2000, "eval_every": 1000, "final_eval_episodes": 10}
 # by mid-run, so MACURA reaches the same UTD as the others and the comparison is about
 # the ROLLOUT STRATEGY, not the update budget. Raise it in proportion to TOTAL_ENV_STEPS.
 ROLLOUT = {
-    "freq_steps": 500, "num_rollouts": 200, "model_buffer_capacity": 25000,
+    "freq_steps": 500, "num_rollouts": 200, "model_buffer_capacity": 10000,
     # MACURA: uncertainty-adaptive truncation (Algorithm 2)
     "macura": {"t_max": 10, "zeta": 0.95, "xi": 5.0, "adaptive_gradient_steps": True},
     # MBPO: fixed truncated-linear schedule (max_len matches MACURA t_max for fairness)
