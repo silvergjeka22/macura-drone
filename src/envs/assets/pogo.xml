@@ -27,7 +27,10 @@
     <geom name="floor" type="plane" conaffinity="1" contype="1" condim="3"
           size="30 5 0.1" pos="0 0 0" material="grid" friction="0.9 0.1 0.1"/>
 
-    <body name="torso" pos="0 0 1.10">
+    <body name="torso" pos="0 0 0">
+      <!-- torso home at z=0 so the rootz slide IS the true world height of the torso
+           (reward/termination read rootz as torso_z). init_height puts the foot on
+           the floor at reset, so Pogo starts STANDING and can crouch, launch and flip. -->
       <!-- planar root: x-slide, z-slide, y-hinge (the flip axis, UNLIMITED) -->
       <joint name="rootx" type="slide" axis="1 0 0" limited="false" armature="0" damping="0"/>
       <joint name="rootz" type="slide" axis="0 0 1" limited="false" armature="0" damping="0"/>

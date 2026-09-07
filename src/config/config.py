@@ -96,8 +96,11 @@ ROLLOUT = {
     "freq_steps": 500, "num_rollouts": 200, "model_buffer_capacity": 10000,
     # MACURA: uncertainty-adaptive truncation (Algorithm 2)
     "macura": {"t_max": 10, "zeta": 0.95, "xi": 5.0, "adaptive_gradient_steps": True},
-    # MBPO: fixed truncated-linear schedule (max_len matches MACURA t_max for fairness)
-    "mbpo": {"rollout_schedule": [1, 10, 1000, 12000],
+    # MBPO: fixed truncated-linear schedule (max_len 10 matches MACURA t_max for fairness).
+    # The ramp is scaled to TOTAL_ENV_STEPS: it must REACH the long horizon within the
+    # run, else MBPO never over-imagines and the MACURA-vs-MBPO stability contrast is
+    # invisible. [min, max, start, end] -> reach horizon 10 by step 3000 of a 5k run.
+    "mbpo": {"rollout_schedule": [1, 10, 500, 3000],
              "adaptive_gradient_steps": False, "fixed_gradient_steps": 8},
     # M2AC: fixed length + mask least-trustworthy transitions
     "m2ac": {"t_max": 10, "mask_fraction": 0.5, "uncertainty_penalty": 1.0,
