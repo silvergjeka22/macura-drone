@@ -5,11 +5,11 @@ The alternative uncertainty strategy: instead of TRUNCATING rollouts by length
 imagined transitions, keeping only the most trustworthy fraction, with a reward
 penalty proportional to uncertainty.
 
-Same SAC backbone + ensemble as MACURA/MBPO. We reuse the GJS uncertainty from
-algorithms.macura as the per-transition uncertainty signal so the comparison is
-"masking vs adaptive truncation" using the SAME uncertainty estimate (the paper
-notes M2AC's original OvR estimate is brittle — see tasks.md for the faithful
-variant).
+Same SAC backbone + ensemble as MACURA/MBPO. The per-transition uncertainty is
+M2AC's own ONE-VS-REST (OvR) disagreement (`ovr_uncertainty` — Pan et al. 2020):
+each ensemble member's prediction scored by the NLL under every OTHER member. Set
+`rollout.m2ac.uncertainty = "gjs"` to instead reuse MACURA's GJS signal (a
+controlled "masking vs truncation with the SAME uncertainty" ablation).
 
 Pure-function library.
 """
@@ -22,6 +22,31 @@ from src.models import ensemble as ens
 from src.algorithms.macura import compute_gjs
 
 
+def ovr_uncertainty(means: np.ndarray, variances: np.ndarray) -> np.ndarray:
+    """M2AC one-vs-rest (OvR) disagreement (Pan et al., 2020).
+
+    means, variances: (num_members, batch, obs_dim). For every ordered member pair
+    (i, j), i != j, take the Gaussian NLL of member i's mean prediction under member
+    j's predictive Gaussian, and average over all pairs -> (batch,). It is large when
+    a member's prediction is unlikely under the "rest", i.e. the ensemble disagrees
+    relative to its own confidence. (The constant 0.5*D*log(2*pi) offset is dropped:
+    it does not affect the mask ranking or a proportional penalty.)
+    """
+    eps = 1e-12
+    E = means.shape[0]
+    batch = means.shape[1]
+    var = np.maximum(variances, eps)
+    total = np.zeros(batch)
+    pairs = 0
+    for i in range(E):
+        for j in range(E):
+            if i == j:
+                continue
+            total += 0.5 * np.sum(np.log(var[j]) + (means[i] - means[j]) ** 2 / var[j], axis=-1)
+            pairs += 1
+    return total / max(pairs, 1)
+
+
 def m2ac_rollout(dynamics_model, agent, start_obs: np.ndarray,
                  reward_fn, done_fn, cfg: dict):
     """Fixed-horizon rollouts; keep the most-trustworthy transitions only."""
@@ -29,6 +54,7 @@ def m2ac_rollout(dynamics_model, agent, start_obs: np.ndarray,
     t_max = int(mcfg["t_max"])
     mask_fraction = float(mcfg["mask_fraction"])      # fraction KEPT
     penalty = float(mcfg["uncertainty_penalty"])
+    unc_kind = mcfg.get("uncertainty", "ovr")         # "ovr" (M2AC, default) or "gjs"
 
     from src.algorithms.sac import select_actions
 
@@ -41,7 +67,7 @@ def m2ac_rollout(dynamics_model, agent, start_obs: np.ndarray,
             break
         act = select_actions(agent, obs, evaluate=False)   # batched (vectorized)
         means, variances = ens.member_gaussians(dynamics_model, obs, act)
-        u = compute_gjs(means, variances)
+        u = ovr_uncertainty(means, variances) if unc_kind == "ovr" else compute_gjs(means, variances)
         next_obs = ens.predict(dynamics_model, obs, act)
         rew = reward_fn(obs, act) - penalty * u       # uncertainty reward penalty
         done = done_fn(next_obs)

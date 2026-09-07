@@ -102,9 +102,11 @@ ROLLOUT = {
     # invisible. [min, max, start, end] -> reach horizon 10 by step 3000 of a 5k run.
     "mbpo": {"rollout_schedule": [1, 10, 500, 3000],
              "adaptive_gradient_steps": False, "fixed_gradient_steps": 8},
-    # M2AC: fixed length + mask least-trustworthy transitions
+    # M2AC: fixed length + mask least-trustworthy transitions. `uncertainty` selects the
+    # per-transition signal: "ovr" = M2AC's own one-vs-rest disagreement (paper-faithful,
+    # default); "gjs" = reuse MACURA's GJS (controlled same-signal ablation).
     "m2ac": {"t_max": 10, "mask_fraction": 0.5, "uncertainty_penalty": 1.0,
-             "fixed_gradient_steps": 8},
+             "uncertainty": "ovr", "fixed_gradient_steps": 8},
     "sac": {},
 }
 

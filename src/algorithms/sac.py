@@ -124,46 +124,70 @@ def sac_update(agent, num_updates: int, batch_size: int):
     return {"updates": num_updates}
 
 
+class _MixedReplaySampler:
+    """Presents SB3's ReplayBuffer.sample() API but returns a WITHIN-BATCH mix: each
+    sampled batch is `real_ratio * batch` REAL transitions concatenated with the rest
+    MODEL (imagined) transitions. This is the canonical MBPO/MACURA Dyna mix (Janner
+    2019): every SAC gradient step sees a steady fraction of real data. Any other
+    attribute access is proxied to a real SB3 buffer, so `agent.train()` is untouched."""
+
+    def __init__(self, real_buf, model_buf, real_ratio):
+        self.real_buf = real_buf
+        self.model_buf = model_buf
+        self.real_ratio = float(real_ratio)
+
+    def sample(self, batch_size, env=None):
+        from stable_baselines3.common.type_aliases import ReplayBufferSamples
+        n_real = int(round(self.real_ratio * batch_size))
+        if self.real_buf.size() == 0:
+            n_real = 0
+        if self.model_buf.size() == 0:
+            n_real = batch_size
+        n_model = batch_size - n_real
+        parts = []
+        if n_real > 0:
+            parts.append(self.real_buf.sample(n_real, env=env))
+        if n_model > 0:
+            parts.append(self.model_buf.sample(n_model, env=env))
+        if len(parts) == 1:
+            return parts[0]
+        return ReplayBufferSamples(*(torch.cat([getattr(p, f) for p in parts], dim=0)
+                                     for f in ReplayBufferSamples._fields))
+
+    def __getattr__(self, name):                       # proxy everything else to a real buffer
+        if name in ("real_buf", "model_buf", "real_ratio"):
+            raise AttributeError(name)
+        return getattr(self.model_buf, name)
+
+
 def sac_update_mixed(agent, real_buf, model_buf, num_updates: int, batch_size: int,
-                     real_ratio: float, rng) -> dict:
-    """Batch-level real/imagined mixing for the model-based agents (Janner/MBPO; MACURA inherits).
-
-    For each of `num_updates` gradient steps, the ENTIRE batch is drawn from the REAL buffer with
-    probability `real_ratio`, otherwise entirely from the MODEL (imagined) buffer — exactly as in
-    the official MACURA/mbrl-lib code and `SafeMACURA-Drive/algorithms/model_based.py`. We do NOT
-    blend within a batch. The SAC math is untouched: each step is SB3's own
-    `agent.train(gradient_steps=1, ...)` after temporarily pointing the learner at the chosen
-    buffer; the agent's own buffer is restored afterwards.
-
-    Returns the REALISED split for telemetry: n_real / n_model / real_pct / imagined_pct.
+                     real_ratio: float, rng=None) -> dict:
+    """WITHIN-BATCH real/imagined mixing for the model-based agents (canonical MBPO/MACURA;
+    Janner 2019). Every SAC batch is `real_ratio * batch_size` REAL transitions + the rest
+    MODEL (imagined) — the standard Dyna mix, so each gradient step gets a steady real-data
+    correction (not the higher-variance whole-batch-real-or-model scheme). Implemented by
+    pointing the learner at a `_MixedReplaySampler` for the duration; the SAC math is SB3's
+    own `agent.train()`, untouched. `rng` is accepted for signature compatibility (unused —
+    the mix is a fixed per-batch proportion). The agent's own buffer is restored afterwards.
     """
+    n_real = int(round(float(real_ratio) * batch_size))
     if num_updates <= 0:
-        return {"updates": 0, "n_real": 0, "n_model": 0,
-                "real_ratio_target": float(real_ratio),
+        return {"updates": 0, "n_real_per_batch": n_real,
+                "n_model_per_batch": batch_size - n_real,
                 "real_pct": 100.0 * float(real_ratio),
                 "imagined_pct": 100.0 * (1.0 - float(real_ratio))}
     saved = agent.replay_buffer
-    n_real, n_model = 0, 0
+    agent.replay_buffer = _MixedReplaySampler(real_buf, model_buf, real_ratio)
     try:
-        for _ in range(int(num_updates)):
-            use_real = rng.random() < real_ratio
-            buf = real_buf if use_real else model_buf
-            if buf.size() < batch_size:
-                break
-            agent.replay_buffer = buf
-            agent.train(gradient_steps=1, batch_size=batch_size)
-            n_real += int(use_real)
-            n_model += int(not use_real)
+        agent.train(gradient_steps=int(num_updates), batch_size=batch_size)
     finally:
         agent.replay_buffer = saved
-    n_tot = n_real + n_model
     return {
-        "updates": n_tot,
-        "n_real": n_real,
-        "n_model": n_model,
-        "real_ratio_target": float(real_ratio),
-        "real_pct":     100.0 * n_real / n_tot if n_tot else 100.0 * float(real_ratio),
-        "imagined_pct": 100.0 * n_model / n_tot if n_tot else 100.0 * (1.0 - float(real_ratio)),
+        "updates": int(num_updates),
+        "n_real_per_batch": n_real,
+        "n_model_per_batch": batch_size - n_real,
+        "real_pct":     100.0 * float(real_ratio),
+        "imagined_pct": 100.0 * (1.0 - float(real_ratio)),
     }
 
 
