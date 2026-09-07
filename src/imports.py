@@ -14,8 +14,15 @@ os.environ.setdefault("MUJOCO_GL", "disable")   # safe: import works, no GL, no 
 import copy
 import glob
 import json
+
+# Progress markers (flush=True) so a slow/hung import is visible - the LAST line
+# printed is the culprit. Library imports (torch ~4s, stable-baselines3 ~10s,
+# mujoco ~2s, matplotlib ~2s) are one-time per session; anything much longer is a
+# stuck package (e.g. pip built a wheel from source on this Python).
+print("[imports] numpy + torch ...", flush=True)
 import numpy as np
 import torch
+print(f"[imports] torch {torch.__version__} | cuda? {torch.cuda.is_available()}", flush=True)
 from IPython.display import Video, display
 
 # config - one import root
@@ -28,6 +35,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 ipython = get_ipython()
 
 def run_module(rel):
+    print("[imports] loading", rel, "...", flush=True)
     ipython.run_line_magic("run", os.path.join(ROOT, rel))
 
 run_module("src/envs/pogo_env.py")
