@@ -27,13 +27,15 @@ def install(root: str = DEFAULT_ROOT):
 
 
 # Headless rendering backend (Colab has no display).
-# We use OSMesa (software rendering): it renders headless and, being CPU-only, is
-# CUDA-safe - unlike egl, which segfaults next to a live CUDA context. Because OSMesa
-# cannot segfault, we do NOT need the slow isolated-subprocess probe (that added
-# ~15-30s to setup, importing torch + CUDA + rendering just to check). Instead we
-# check for libOSMesa with ctypes.util.find_library - instant - and apt-install it
-# only if it is missing. If libOSMesa is present, `import mujoco` with MUJOCO_GL=osmesa
-# is guaranteed to load, so no render probe is needed.
+# CRITICAL: the training KERNEL is pinned to MUJOCO_GL=disable. OSMesa (software GL)
+# pulls in libLLVM/libstdc++; loaded into a kernel that also imports torch +
+# stable-baselines3, those native libs clash and SEGFAULT the kernel (observed exactly
+# at `from stable_baselines3 import SAC` right after `import mujoco` with osmesa). With
+# `disable`, `import mujoco` never loads any GL lib, so torch/SB3/training are safe.
+# The env-preview video is rendered in an ISOLATED subprocess that sets MUJOCO_GL=osmesa
+# and never imports torch/SB3 (see viz.plots.record_env_video_subprocess) - so libOSMesa
+# never enters the training kernel. We only apt-install libOSMesa here so that child can
+# render. `find_library` keeps the check instant (no torch/CUDA probe).
 def _has_lib(name: str) -> bool:
     import ctypes.util
     try:
@@ -43,50 +45,37 @@ def _has_lib(name: str) -> bool:
 
 
 def ensure_render_backend(root: str = DEFAULT_ROOT) -> str:
-    """Set MUJOCO_GL to a CUDA-safe render backend so headless video works AND training
-    does not crash. Fast: no subprocess, no torch/CUDA/render probe.
-
-    Colab -> OSMesa (software, CUDA-safe): apt-install libOSMesa only if missing, then
-    use it. Local (mac) -> glfw. If OSMesa is unavailable we pin `disable` - `import
-    mujoco` still succeeds, no GL context is created, and the visual cells skip
-    gracefully. Honors an explicit MUJOCO_GL if the user set one.
+    """Pin the KERNEL to MUJOCO_GL=disable (SB3/torch-safe) and make sure libOSMesa is
+    available for the isolated render subprocess. Fast: no torch/CUDA/render probe.
+    Honors an explicit MUJOCO_GL if the user set one.
     """
     if os.environ.get("MUJOCO_GL"):
         return os.environ["MUJOCO_GL"]
 
-    if os.path.isdir("/content"):                       # Colab
-        if not _has_lib("OSMesa"):                      # install only when needed (one-time)
-            try:
-                subprocess.run(["apt-get", "install", "-y", "-qq", "libosmesa6"],
-                               check=False, capture_output=True, timeout=300)
-            except Exception:
-                pass
-        if _has_lib("OSMesa"):
-            os.environ["MUJOCO_GL"] = "osmesa"
-            print("Render backend: osmesa (software, CUDA-safe).")
-            return "osmesa"
-    else:                                               # local mac/linux with a display
-        os.environ["MUJOCO_GL"] = "glfw"
-        print("Render backend: glfw.")
-        return "glfw"
+    if os.path.isdir("/content") and not _has_lib("OSMesa"):   # Colab: install for the subprocess
+        try:
+            subprocess.run(["apt-get", "install", "-y", "-qq", "libosmesa6"],
+                           check=False, capture_output=True, timeout=300)
+        except Exception:
+            pass
 
-    # OSMesa unavailable. Pin MUJOCO_GL=disable: `import mujoco` still works and no GL
-    # context is created, so nothing can segfault; a render attempt raises a CATCHABLE
-    # error (handled in pogo_env) and the visual cells skip gracefully.
+    # Kernel never loads a GL lib -> no libOSMesa/LLVM vs torch/SB3 segfault. The env
+    # preview renders out-of-process (osmesa on Colab, glfw on mac); other visual cells
+    # skip gracefully if that subprocess can't render.
     os.environ["MUJOCO_GL"] = "disable"
-    print("Render backend: OSMesa unavailable - rendering disabled; training and "
-          "plots still run, and the Meet-Pogo / video cells skip gracefully.")
-    return ""
+    print("Render backend (kernel): disable - SB3/torch-safe; env preview renders in an "
+          "isolated subprocess.")
+    return "disable"
 
 
 # One-call setup
 def setup(drive: bool = True, install_deps: bool = True, root: str = DEFAULT_ROOT):
-    """Mount Drive, install deps, set a CUDA-safe render backend, make Drive folders.
+    """Mount Drive, install deps, pin a safe render backend, make Drive folders.
 
-    Rendering uses OSMesa on Colab (software, CUDA-safe) so the env-preview video works
-    without the egl+CUDA segfault - training is unaffected. The heavy flight-demo videos
-    stay gated by cfg.RENDER (default off: watch the trained flip on your Mac via
-    run_live_mac.py); the short env preview always renders.
+    The kernel uses MUJOCO_GL=disable so torch + stable-baselines3 import safely (loading
+    libOSMesa into the kernel segfaults them). The env-preview video renders in an isolated
+    subprocess instead; libOSMesa is apt-installed for that child. The heavy flight-demo
+    videos stay gated by cfg.RENDER (default off: watch the trained flip on your Mac).
     """
     if drive:
         mount_drive()

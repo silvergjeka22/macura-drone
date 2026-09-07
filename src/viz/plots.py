@@ -65,6 +65,44 @@ def record_env_video(env, save_path, seconds=8, fps=30, policy="random", seed=0,
     return save_path
 
 
+def record_env_video_subprocess(root, save_path, seconds=6, policy="random", seed=0,
+                                backend="osmesa"):
+    """Render the env preview in a SEPARATE process with a software GL backend, then
+    return `save_path` (or None on failure).
+
+    Why a subprocess: OSMesa (software GL) loads libLLVM/libstdc++; in a kernel that also
+    imports torch + stable-baselines3 those clash and SEGFAULT. The training kernel is
+    therefore pinned to MUJOCO_GL=disable, and this child renders with MUJOCO_GL=osmesa
+    while importing ONLY mujoco/gymnasium/numpy/imageio (never torch or SB3) - so libOSMesa
+    never touches the training kernel. `backend` is 'osmesa' on Colab, 'glfw' locally.
+    """
+    import subprocess
+    import sys
+    os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+    child = (
+        "import os; os.environ['MUJOCO_GL'] = %r\n"
+        "import sys; sys.path.insert(0, %r)\n"
+        "from src.config import config as cfg\n"
+        "from src.envs import pogo_env\n"
+        "from src.viz import plots\n"
+        "env, _, _ = pogo_env.make_env(cfg.ENV, seed=%d, render=True)\n"
+        "p = plots.record_env_video(env, %r, seconds=%d, policy=%r, seed=%d)\n"
+        "env.close()\n"
+        "print('OK' if p else 'FAIL')\n"
+        % (backend, root, seed, save_path, int(seconds), policy, seed)
+    )
+    try:
+        r = subprocess.run([sys.executable, "-c", child],
+                           capture_output=True, text=True, timeout=600)
+        if r.returncode == 0 and os.path.exists(save_path):
+            return save_path
+        print(f"env-video subprocess failed (rc={r.returncode}):", (r.stderr or "")[-600:])
+        return None
+    except Exception as e:
+        print("env-video subprocess error:", e)
+        return None
+
+
 def render_filmstrip(env, policy="random", n_frames=6, steps_between=6, seed=0,
                      title="rollout", save_path=None):
     """Capture rendered frames across a rollout and show them as a row of photos.
