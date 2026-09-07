@@ -1,0 +1,60 @@
+<!-- Quadrotor (Skydio-X2-style): a free-flying rigid body with 4 rotor thrust
+     motors in an X configuration. Self-contained (primitive geoms only, no meshes)
+     so it ships in the repo like pogo.xml. Each motor applies an UP force along the
+     body z-axis plus a small yaw reaction torque (alternating signs around the X),
+     so the 4 thrusts give full control: collective (altitude), differential across
+     the diagonals (roll/pitch), and the reaction torques (yaw). Task: fly to a
+     target and hold a stable hover. -->
+<mujoco model="drone">
+  <compiler angle="degree" inertiafromgeom="true"/>
+  <option timestep="0.01" integrator="RK4" density="1.2" viscosity="1.8e-5"/>
+
+  <default>
+    <geom conaffinity="0" condim="3" contype="1" friction="1 0.1 0.1"
+          rgba="0.30 0.42 0.90 1"/>
+    <motor ctrllimited="true"/>
+  </default>
+
+  <asset>
+    <texture name="sky" type="skybox" builtin="gradient" rgb1="0.5 0.7 0.9" rgb2="0.05 0.08 0.12"
+             width="512" height="512"/>
+    <texture name="grid" type="2d" builtin="checker" rgb1="0.16 0.20 0.26" rgb2="0.22 0.28 0.36"
+             width="512" height="512"/>
+    <material name="grid" texture="grid" texrepeat="20 20" reflectance="0.1"/>
+  </asset>
+
+  <worldbody>
+    <light name="top" pos="0 0 6" dir="0 0 -1" diffuse="0.9 0.9 0.9"/>
+    <geom name="floor" type="plane" conaffinity="1" contype="1" condim="3"
+          size="40 40 0.1" pos="0 0 0" material="grid"/>
+
+    <body name="core" pos="0 0 1.0">
+      <freejoint name="root"/>
+      <!-- central body -->
+      <geom name="core_geom" type="box" size="0.06 0.06 0.02" mass="0.40"/>
+      <!-- X arms + rotor pads (rotor i at (+-L, +-L)); rotor disks carry a little mass -->
+      <geom name="arm_fr" type="capsule" fromto="0 0 0  0.13 0.13 0" size="0.008" mass="0.01"/>
+      <geom name="arm_bl" type="capsule" fromto="0 0 0 -0.13 -0.13 0" size="0.008" mass="0.01"/>
+      <geom name="arm_fl" type="capsule" fromto="0 0 0 -0.13 0.13 0" size="0.008" mass="0.01"/>
+      <geom name="arm_br" type="capsule" fromto="0 0 0  0.13 -0.13 0" size="0.008" mass="0.01"/>
+      <geom name="rotor1" type="cylinder" pos=" 0.13  0.13 0.02" size="0.05 0.005" mass="0.01" rgba="0.9 0.5 0.15 1"/>
+      <geom name="rotor2" type="cylinder" pos="-0.13  0.13 0.02" size="0.05 0.005" mass="0.01" rgba="0.9 0.9 0.9 1"/>
+      <geom name="rotor3" type="cylinder" pos="-0.13 -0.13 0.02" size="0.05 0.005" mass="0.01" rgba="0.9 0.5 0.15 1"/>
+      <geom name="rotor4" type="cylinder" pos=" 0.13 -0.13 0.02" size="0.05 0.005" mass="0.01" rgba="0.9 0.9 0.9 1"/>
+      <!-- thrust application sites at the rotor centers -->
+      <site name="thrust1" pos=" 0.13  0.13 0.02" size="0.01"/>
+      <site name="thrust2" pos="-0.13  0.13 0.02" size="0.01"/>
+      <site name="thrust3" pos="-0.13 -0.13 0.02" size="0.01"/>
+      <site name="thrust4" pos=" 0.13 -0.13 0.02" size="0.01"/>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <!-- gear: force along +z of the site (body up) + yaw reaction torque about +z,
+         alternating sign around the X so differential thrust yaws the body. -->
+    <motor name="m1" site="thrust1" gear="0 0 1 0 0  0.0125" ctrlrange="0 6"/>
+    <motor name="m2" site="thrust2" gear="0 0 1 0 0 -0.0125" ctrlrange="0 6"/>
+    <motor name="m3" site="thrust3" gear="0 0 1 0 0  0.0125" ctrlrange="0 6"/>
+    <motor name="m4" site="thrust4" gear="0 0 1 0 0 -0.0125" ctrlrange="0 6"/>
+  </actuator>
+</mujoco>

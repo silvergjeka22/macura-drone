@@ -38,7 +38,7 @@ def run_module(rel):
     print("[imports] loading", rel, "...", flush=True)
     ipython.run_line_magic("run", os.path.join(ROOT, rel))
 
-run_module("src/envs/pogo_env.py")
+run_module(f"src/envs/{cfg.ENV.get('module', 'pogo_env')}.py")   # drone_env / pogo_env (config-selected)
 run_module("src/models/ensemble.py")
 run_module("src/algorithms/sac.py")
 run_module("src/algorithms/macura.py")

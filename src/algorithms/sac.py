@@ -151,8 +151,15 @@ class _MixedReplaySampler:
             parts.append(self.model_buf.sample(n_model, env=env))
         if len(parts) == 1:
             return parts[0]
-        return ReplayBufferSamples(*(torch.cat([getattr(p, f) for p in parts], dim=0)
-                                     for f in ReplayBufferSamples._fields))
+
+        # Concatenate field-by-field. Newer SB3 adds Optional fields (e.g. `discounts`,
+        # None unless n-step replay) - torch.cat can't take None, so pass those through.
+        def _merge(field):
+            vals = [getattr(p, field) for p in parts]
+            if all(torch.is_tensor(v) for v in vals):
+                return torch.cat(vals, dim=0)
+            return vals[0]                              # non-tensor (e.g. None): pass through
+        return ReplayBufferSamples(*(_merge(f) for f in ReplayBufferSamples._fields))
 
     def __getattr__(self, name):                       # proxy everything else to a real buffer
         if name in ("real_buf", "model_buf", "real_ratio"):

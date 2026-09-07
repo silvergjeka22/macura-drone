@@ -40,7 +40,7 @@ def record_env_video(env, save_path, seconds=8, fps=30, policy="random", seed=0,
     m, d, r = env.model, env.data, env._renderer
     cam = mujoco.MjvCamera()
     cam.type = mujoco.mjtCamera.mjCAMERA_FREE
-    cam.distance, cam.elevation, cam.azimuth = 3.6, -6.0, 90.0
+    cam.distance, cam.elevation, cam.azimuth = 4.0, -15.0, 90.0
     rng = np.random.default_rng(seed)
     n_act = env.action_space.shape[0]
     obs, _ = env.reset(seed=seed)
@@ -53,7 +53,7 @@ def record_env_video(env, save_path, seconds=8, fps=30, policy="random", seed=0,
         else:
             act = policy(obs)
         obs, _, terminated, truncated, _ = env.step(act)
-        cam.lookat[:] = [float(d.qpos[0]), 0.0, max(0.7, float(d.qpos[1]))]
+        cam.lookat[:] = d.xpos[1]                 # follow the main body's world position (any env)
         r.update_scene(d, camera=cam)
         frames.append(r.render())
         if terminated or truncated:
@@ -81,11 +81,11 @@ def record_env_video_subprocess(root, save_path, seconds=6, policy="random", see
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
     child = (
         "import os; os.environ['MUJOCO_GL'] = %r\n"
-        "import sys; sys.path.insert(0, %r)\n"
+        "import sys, importlib; sys.path.insert(0, %r)\n"
         "from src.config import config as cfg\n"
-        "from src.envs import pogo_env\n"
+        "env_mod = importlib.import_module('src.envs.' + cfg.ENV.get('module', 'pogo_env'))\n"
         "from src.viz import plots\n"
-        "env, _, _ = pogo_env.make_env(cfg.ENV, seed=%d, render=True)\n"
+        "env, _, _ = env_mod.make_env(cfg.ENV, seed=%d, render=True)\n"
         "p = plots.record_env_video(env, %r, seconds=%d, policy=%r, seed=%d)\n"
         "env.close()\n"
         "print('OK' if p else 'FAIL')\n"
@@ -163,15 +163,15 @@ def plot_sample_efficiency(runs, save_path=None):
 
 
 def plot_success_rate(runs, save_path=None):
-    """Fraction of eval episodes that land a FULL backflip, over training (headline)."""
-    return _curve_figure(runs, "eval_success_rate", "stuck-backflip rate",
-                         "Backflips landed while learning", save_path)
+    """Fraction of eval episodes that SUCCEED (drone: reached & held the target), over training."""
+    return _curve_figure(runs, "eval_success_rate", "success rate",
+                         "Task success while learning", save_path)
 
 
 def plot_failure_rate(runs, save_path=None):
-    """Fraction of eval episodes that collapse / face-plant, over training."""
-    return _curve_figure(runs, "eval_failure_rate", "faceplant rate",
-                         "Faceplant rate while learning", save_path)
+    """Fraction of eval episodes that CRASH (drone: flipped / hit ground / flew away), over training."""
+    return _curve_figure(runs, "eval_failure_rate", "crash rate",
+                         "Crash rate while learning", save_path)
 
 
 def plot_final_quality(runs, save_path=None):

@@ -36,9 +36,9 @@ from __future__ import annotations
 import os
 import copy
 import json
+import importlib
 import numpy as np
 
-from src.envs import pogo_env
 from src.models import ensemble as ens
 from src.algorithms import sac as sac_mod
 from src.algorithms import macura as macura_mod
@@ -49,6 +49,14 @@ try:
     import torch
 except ImportError:
     torch = None
+
+
+def _env_module(cfg: dict):
+    """Import the env module named in cfg['env']['module'] (default 'pogo_env').
+    Lets config switch the task (drone_env / pogo_env) without touching training code.
+    The module must expose make_env / known_reward_fn / termination_fn."""
+    name = cfg.get("env", {}).get("module", "pogo_env")
+    return importlib.import_module(f"src.envs.{name}")
 
 
 # ── a minimal numpy replay buffer for REAL data (ensemble training + rollout starts) ──
@@ -91,8 +99,9 @@ def evaluate(agent, env, eval_episodes: int) -> dict:
             ep_ret += rew
             ep_len += 1
             failed = failed or info.get("failure", False)
-            landed = landed or info.get("landed_flip", False)   # a full flip, landed upright
-            ep_flips = max(ep_flips, info.get("flips", 0.0))     # peak rotation this episode
+            # success: drone reached-and-held the target, or (Pogo) landed a full flip
+            landed = landed or info.get("reached", info.get("landed_flip", False))
+            ep_flips = max(ep_flips, info.get("flips", 0.0))     # peak rotation (Pogo); 0 for drone
             done = terminated or truncated
         returns.append(ep_ret)
         lengths.append(ep_len)
@@ -128,10 +137,11 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0,
     run_name = tag or f"{algo_name}_seed{seed}"
     _seed_everything(seed)
 
-    env, obs_dim, act_dim = pogo_env.make_env(cfg["env"], seed=seed)
-    eval_env, _, _ = pogo_env.make_env(cfg["env"], seed=cfg["experiment"]["eval_seeds"][0])
-    reward_fn = pogo_env.known_reward_fn(cfg["env"])
-    done_fn = pogo_env.termination_fn(cfg["env"])
+    env_mod = _env_module(cfg)
+    env, obs_dim, act_dim = env_mod.make_env(cfg["env"], seed=seed)
+    eval_env, _, _ = env_mod.make_env(cfg["env"], seed=cfg["experiment"]["eval_seeds"][0])
+    reward_fn = env_mod.known_reward_fn(cfg["env"])
+    done_fn = env_mod.termination_fn(cfg["env"])
 
     model_based = algo_name in ("macura", "mbpo", "m2ac")
     buf_cap = cfg["rollout"]["model_buffer_capacity"] if model_based else 1_000_000
@@ -493,7 +503,7 @@ def evaluate_best(cfg: dict, drive_dir: str, device: str = "cuda",
     from stable_baselines3 import SAC
     seeds = seeds or cfg["experiment"]["seeds"]
     n = eval_episodes or cfg["experiment"]["eval_episodes"]
-    eval_env, _, _ = pogo_env.make_env(cfg["env"], seed=cfg["experiment"]["eval_seeds"][0])
+    eval_env, _, _ = _env_module(cfg).make_env(cfg["env"], seed=cfg["experiment"]["eval_seeds"][0])
     out = []
     for algo in cfg["experiment"]["algorithms"]:
         for seed in seeds:
@@ -513,7 +523,7 @@ def record_best_videos(cfg: dict, drive_dir: str, device: str = "cuda",
     from stable_baselines3 import SAC
     from src.viz import plots
     seeds = seeds or cfg["experiment"]["seeds"]
-    renv, _, _ = pogo_env.make_env(cfg["env"], seed=999, render=True)
+    renv, _, _ = _env_module(cfg).make_env(cfg["env"], seed=999, render=True)
     if not getattr(renv, "render_enabled", True):      # headless GL: skip videos, keep the run
         print("record_best_videos: rendering unavailable, skipping videos "
               "(watch the flip on your Mac via run_live_mac.py).")

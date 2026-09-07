@@ -2,65 +2,62 @@ import os
 
 # Single source of truth for every quantity. Nothing is hard-coded in the other
 # .py files; each receives the relevant sub-dict (ENV, ENSEMBLE, SAC, ROLLOUT...).
-# The task is Pogo (a planar one-legged gymnast) learning a BACKFLIP - an
-# aggressive, unstable maneuver where a fixed-horizon rollout over-imagines the
-# flight, so MACURA's uncertainty-adaptive truncation has a real job.
+# TASK: a quadrotor (Skydio-X2-style) learns to FLY TO A TARGET and hold a stable
+# hover - an aggressive go-to-target task where a fixed-horizon rollout over-imagines
+# the fast approach/deceleration, so MACURA's uncertainty-adaptive truncation has a job.
+# (The earlier Pogo backflip files remain in the repo; set ENV["module"]="pogo_env" and
+# swap ENV/REWARD to run that instead.)
 
-# EXPERIMENT  (FAST warm-started demo: a shared jump policy is pretrained once, then
-# all four algorithms train the full flip from it - see CURRICULUM below.)
+# EXPERIMENT  (SMALL TEST budget - raise TOTAL_ENV_STEPS for real curves)
 SEED                = 0
-SEEDS               = [0, 1, 2]          # raise to 5 for final figures; set [0] for a quick smoke
+SEEDS               = [0, 1, 2]          # small test; set [0] for the quickest smoke, 5 for finals
 ALGORITHMS          = ["macura", "mbpo", "m2ac", "sac"]
-TOTAL_ENV_STEPS     = 5000               # flip stage per run (warm-started); raise for a fuller run
+TOTAL_ENV_STEPS     = 5000               # per algorithm (SMALL TEST - drone needs ~20k+ to fly well)
 WARMUP_RANDOM_STEPS = 500
 EVAL_EVERY_STEPS    = 500                 # ~10 eval points over the 5k-step run
 EVAL_EPISODES       = 2
 EVAL_SEEDS          = [100, 101, 102, 103, 104]   # SAME across all algorithms (fairness)
 
-# CURRICULUM / shared warm-start (the fast, FAIR head start).
-# Stage 1 pretrains ONE jump-and-balance policy (w_rotation = 0) with the shared SAC
-# backbone; stage 2 warm-starts ALL FOUR algorithms from that SAME checkpoint for the
-# full-flip reward (w_rotation = REWARD["w_rotation"]). Identical init for every
-# algorithm keeps the fairness invariant, and the flip becomes reachable in a small
-# real-step budget so MACURA's adaptive truncation has room to show on the hard phase.
+# CURRICULUM - OFF for the drone (locomotion/go-to-target learns from scratch, no warm-start).
 CURRICULUM = {
-    "enabled":             True,   # False -> train the full flip from scratch (slower, harder)
-    "pretrain_algo":       "sac",  # model-free: a neutral warm-start none of the four "owns"
-    "pretrain_steps":      5000,   # real env steps for the shared jump policy (one-time)
-    "pretrain_w_rotation": 0.0,    # stage 1 reward: just jump & balance (no flip yet)
+    "enabled":             False,
+    "pretrain_algo":       "sac",
+    "pretrain_steps":      5000,
+    "pretrain_w_rotation": 0.0,
     "pretrain_seed":       0,
 }
 
 # DRIVE  -  bootstrap.setup() makes these folders; only small things go here.
 DRIVE_ROOT = os.environ.get("MACURA_DRIVE_ROOT", "/content/drive/MyDrive/macura-backflip")
 
-# RENDERING - OFF on Colab by default. Workflow: TRAIN on Colab (GPU), then WATCH
-# the flip on your Mac (mjpython run_live_mac.py, native viewer). MuJoCo's headless
-# GPU renderer (EGL) segfaults next to a live CUDA context, so we simply do not
-# render on Colab - the result plots are matplotlib and need no GL. Set the env var
-# MACURA_RENDER=1 to force headless rendering on Colab (uses a CUDA-safe backend).
+# RENDERING - OFF in the training kernel (MUJOCO_GL=disable; loading libOSMesa next to
+# torch/SB3 segfaults). The env-preview video renders in an isolated osmesa subprocess.
 RENDER = os.environ.get("MACURA_RENDER", "0") == "1"
 
-# ENV (Pogo backflip)
-# The dense shaped reward is identical for real and imagined transitions.
-# w_rotation is the CURRICULUM knob: 0 = just jump & balance, large = full flip.
+# ENV (drone go-to-target). The dense reward is analytic in (obs, action) - identical
+# for real and imagined transitions.
 REWARD = {
-    "alive_bonus": 1.0,     # keeps reward positive
-    "w_height":    4.0,     # reward foot clearance (get airborne so it CAN flip)
-    "w_rotation":  1.0,     # reward spinning in flip_dir WHILE airborne (dense flip signal)
-    "w_upright":   2.0,     # reward being upright when NOT airborne (land and hold)
-    "w_action":    0.001,   # control-effort penalty
-    "flip_dir":    1.0,     # +1 = one rotation direction (sign arbitrary, kept consistent)
-    "foot_air":    0.20,    # foot clearance (m) at which the "airborne" gate saturates
-    "height_cap":  0.5,     # cap on the foot-clearance jump reward
+    "w_pos":     2.0,    # reward being AT the target (max, via exp(-dist/scale))
+    "pos_scale": 1.0,    # distance scale (m) of the proximity reward
+    "w_level":   0.5,    # reward staying level (body-z world component)
+    "w_spin":    0.01,   # penalize angular velocity
+    "w_vel":     0.05,   # penalize speed (so it STOPS at the target, not overshoot)
+    "w_ctrl":    0.01,   # mild control penalty (thrust deviation from hover)
 }
 ENV = {
-    "mjcf_scene":        "",     # "" -> bundled src/envs/assets/pogo.xml
-    "action_repeat":     5,      # hold each action for 5 physics steps (0.01 s control)
-    "max_episode_steps": 200,    # ~2 s episodes (200 * 5 * 0.002 s)
-    "fail_torso_height": 0.10,   # torso center below this = collapsed / face-plant flat
-    "init_height":       0.78,   # near-standing torso height at reset
-    "init_noise":        0.04,   # small random pose + velocity perturbation at reset
+    "module":            "drone_env",   # which src/envs/*.py provides make_env/reward/termination
+    "mjcf_scene":        "",     # "" -> bundled src/envs/assets/drone.xml
+    "action_repeat":     2,      # 50 Hz control (timestep 0.01 * 2)
+    "max_episode_steps": 250,    # ~5 s episodes
+    "init_height":       1.0,    # spawn hovering height (m)
+    "init_noise":        0.05,   # small random pose + velocity perturbation at reset
+    "target_range_xy":   1.5,    # target sampled in x,y in [-1.5, 1.5] m
+    "target_z_min":      0.8,
+    "target_z_max":      1.8,
+    "thrust_gain":       1.0,    # action*gain about hover: action 0 = hover, +-1 = 0..2x hover
+    "max_dist":          8.0,    # flew away this far = crashed
+    "fail_tilt":         0.0,    # body-z world component below this (flipped past 90) = crashed
+    "fail_height":       0.15,   # hit the ground = crashed
     "reward":            REWARD,
 }
 
@@ -80,31 +77,24 @@ SAC = {
     "hidden_size": 256, "batch_size": 256, "target_update_interval": 1,
     "gradient_steps_max": 8,        # Gmax in Eq. 22 (model-based UTD ceiling)
     "baseline_gradient_steps": 1,   # model-free SAC baseline UTD (~1 = standard SAC)
-    "real_ratio": 0.05,             # fixed batch-level real mixing (Janner/MBPO; MACURA inherits)
+    "real_ratio": 0.05,             # fixed within-batch real mixing (Janner/MBPO; MACURA inherits)
 }
 
 # checkpoint selection & final eval (best = highest periodic greedy-eval return)
 SELECTION = {"start_step": 1000, "eval_every": 500, "final_eval_episodes": 10}
 
 # ROLLOUT strategies (the ONLY thing that differs across algorithms)
-# model_buffer_capacity is sized to the STEP BUDGET: MACURA's UTD (Eq. 22) scales with
-# model-buffer fullness, so an over-large capacity would keep MACURA at ~1-3 updates
-# while MBPO/M2AC do the fixed 8 - throttling MACURA for the whole run. At 25k it fills
-# by mid-run, so MACURA reaches the same UTD as the others and the comparison is about
-# the ROLLOUT STRATEGY, not the update budget. Raise it in proportion to TOTAL_ENV_STEPS.
+# model_buffer_capacity is sized to the STEP BUDGET so MACURA's adaptive UTD (Eq. 22)
+# reaches the same update budget as MBPO/M2AC within the run - raise it with TOTAL_ENV_STEPS.
 ROLLOUT = {
     "freq_steps": 500, "num_rollouts": 200, "model_buffer_capacity": 10000,
     # MACURA: uncertainty-adaptive truncation (Algorithm 2)
     "macura": {"t_max": 10, "zeta": 0.95, "xi": 5.0, "adaptive_gradient_steps": True},
-    # MBPO: fixed truncated-linear schedule (max_len 10 matches MACURA t_max for fairness).
-    # The ramp is scaled to TOTAL_ENV_STEPS: it must REACH the long horizon within the
-    # run, else MBPO never over-imagines and the MACURA-vs-MBPO stability contrast is
-    # invisible. [min, max, start, end] -> reach horizon 10 by step 3000 of a 5k run.
+    # MBPO: fixed truncated-linear schedule; ramp scaled so it REACHES horizon 10 within the run.
     "mbpo": {"rollout_schedule": [1, 10, 500, 3000],
              "adaptive_gradient_steps": False, "fixed_gradient_steps": 8},
-    # M2AC: fixed length + mask least-trustworthy transitions. `uncertainty` selects the
-    # per-transition signal: "ovr" = M2AC's own one-vs-rest disagreement (paper-faithful,
-    # default); "gjs" = reuse MACURA's GJS (controlled same-signal ablation).
+    # M2AC: fixed length + mask least-trustworthy transitions. "ovr" = M2AC's own one-vs-rest
+    # disagreement (paper-faithful); "gjs" = reuse MACURA's GJS (same-signal ablation).
     "m2ac": {"t_max": 10, "mask_fraction": 0.5, "uncertainty_penalty": 1.0,
              "uncertainty": "ovr", "fixed_gradient_steps": 8},
     "sac": {},
@@ -116,7 +106,7 @@ EXPLORATION = {"type": "pink_noise", "scale": 0.3}
 # assembled config the training functions consume
 CFG = {
     "experiment": {
-        "name": "macura_pogo_backflip", "seeds": SEEDS, "algorithms": ALGORITHMS,
+        "name": "macura_drone_target", "seeds": SEEDS, "algorithms": ALGORITHMS,
         "total_env_steps": TOTAL_ENV_STEPS, "warmup_random_steps": WARMUP_RANDOM_STEPS,
         "eval_every_steps": EVAL_EVERY_STEPS, "eval_episodes": EVAL_EPISODES,
         "eval_seeds": EVAL_SEEDS, "drive_root": DRIVE_ROOT,
