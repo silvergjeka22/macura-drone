@@ -12,9 +12,9 @@ import os
 SEED                = 0
 SEEDS               = [0, 1, 2]          # small test; set [0] for the quickest smoke, 5 for finals
 ALGORITHMS          = ["macura", "mbpo", "m2ac", "sac"]
-TOTAL_ENV_STEPS     = 5000               # per algorithm (SMALL TEST - drone needs ~20k+ to fly well)
+TOTAL_ENV_STEPS     = 10000              # per algorithm (test - drone starts flying ~10-20k)
 WARMUP_RANDOM_STEPS = 500
-EVAL_EVERY_STEPS    = 500                 # ~10 eval points over the 5k-step run
+EVAL_EVERY_STEPS    = 1000                # ~10 eval points over the 10k-step run
 EVAL_EPISODES       = 2
 EVAL_SEEDS          = [100, 101, 102, 103, 104]   # SAME across all algorithms (fairness)
 
@@ -81,13 +81,13 @@ SAC = {
 }
 
 # checkpoint selection & final eval (best = highest periodic greedy-eval return)
-SELECTION = {"start_step": 1000, "eval_every": 500, "final_eval_episodes": 10}
+SELECTION = {"start_step": 1000, "eval_every": 1000, "final_eval_episodes": 10}
 
 # ROLLOUT strategies (the ONLY thing that differs across algorithms)
 # model_buffer_capacity is sized to the STEP BUDGET so MACURA's adaptive UTD (Eq. 22)
 # reaches the same update budget as MBPO/M2AC within the run - raise it with TOTAL_ENV_STEPS.
 ROLLOUT = {
-    "freq_steps": 500, "num_rollouts": 200, "model_buffer_capacity": 10000,
+    "freq_steps": 500, "num_rollouts": 200, "model_buffer_capacity": 20000,
     # MACURA: uncertainty-adaptive truncation (Algorithm 2)
     "macura": {"t_max": 10, "zeta": 0.95, "xi": 5.0, "adaptive_gradient_steps": True},
     # MBPO: fixed truncated-linear schedule; ramp scaled so it REACHES horizon 10 within the run.
