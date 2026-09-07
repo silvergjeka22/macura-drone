@@ -63,34 +63,33 @@ def _probe_gl(backend: str, root: str) -> bool:
 
 
 def ensure_render_backend(root: str = DEFAULT_ROOT) -> str:
-    """Pick a MuJoCo GL backend that actually works and set MUJOCO_GL to it.
+    """Set MUJOCO_GL to a CUDA-SAFE render backend so headless video works AND training
+    does not crash.
 
-    Honors an explicit MUJOCO_GL if the user set one. Otherwise tries egl (GPU,
-    fast), then osmesa (software, rock-solid) - apt-installing the OSMesa library
-    on Colab if egl failed - then glfw. Returns the chosen backend, or "" if none
-    rendered (training still works; only the visualization cells are unavailable).
+    On Colab we use OSMesa (software rendering): it renders headless and, being CPU-only,
+    does NOT fight the live CUDA context the way egl does (egl next to CUDA segfaults the
+    kernel). We apt-install libOSMesa first, then verify it in an isolated subprocess.
+    Locally (mac) we use glfw. If nothing works we pin `disable` - `import mujoco` still
+    succeeds, no GL context is created, and the visual cells skip gracefully.
+    Honors an explicit MUJOCO_GL if the user set one.
     """
     if os.environ.get("MUJOCO_GL"):
         return os.environ["MUJOCO_GL"]
 
-    if _probe_gl("egl", root):
-        os.environ["MUJOCO_GL"] = "egl"
-        print("Render backend: egl (GPU).")
-        return "egl"
-
-    # egl unavailable/unstable -> make sure the OSMesa software renderer is present
     if os.path.isdir("/content"):                       # Colab: apt is available as root
         try:
             subprocess.run(["apt-get", "install", "-y", "-qq", "libosmesa6"],
                            check=False, capture_output=True, timeout=300)
         except Exception:
             pass
-    for backend in ("osmesa", "glfw"):
-        if _probe_gl(backend, root):
-            os.environ["MUJOCO_GL"] = backend
-            print(f"Render backend: {backend}"
-                  f"{' (software)' if backend == 'osmesa' else ''}.")
-            return backend
+        if _probe_gl("osmesa", root):
+            os.environ["MUJOCO_GL"] = "osmesa"
+            print("Render backend: osmesa (software, CUDA-safe).")
+            return "osmesa"
+    elif _probe_gl("glfw", root):                       # local (mac/linux with a display)
+        os.environ["MUJOCO_GL"] = "glfw"
+        print("Render backend: glfw.")
+        return "glfw"
 
     # Nothing probed clean. Pin MUJOCO_GL=disable: `import mujoco` still works and no
     # GL context is created, so nothing can segfault; a render attempt raises a
@@ -103,29 +102,21 @@ def ensure_render_backend(root: str = DEFAULT_ROOT) -> str:
 
 # One-call setup
 def setup(drive: bool = True, install_deps: bool = True, root: str = DEFAULT_ROOT):
-    """Mount Drive, install deps, set the render backend, make Drive folders.
+    """Mount Drive, install deps, set a CUDA-safe render backend, make Drive folders.
 
-    Default workflow: TRAIN on Colab, WATCH the flip on your Mac (run_live_mac.py).
-    So rendering is OFF here (cfg.RENDER) and MUJOCO_GL is pinned to "disable" - no
-    GL context is ever created, so egl can't segfault next to CUDA. Set
-    MACURA_RENDER=1 to render on Colab; setup() then probes for a CUDA-safe backend.
+    Rendering uses OSMesa on Colab (software, CUDA-safe) so the env-preview video works
+    without the egl+CUDA segfault - training is unaffected. The heavy flight-demo videos
+    stay gated by cfg.RENDER (default off: watch the trained flip on your Mac via
+    run_live_mac.py); the short env preview always renders.
     """
     if drive:
         mount_drive()
     if install_deps:
         install(root)
 
-    from src.config import config as cfg
-    if cfg.RENDER:
-        ensure_render_backend(root)                    # opt-in: pick a CUDA-safe backend
-    else:
-        # MUJOCO_GL=disable: `import mujoco` still works, but no GL context is ever
-        # created - so no egl+CUDA segfault. Training and the matplotlib result plots
-        # are unaffected; the visual cells skip cleanly.
-        os.environ["MUJOCO_GL"] = "disable"
-        print("Rendering: OFF (train on Colab, watch on your Mac via run_live_mac.py). "
-              "Set MACURA_RENDER=1 to render on Colab.")
+    ensure_render_backend(root)                        # CUDA-safe backend (osmesa on Colab)
 
+    from src.config import config as cfg
     for d in ("checkpoints", "videos", "plots", "logs"):
         os.makedirs(f"{cfg.DRIVE_ROOT}/{d}", exist_ok=True)
 

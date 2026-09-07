@@ -25,6 +25,46 @@ def _color(algo):
 
 
 # ── a quick look at the body ──────────────────────────────────────────────────
+def record_env_video(env, save_path, seconds=8, fps=30, policy="random", seed=0,
+                     action_scale=0.6):
+    """Render the env to an mp4 under a simple UNTRAINED policy - a quick look at Pogo
+    before any learning. `policy` in {'random','still', callable(obs)->action}. Uses a
+    close tracking free-camera (follows the torso in x and up), so the body fills the
+    frame instead of being a speck. Resets on fall/timeout to fill the clip. Returns the
+    path, or None if the env has no working renderer (headless with GL disabled)."""
+    if not getattr(env, "render_enabled", True) or getattr(env, "_renderer", None) is None:
+        print("record_env_video: rendering unavailable, skipping.")
+        return None
+    import imageio
+    import mujoco
+    m, d, r = env.model, env.data, env._renderer
+    cam = mujoco.MjvCamera()
+    cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+    cam.distance, cam.elevation, cam.azimuth = 3.6, -6.0, 90.0
+    rng = np.random.default_rng(seed)
+    n_act = env.action_space.shape[0]
+    obs, _ = env.reset(seed=seed)
+    frames = []
+    for _ in range(int(seconds * fps)):
+        if policy == "random":
+            act = np.clip(rng.normal(0, action_scale, size=n_act), -1, 1).astype(np.float32)
+        elif policy == "still":
+            act = np.zeros(n_act, np.float32)
+        else:
+            act = policy(obs)
+        obs, _, terminated, truncated, _ = env.step(act)
+        cam.lookat[:] = [float(d.qpos[0]), 0.0, max(0.7, float(d.qpos[1]))]
+        r.update_scene(d, camera=cam)
+        frames.append(r.render())
+        if terminated or truncated:
+            obs, _ = env.reset()
+    h, w = frames[0].shape[0] // 2 * 2, frames[0].shape[1] // 2 * 2   # even dims for h264
+    frames = [f[:h, :w] for f in frames]
+    os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+    imageio.mimsave(save_path, frames, fps=fps)
+    return save_path
+
+
 def render_filmstrip(env, policy="random", n_frames=6, steps_between=6, seed=0,
                      title="rollout", save_path=None):
     """Capture rendered frames across a rollout and show them as a row of photos.
