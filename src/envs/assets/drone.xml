@@ -1,6 +1,6 @@
 <!-- Quadrotor (Skydio-X2-style): a free-flying rigid body with 4 rotor thrust
      motors in an X configuration. Self-contained (primitive geoms only, no meshes)
-     so it ships in the repo like pogo.xml. Each motor applies an UP force along the
+     so it ships in the repo (no meshes). Each motor applies an UP force along the
      body z-axis plus a small yaw reaction torque (alternating signs around the X),
      so the 4 thrusts give full control: collective (altitude), differential across
      the diagonals (roll/pitch), and the reaction torques (yaw). Task: fly to a

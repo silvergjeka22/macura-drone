@@ -75,7 +75,7 @@ def setup(drive: bool = True, install_deps: bool = True, root: str = DEFAULT_ROO
     The kernel uses MUJOCO_GL=disable so torch + stable-baselines3 import safely (loading
     libOSMesa into the kernel segfaults them). The env-preview video renders in an isolated
     subprocess instead; libOSMesa is apt-installed for that child. The heavy flight-demo
-    videos stay gated by cfg.RENDER (default off: watch the trained flip on your Mac).
+    videos stay gated by cfg.RENDER (default off: watch the trained drone on your Mac).
     """
     if drive:
         mount_drive()

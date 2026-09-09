@@ -1,9 +1,9 @@
-# macura-backflip requirements (Colab for training; macOS for the live viewer).
+# macura-drone requirements (Colab for training; macOS for the live viewer).
 # On Colab, numpy/scipy/torch are preinstalled and CUDA-matched - do NOT reinstall
-# them here. The Pogo body ships in the repo (src/envs/assets/pogo.xml), so there
+# them here. The drone body ships in the repo (src/envs/assets/drone.xml), so there
 # is nothing external to fetch.
 
-mujoco>=3.1                # MuJoCo physics (runs the Pogo model; native viewer on macOS)
+mujoco>=3.1                # MuJoCo physics (runs the drone model; native viewer on macOS)
 gymnasium>=0.29            # env API
 stable-baselines3>=2.3   # SAC learner (shared by all four algorithms)
 matplotlib>=3.7           # figures

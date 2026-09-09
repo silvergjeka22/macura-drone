@@ -21,8 +21,8 @@ Note on the uncertainty: we predict the next-state DELTA (next_obs - obs). The
 GJS divergence between members is invariant to the shared +obs shift, so
 computing it on deltas equals computing it on next-states.
 
-Normalization (tasks.md Phase 4, high): BOTH the inputs (obs, act) AND the delta
-targets are normalized to zero mean / unit std of the real data. The members
+Normalization: BOTH the inputs (obs, act) AND the delta targets are normalized to
+zero mean / unit std of the real data. The members
 therefore predict in NORMALIZED delta space, and `member_gaussians` returns
 normalized-space Gaussians by default — so the GJS uncertainty sums comparable,
 scale-balanced per-dimension terms instead of being dominated by whichever obs
@@ -117,7 +117,7 @@ def build_ensemble(cfg: dict, obs_dim: int, act_dim: int, device: str = "cuda"):
         "model": model,
         "optimizer": optim,
         "normalizer": _Normalizer(obs_dim + act_dim, device),
-        # delta targets are normalized too (scale-balanced GJS — tasks.md Phase 4)
+        # delta targets are normalized too (scale-balanced GJS)
         "target_normalizer": _Normalizer(obs_dim, device),
         "device": device,
         "cfg": cfg,
@@ -190,7 +190,7 @@ def member_gaussians(ens: dict, obs: np.ndarray, act: np.ndarray,
 
     By default returned in NORMALIZED delta space — every obs dim contributes on
     a comparable scale, so the GJS uncertainty in algorithms/macura.py is
-    scale-balanced (tasks.md Phase 4) instead of dominated by large-magnitude
+    scale-balanced instead of dominated by large-magnitude
     dims. GJS itself is shift-invariant, so the normalization offset is
     irrelevant; the per-dim rescaling is exactly the point of the fix.
     Pass denormalize=True to get raw physical-delta Gaussians (for plotting).

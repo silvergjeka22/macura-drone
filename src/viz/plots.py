@@ -1,4 +1,4 @@
-"""Plotting — the backflip comparison figures + policy video helpers.
+"""Plotting — the algorithm-comparison figures + policy/env video helpers.
 
 Pure-function library: every figure function takes data/handles, optionally saves,
 and returns a matplotlib Figure. The notebook decides what to show.
@@ -27,11 +27,11 @@ def _color(algo):
 # ── a quick look at the body ──────────────────────────────────────────────────
 def record_env_video(env, save_path, seconds=8, fps=30, policy="random", seed=0,
                      action_scale=0.6):
-    """Render the env to an mp4 under a simple UNTRAINED policy - a quick look at Pogo
-    before any learning. `policy` in {'random','still', callable(obs)->action}. Uses a
-    close tracking free-camera (follows the torso in x and up), so the body fills the
-    frame instead of being a speck. Resets on fall/timeout to fill the clip. Returns the
-    path, or None if the env has no working renderer (headless with GL disabled)."""
+    """Render the env to an mp4 under a simple UNTRAINED policy - a quick look at the drone
+    before any learning. `policy` in {'random','still', callable(obs)->action}. Uses a close
+    free-camera that follows the body's world position, so it fills the frame. Resets on
+    crash/timeout to fill the clip. Returns the path, or None if the env has no working
+    renderer (headless with GL disabled)."""
     if not getattr(env, "render_enabled", True) or getattr(env, "_renderer", None) is None:
         print("record_env_video: rendering unavailable, skipping.")
         return None
@@ -81,11 +81,11 @@ def record_env_video_subprocess(root, save_path, seconds=6, policy="random", see
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
     child = (
         "import os; os.environ['MUJOCO_GL'] = %r\n"
-        "import sys, importlib; sys.path.insert(0, %r)\n"
+        "import sys; sys.path.insert(0, %r)\n"
         "from src.config import config as cfg\n"
-        "env_mod = importlib.import_module('src.envs.' + cfg.ENV.get('module', 'pogo_env'))\n"
+        "from src.envs import drone_env\n"
         "from src.viz import plots\n"
-        "env, _, _ = env_mod.make_env(cfg.ENV, seed=%d, render=True)\n"
+        "env, _, _ = drone_env.make_env(cfg.ENV, seed=%d, render=True)\n"
         "p = plots.record_env_video(env, %r, seconds=%d, policy=%r, seed=%d)\n"
         "env.close()\n"
         "print('OK' if p else 'FAIL')\n"
@@ -101,34 +101,6 @@ def record_env_video_subprocess(root, save_path, seconds=6, policy="random", see
     except Exception as e:
         print("env-video subprocess error:", e)
         return None
-
-
-def render_filmstrip(env, policy="random", n_frames=6, steps_between=6, seed=0,
-                     title="rollout", save_path=None):
-    """Capture rendered frames across a rollout and show them as a row of photos.
-    `policy` in {'random', 'still', callable(obs)->action}. `env` must render().
-    Returns None (skips) if the env has no working renderer, so a headless Colab
-    still runs the rest of the notebook."""
-    if not getattr(env, "render_enabled", True):
-        print("render_filmstrip: rendering unavailable, skipping.")
-        return None
-    obs, _ = env.reset(seed=seed)
-    frames = [env.render()]
-    for _ in range(n_frames - 1):
-        for _ in range(steps_between):
-            act = env.action_space.sample() if policy == "random" else (
-                np.zeros(env.action_space.shape[0], np.float32) if policy == "still" else policy(obs))
-            obs, _, terminated, truncated, _ = env.step(act)
-            if terminated or truncated:
-                break
-        frames.append(env.render())
-    fig, axes = plt.subplots(1, len(frames), figsize=(2.6 * len(frames), 2.8))
-    axes = np.atleast_1d(axes)
-    for i, (ax, fr) in enumerate(zip(axes, frames)):
-        ax.imshow(fr); ax.axis("off"); ax.set_title(f"step {i * steps_between}")
-    fig.suptitle(title); fig.tight_layout()
-    _maybe_save(fig, save_path)
-    return fig
 
 
 # ── comparison figures (runs is a list of run_dicts from train_one) ───────────

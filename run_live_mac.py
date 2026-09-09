@@ -1,4 +1,4 @@
-"""Entry point: watch a trained Pogo policy backflip live on macOS.
+"""Entry point: watch a trained drone policy fly live on macOS.
 
 This is the one executable script in the repo (the local analogue of the notebook):
 the library modules stay pure functions; this file only orchestrates.
@@ -27,7 +27,7 @@ from src.viz import live_viewer
 
 
 def main():
-    p = argparse.ArgumentParser(description="Watch a trained Pogo policy backflip live.")
+    p = argparse.ArgumentParser(description="Watch a trained drone policy fly live.")
     p.add_argument("--ckpt", help="path to one best .zip checkpoint to fly")
     p.add_argument("--compare", help="a folder of *_best.zip checkpoints to fly one after another")
     p.add_argument("--seconds", type=float, default=20.0, help="seconds to fly each policy")
@@ -43,9 +43,9 @@ def main():
         live_viewer.fly_sequence(ckpts, cfg.ENV, seconds_each=args.seconds,
                                  seed=args.seed, device=args.device)
     elif args.ckpt:
-        flips = live_viewer.fly_policy(args.ckpt, cfg.ENV, seconds=args.seconds,
-                                       seed=args.seed, device=args.device)
-        print(f"peak rotation: {flips:.2f} turns")
+        dist = live_viewer.fly_policy(args.ckpt, cfg.ENV, seconds=args.seconds,
+                                      seed=args.seed, device=args.device)
+        print(f"best distance-to-target: {dist:.2f} m")
     else:
         raise SystemExit("pass --ckpt <best.zip> or --compare <checkpoints_dir>")
 

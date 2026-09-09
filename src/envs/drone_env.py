@@ -1,9 +1,9 @@
 """Drone (quadrotor) go-to-target env: a free-flying Skydio-X2-style quadcopter learns
-to FLY TO A TARGET and hold a stable hover. This is the drone analogue of pogo_env:
+RECOVER from a tumble, FLY TO A TARGET, and hold a stable hover:
 
   * a smooth, learnable flight regime (great for model-based sample efficiency), and
-  * an aggressive regime near the target / under perturbation (fast accel + decel, high
-    tilt) where a fixed-horizon rollout over-imagines - the phase MACURA truncates.
+  * an aggressive regime (high-angular-rate recovery, fast accel + decel) where a
+    fixed-horizon rollout over-imagines - the phase MACURA truncates.
 
 Pure-function library: this module only DEFINES things. Public entry points:
   make_env(cfg, seed, render) -> (env, obs_dim(14), act_dim(4))
@@ -92,6 +92,8 @@ class DroneTargetEnv(gym.Env):
         self.max_episode_steps = int(cfg.get("max_episode_steps", 250))
         self.init_height = float(cfg.get("init_height", 1.0))
         self.init_noise = float(cfg.get("init_noise", 0.05))
+        self.init_tilt = float(cfg.get("init_tilt", 0.0))       # aggressive: max random start tilt (rad)
+        self.init_spin = float(cfg.get("init_spin", 0.0))       # aggressive: max random start spin (rad/s)
         self.target_range_xy = float(cfg.get("target_range_xy", 1.5))
         self.target_z = (float(cfg.get("target_z_min", 0.8)), float(cfg.get("target_z_max", 1.8)))
         self.thrust_gain = float(cfg.get("thrust_gain", 1.0))   # action*gain*hover about hover
@@ -148,9 +150,20 @@ class DroneTargetEnv(gym.Env):
         q = np.zeros(n)
         q[0:3] = self._rng.uniform(-self.init_noise, self.init_noise, size=3)
         q[2] = self.init_height + self._rng.uniform(-self.init_noise, self.init_noise)
-        q[3:7] = [1.0, 0.0, 0.0, 0.0]                     # level orientation
+        # AGGRESSIVE start (recovery task): random tilt (axis-angle -> quaternion) so the
+        # drone must recover before it can reach the target. init_tilt=0 -> level start.
+        if self.init_tilt > 0.0:
+            ang = self._rng.uniform(0.0, self.init_tilt)
+            axis = self._rng.normal(size=3)
+            axis /= (np.linalg.norm(axis) + 1e-9)
+            q[3:7] = [np.cos(ang / 2.0), *(np.sin(ang / 2.0) * axis)]
+        else:
+            q[3:7] = [1.0, 0.0, 0.0, 0.0]                 # level orientation
         self.data.qpos[:] = q
-        self.data.qvel[:] = self._rng.uniform(-self.init_noise, self.init_noise, size=self.model.nv)
+        v = self._rng.uniform(-self.init_noise, self.init_noise, size=self.model.nv)
+        if self.init_spin > 0.0:                          # random initial angular velocity (tumble)
+            v[3:6] = self._rng.uniform(-self.init_spin, self.init_spin, size=3)
+        self.data.qvel[:] = v
 
         self._target = np.array([
             self._rng.uniform(-self.target_range_xy, self.target_range_xy),

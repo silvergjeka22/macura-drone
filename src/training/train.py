@@ -1,26 +1,24 @@
 """Training orchestration — Dyna loop for all four algorithms, plus evaluation.
 
-Backbone: Stable-Baselines3 SAC (shared learner) + our PyTorch probabilistic
-ensemble + our pure-function rollout strategies. The four algorithms share
-EVERYTHING except which rollout function is called (SAC calls none).
+Backbone: Stable-Baselines3 SAC (shared learner) + our PyTorch probabilistic ensemble +
+our pure-function rollout strategies. The four algorithms share EVERYTHING except which
+rollout function is called (SAC calls none).
 
-Data flow (paper-faithful, fixed real_ratio — Janner/MBPO; MACURA inherits):
+Data flow (fixed real_ratio — Janner/MBPO; MACURA inherits):
   * SAC baseline: one buffer (the agent's own), 100% REAL, no mixing;
-  * model-based (MACURA/MBPO/M2AC): TWO buffers — the agent's own SB3 buffer holds
-    MODEL (imagined) rollouts, a second SB3 `real_rb` holds REAL transitions. Each
-    SAC gradient step draws its WHOLE batch from the real buffer with probability
-    `real_ratio` (fixed `sac.real_ratio`, default 0.05), else from the model buffer
-    (batch-level mixing). A numpy `_RealBuffer` trains the ensemble and supplies
-    rollout start states. Rollout length is never touched — each algorithm keeps
-    its own rollout strategy (MACURA adaptive-κ, MBPO truncated-linear, M2AC mask).
+  * model-based (MACURA/MBPO/M2AC): TWO buffers — the agent's own SB3 buffer holds MODEL
+    (imagined) rollouts, a second SB3 `real_rb` holds REAL transitions. Each SAC batch is
+    `real_ratio` REAL + the rest MODEL (within-batch mixing). A numpy `_RealBuffer` trains
+    the ensemble and supplies rollout start states. Each algorithm keeps its own rollout
+    strategy (MACURA adaptive-kappa, MBPO truncated-linear, M2AC mask).
 
-Everything is shared/fixed across the four algorithms (SAC backbone, ensemble,
-pink-noise exploration, eval seeds, real_ratio) EXCEPT the rollout strategy — so
-any MACURA win is attributable to its adaptive rollout alone.
+Everything is shared/fixed across the four algorithms (SAC backbone, ensemble, pink-noise
+exploration, eval seeds, real_ratio) EXCEPT the rollout strategy — so any MACURA win is
+attributable to its adaptive rollout alone.
 
-Selection: best checkpoint = highest periodic greedy-eval return on fixed shared
-seeds, gated by `selection.start_step`; each new best saves policy + ensemble +
-meta. One larger final greedy eval on the reloaded best is the run summary.
+Selection: best checkpoint = highest periodic greedy-eval return on fixed shared seeds,
+gated by `selection.start_step`; each new best saves policy + ensemble + meta. One larger
+final greedy eval on the reloaded best is the run summary.
 
 Pure-function library. The Colab notebook calls these.
 
@@ -34,11 +32,10 @@ Public functions:
 from __future__ import annotations
 
 import os
-import copy
 import json
-import importlib
 import numpy as np
 
+from src.envs import drone_env as env_mod
 from src.models import ensemble as ens
 from src.algorithms import sac as sac_mod
 from src.algorithms import macura as macura_mod
@@ -49,14 +46,6 @@ try:
     import torch
 except ImportError:
     torch = None
-
-
-def _env_module(cfg: dict):
-    """Import the env module named in cfg['env']['module'] (default 'pogo_env').
-    Lets config switch the task (drone_env / pogo_env) without touching training code.
-    The module must expose make_env / known_reward_fn / termination_fn."""
-    name = cfg.get("env", {}).get("module", "pogo_env")
-    return importlib.import_module(f"src.envs.{name}")
 
 
 # ── a minimal numpy replay buffer for REAL data (ensemble training + rollout starts) ──
@@ -88,56 +77,42 @@ class _RealBuffer:
 
 # ── evaluation (identical protocol for all algorithms) ────────────────────────
 def evaluate(agent, env, eval_episodes: int) -> dict:
-    returns, lengths, failures, successes, flips = [], [], [], [], []
+    returns, lengths, failures, successes = [], [], [], []
     for _ in range(eval_episodes):
         obs, _ = env.reset()
         done = False
-        ep_ret, ep_len, failed, landed, ep_flips = 0.0, 0, False, False, 0.0
+        ep_ret, ep_len, failed, reached = 0.0, 0, False, False
         while not done:
             act = sac_mod.select_action(agent, obs, evaluate=True)
             obs, rew, terminated, truncated, info = env.step(act)
             ep_ret += rew
             ep_len += 1
-            failed = failed or info.get("failure", False)
-            # success: drone reached-and-held the target, or (Pogo) landed a full flip
-            landed = landed or info.get("reached", info.get("landed_flip", False))
-            ep_flips = max(ep_flips, info.get("flips", 0.0))     # peak rotation (Pogo); 0 for drone
+            failed = failed or info.get("failure", False)     # crashed
+            reached = reached or info.get("reached", False)    # reached & held the target
             done = terminated or truncated
         returns.append(ep_ret)
         lengths.append(ep_len)
         failures.append(float(failed))
-        successes.append(float(landed))
-        flips.append(ep_flips)
+        successes.append(float(reached))
     return {
         "eval_return": float(np.mean(returns)),
         "eval_return_std": float(np.std(returns)),
         "eval_length": float(np.mean(lengths)),
-        "eval_failure_rate": float(np.mean(failures)),   # faceplant / collapse rate
-        "eval_success_rate": float(np.mean(successes)),  # stuck-backflip rate
-        "eval_flips": float(np.mean(flips)),             # mean peak rotation (turns)
+        "eval_failure_rate": float(np.mean(failures)),   # crash rate
+        "eval_success_rate": float(np.mean(successes)),  # reached-and-held rate
     }
 
 
 # ── a single training run ─────────────────────────────────────────────────────
-def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0,
-              init_ckpt: str = None, tag: str = None) -> dict:
+def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
     """Train one algorithm in {'macura','mbpo','m2ac','sac'} and log curves.
-
-    `init_ckpt` (optional): path to a previous best .zip whose SAC policy is
-    loaded before training — used to warm-start a later curriculum stage
-    (jump -> half-flip -> full flip) from the earlier one.
-    `tag` (optional): overrides the checkpoint / log basename (default
-    ``<algo>_seed<seed>``) — used for the shared pretrain so it does not collide
-    with the algorithm runs. Only the SAVE names change; the algorithm logic and
-    the printed labels stay keyed on `algo_name`/`seed`.
-    """
+    Saves only the best checkpoint (highest periodic greedy-eval return)."""
     if torch is None:
         raise ImportError("torch required for training")
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    run_name = tag or f"{algo_name}_seed{seed}"
+    run_name = f"{algo_name}_seed{seed}"
     _seed_everything(seed)
 
-    env_mod = _env_module(cfg)
     env, obs_dim, act_dim = env_mod.make_env(cfg["env"], seed=seed)
     eval_env, _, _ = env_mod.make_env(cfg["env"], seed=cfg["experiment"]["eval_seeds"][0])
     reward_fn = env_mod.known_reward_fn(cfg["env"])
@@ -147,24 +122,19 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0,
     buf_cap = cfg["rollout"]["model_buffer_capacity"] if model_based else 1_000_000
     sac_cfg = {**cfg["sac"], "buffer_size": buf_cap}
     agent = sac_mod.build_sac(obs_dim, act_dim, sac_cfg, device, seed)
-    if init_ckpt:                                   # curriculum warm-start: load prior policy
-        try:
-            agent.set_parameters(init_ckpt, device=device)
-        except Exception:
-            pass
     dynamics_model = ens.build_ensemble(cfg["ensemble"], obs_dim, act_dim, device) if model_based else None
 
     total_steps = cfg["experiment"]["total_env_steps"]
     real_buffer = _RealBuffer(total_steps, obs_dim, act_dim)
 
     # Two-buffer setup for the model-based agents: the agent's own SB3 buffer holds MODEL (imagined)
-    # transitions; a second SB3 buffer holds REAL transitions, so each SAC update draws a whole batch
-    # from one or the other (batch-level mixing). The SAC baseline keeps one buffer (100% real).
+    # transitions; a second SB3 buffer holds REAL transitions, so each SAC batch mixes the two
+    # (within-batch). The SAC baseline keeps one buffer (100% real).
     model_rb = agent.replay_buffer if model_based else None
     real_rb = sac_mod.build_replay_buffer(agent, total_steps) if model_based else None
 
-    # FIXED paper-faithful real_ratio (Janner/MBPO; MACURA inherits) — IDENTICAL for MACURA/MBPO/M2AC
-    # so it cannot bias the comparison; only their rollout strategy differs.
+    # FIXED real_ratio (Janner/MBPO; MACURA inherits) — IDENTICAL for MACURA/MBPO/M2AC so it
+    # cannot bias the comparison; only their rollout strategy differs.
     real_ratio = float(cfg["sac"]["real_ratio"])
     mix_rng = np.random.default_rng(seed)
 
@@ -177,11 +147,9 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0,
     num_rollouts = cfg["rollout"]["num_rollouts"]
     g_max = cfg["sac"]["gradient_steps_max"]
     batch = cfg["sac"]["batch_size"]
-    # UTD (tasks.md Phase 4): the model-free SAC baseline runs a STANDARD ~1
-    # update per real step (`baseline_gradient_steps`), not the model-based
-    # ceiling g_max — UTD-20 plain SAC destabilizes and would be a strawman.
-    # Model-based agents carry their per-round UTD (MACURA Eq. 22 adaptive,
-    # MBPO/M2AC fixed) BETWEEN rollout rounds instead of resetting to g_max.
+    # UTD: the model-free SAC baseline runs a STANDARD ~1 update per real step
+    # (`baseline_gradient_steps`), not the model-based ceiling g_max. Model-based agents
+    # carry their per-round UTD (MACURA Eq. 22 adaptive, MBPO/M2AC fixed) between rounds.
     baseline_g = int(cfg["sac"].get("baseline_gradient_steps", 1))
     num_updates = g_max if model_based else baseline_g
 
@@ -241,14 +209,12 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0,
             if agent.replay_buffer.size() >= batch:
                 sac_mod.sac_update(agent, num_updates, batch)
         elif model_trained:
-            # model-based: batch-level real/imagined mixing at the FIXED real_ratio. The SAME path
-            # runs for MACURA/MBPO/M2AC; only `num_updates` (UTD) and which rollout produced the
-            # model data differ. The SAC math is untouched.
+            # model-based: within-batch real/imagined mixing at the FIXED real_ratio. The SAME
+            # path runs for MACURA/MBPO/M2AC; only `num_updates` (UTD) and which rollout produced
+            # the model data differ. The SAC math is untouched.
             sac_mod.sac_update_mixed(agent, real_rb, model_rb, num_updates, batch, real_ratio, mix_rng)
 
         # --- periodic GREEDY evaluation on FIXED shared seeds → headline curve + selection ---
-        # Best checkpoint = highest periodic greedy-eval return, gated by `selection.start_step`
-        # (don't select during the noisy early phase). Each new best saves policy + ensemble + meta.
         if step % eval_every == 0:
             m = evaluate(agent, eval_env, cfg["experiment"]["eval_episodes"])
             log["steps"].append(step)
@@ -256,15 +222,14 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0,
             log["eval_return_std"].append(m["eval_return_std"])
             log["eval_failure_rate"].append(m["eval_failure_rate"])
             log["eval_success_rate"].append(m["eval_success_rate"])
-            log["eval_flips"].append(m["eval_flips"])
             improved = step >= start_step and m["eval_return"] > best_return
             if improved:                       # overwrite best checkpoint (policy + ensemble + meta)
                 best_return = m["eval_return"]
                 best_step = step
                 best_ckpt = _save_best(agent, dynamics_model, drive_dir, run_name)
             print(f"[{algo_name} seed{seed}] step {step:>6}  return {m['eval_return']:7.1f}"
-                  f"  flips {m['eval_flips']:.2f}  land {m['eval_success_rate']:.2f}"
-                  f"  fail {m['eval_failure_rate']:.2f}{'  <- best' if improved else ''}")
+                  f"  reach {m['eval_success_rate']:.2f}  crash {m['eval_failure_rate']:.2f}"
+                  f"{'  <- best' if improved else ''}")
 
     if best_ckpt is None:                       # never improved (e.g. no eval / before start_step)
         best_ckpt = _save_best(agent, dynamics_model, drive_dir, run_name)
@@ -275,7 +240,7 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0,
             "best_return": float(best_return), "final_eval": final_eval}
     _save_meta(meta, drive_dir, run_name)
     print(f"[{algo_name} seed{seed}] FINAL  return {final_eval['eval_return']:.1f}"
-          f"±{final_eval['eval_return_std']:.1f}  fail {final_eval['eval_failure_rate']:.2f}"
+          f"±{final_eval['eval_return_std']:.1f}  crash {final_eval['eval_failure_rate']:.2f}"
           f"  (best @ step {best_step})")
 
     run = {"algo": algo_name, "seed": seed, "checkpoint": best_ckpt,
@@ -287,60 +252,16 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0,
     return run
 
 
-# ── curriculum / shared warm-start ────────────────────────────────────────────
-def stage_cfg(cfg: dict, *, w_rotation=None, total_env_steps=None, warmup=None) -> dict:
-    """Deep-copy `cfg` with the curriculum knobs overridden for one stage.
-
-    Only the SHARED reward's `w_rotation` and the step budget change, so the reward
-    stays a single analytic function (real == imagined) and every algorithm still
-    receives one identical cfg. Used to build the jump (w_rotation=0) pretrain stage.
-    """
-    c = copy.deepcopy(cfg)
-    if w_rotation is not None:
-        c["env"]["reward"]["w_rotation"] = float(w_rotation)
-    if total_env_steps is not None:
-        c["experiment"]["total_env_steps"] = int(total_env_steps)
-    if warmup is not None:
-        c["experiment"]["warmup_random_steps"] = int(warmup)
-    return c
-
-
-def pretrain_shared_policy(cfg: dict, drive_dir: str) -> str:
-    """Pretrain ONE jump-and-balance policy and return its best `.zip` path.
-
-    Stage 1 of the curriculum: train the shared SAC backbone on the jump reward
-    (`curriculum.pretrain_w_rotation`, default 0 = jump & balance, no flip), then
-    hand the resulting checkpoint to ALL FOUR algorithms as `init_ckpt` for the
-    full-flip stage. The four inherit the SAME weights, so the fairness invariant
-    holds and the flip is reachable in a small real-step budget. Idempotent: reuses
-    the checkpoint (and skips retraining) if it already exists on Drive.
-    """
-    cur = cfg["curriculum"]
-    path = os.path.join(drive_dir, "checkpoints", "pretrain_jump_best.zip")
-    if os.path.exists(path):
-        print(f"[pretrain] reusing shared warm-start {path}")
-        return path
-    stage = stage_cfg(cfg, w_rotation=cur["pretrain_w_rotation"],
-                      total_env_steps=cur["pretrain_steps"])
-    print(f"[pretrain] jump policy: {cur['pretrain_algo']} x {cur['pretrain_steps']} steps"
-          f" (w_rotation={cur['pretrain_w_rotation']})")
-    train_one(cur["pretrain_algo"], stage, drive_dir,
-              seed=cur["pretrain_seed"], tag="pretrain_jump")
-    return path
-
-
 # ── small internals ───────────────────────────────────────────────────────────
 def _empty_log():
     return {"steps": [], "eval_return": [], "eval_return_std": [],
-            "eval_failure_rate": [], "eval_success_rate": [], "eval_flips": [],
+            "eval_failure_rate": [], "eval_success_rate": [],
             "kappa": [], "rollout_length": []}
 
 
 def _final_eval(agent, eval_env, best_ckpt, eval_episodes):
     """Reload the best policy and run ONE larger greedy eval as the run summary.
-
-    Reloading is best-effort: if it fails (or there is no checkpoint) we evaluate the in-memory
-    agent so a summary is always produced."""
+    Best-effort: if reload fails (or there is no checkpoint) evaluate the in-memory agent."""
     if best_ckpt:
         try:
             agent.set_parameters(best_ckpt, device=agent.device)
@@ -349,7 +270,7 @@ def _final_eval(agent, eval_env, best_ckpt, eval_episodes):
     return evaluate(agent, eval_env, eval_episodes)
 
 
-# ── exploration noise (real pink/white, applied identically to all algorithms) ─
+# ── exploration noise (pink/white, applied identically to all algorithms) ──────
 class _WhiteNoise:
     """Uncorrelated Gaussian action noise."""
     def __init__(self, act_dim, scale, seed=0):
@@ -362,9 +283,9 @@ class _WhiteNoise:
 
 
 class _PinkNoise:
-    """Temporally-correlated 1/f (pink) action noise, per action dim. A pink
-    sequence of length `horizon` is precomputed per episode via FFT (Eberhard
-    et al. 2023, used by MACURA), then replayed one step at a time."""
+    """Temporally-correlated 1/f (pink) action noise, per action dim. A pink sequence of
+    length `horizon` is precomputed per episode via FFT (Eberhard et al. 2023, used by
+    MACURA), then replayed one step at a time."""
     def __init__(self, act_dim, horizon, scale, seed=0):
         self.act_dim = act_dim
         self.horizon = max(int(horizon), 2)
@@ -418,9 +339,8 @@ def _explore(agent, obs, noise_proc):
 
 
 def _store_model_transitions(agent, transitions):
-    """Add all imagined transitions to the SB3 replay buffer in ONE vectorized
-    bulk write (was row-by-row — tasks.md Phase 2). Falls back to per-row add if
-    the buffer layout differs on the installed SB3 version (correctness first)."""
+    """Add all imagined transitions to the SB3 replay buffer in ONE vectorized bulk write.
+    Falls back to per-row add if the buffer layout differs on the installed SB3 version."""
     if not transitions:
         return
     obs = np.concatenate([t[0] for t in transitions]).astype(np.float32)
@@ -465,7 +385,6 @@ def _seed_everything(seed):
 def _save_best(agent, dynamics_model, drive_dir, name):
     """Overwrite the single best checkpoint on Drive: <name>_best.zip (SB3 policy) and,
     for model-based agents, <name>_best_ensemble.pt (world-model weights + normalizer).
-    `name` is ``<algo>_seed<seed>`` for a run, or the pretrain tag for the shared warm-start.
     Returns the policy .zip path (or None on failure)."""
     path = os.path.join(drive_dir, "checkpoints", f"{name}_best")
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -503,7 +422,7 @@ def evaluate_best(cfg: dict, drive_dir: str, device: str = "cuda",
     from stable_baselines3 import SAC
     seeds = seeds or cfg["experiment"]["seeds"]
     n = eval_episodes or cfg["experiment"]["eval_episodes"]
-    eval_env, _, _ = _env_module(cfg).make_env(cfg["env"], seed=cfg["experiment"]["eval_seeds"][0])
+    eval_env, _, _ = env_mod.make_env(cfg["env"], seed=cfg["experiment"]["eval_seeds"][0])
     out = []
     for algo in cfg["experiment"]["algorithms"]:
         for seed in seeds:
@@ -523,10 +442,10 @@ def record_best_videos(cfg: dict, drive_dir: str, device: str = "cuda",
     from stable_baselines3 import SAC
     from src.viz import plots
     seeds = seeds or cfg["experiment"]["seeds"]
-    renv, _, _ = _env_module(cfg).make_env(cfg["env"], seed=999, render=True)
+    renv, _, _ = env_mod.make_env(cfg["env"], seed=999, render=True)
     if not getattr(renv, "render_enabled", True):      # headless GL: skip videos, keep the run
         print("record_best_videos: rendering unavailable, skipping videos "
-              "(watch the flip on your Mac via run_live_mac.py).")
+              "(watch the drone on your Mac via run_live_mac.py).")
         renv.close()
         return {}
     paths = {}
