@@ -12,14 +12,14 @@ import os
 
 # EXPERIMENT
 SEED                = 0
-SEEDS               = [0, 1, 2, 3, 4]    # 5 seeds for statistically meaningful figures ([0] = quick smoke)
+SEEDS               = [0, 1, 2, 3, 4, 5, 6, 7]   # 8 seeds - beat the noise in a short run (fair: same for all)
 ALGORITHMS          = ["macura", "mbpo", "m2ac", "sac"]
-TOTAL_ENV_STEPS     = 40000              # per algorithm - fair budget: model-based methods separate from
-                                         # SAC and MACURA reaches full adaptive UTD well before the end
-                                         # ([0] seed + ~2000 steps for a smoke; the paper uses 100-400k)
+TOTAL_ENV_STEPS     = 28000              # SHORT-but-fair budget: small enough to be cheap, large enough for
+                                         # the model-based-vs-SAC win + MACURA's stability edge to show, and
+                                         # for MACURA to reach full adaptive UTD (~step 8k). [0]+~2000 = smoke.
 WARMUP_RANDOM_STEPS = 500
-EVAL_EVERY_STEPS    = 1000               # ~10 eval points over the run
-EVAL_EPISODES       = 2
+EVAL_EVERY_STEPS    = 1000               # ~28 eval points over the run
+EVAL_EPISODES       = 5                  # 5 (not 2) -> lower-variance eval so a small MACURA gap is legible
 EVAL_SEEDS          = [100, 101, 102, 103, 104]   # SAME across all algorithms (fairness)
 
 # OUTPUT ROOT  -  bootstrap.setup() makes these folders (checkpoints/logs/plots/videos).
@@ -86,9 +86,9 @@ SELECTION = {"start_step": 1000, "eval_every": 1000, "final_eval_episodes": 10}
 # model_buffer_capacity is chosen so MACURA fills it (and thus reaches full adaptive UTD,
 # Eq. 22) within roughly the first third of the run - NOT scaled linearly with
 # TOTAL_ENV_STEPS: a too-large buffer would leave MACURA perpetually below MBPO/M2AC's fixed
-# update budget. At 40k steps MACURA reaches |D_mod|_max around step ~12k.
+# update budget. At 28k steps (capacity 14k) MACURA reaches |D_mod|_max around step ~8k.
 ROLLOUT = {
-    "freq_steps": 500, "num_rollouts": 200, "model_buffer_capacity": 20000,
+    "freq_steps": 500, "num_rollouts": 200, "model_buffer_capacity": 14000,
     # MACURA: uncertainty-adaptive truncation (Algorithm 2)
     "macura": {"t_max": 10, "zeta": 0.95, "xi": 5.0, "adaptive_gradient_steps": True},
     # MBPO: fixed truncated-linear schedule; ramp scaled to REACH horizon 10 within the run.

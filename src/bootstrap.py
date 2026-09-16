@@ -9,7 +9,7 @@ import subprocess
 import sys
 
 # Where the project source (src/) is cloned on the kernel (see the notebook's "Get the code").
-DEFAULT_ROOT = "/kaggle/working/macura-backflip"
+DEFAULT_ROOT = "/kaggle/working/macura-drone"
 
 
 def install(root: str = DEFAULT_ROOT):

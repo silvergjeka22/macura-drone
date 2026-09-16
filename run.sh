@@ -7,7 +7,7 @@
 #
 # EDIT THIS: replace MYUSERNAME with your Kaggle username. It must match the "id" field
 # in kernel-metadata.json (e.g. jane123/macura-drone).
-KERNEL="MYUSERNAME/macura-drone"
+KERNEL="silvergjeka01/macura-drone"
 
 set -e
 case "${1:-help}" in

@@ -1,4 +1,4 @@
-# SHARED IMPORTS -> %run $ROOT/src/imports.py  (ROOT = /kaggle/working/macura-backflip)
+# SHARED IMPORTS -> %run $ROOT/src/imports.py  (ROOT = /kaggle/working/macura-drone)
 # Loads every project symbol into the notebook namespace. The repo root goes on
 # sys.path and config is imported through src, so there is one cfg object.
 
