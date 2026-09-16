@@ -1,6 +1,6 @@
 """Real-time macOS viewer: watch a trained drone policy fly live.
 
-Train on Colab (CUDA) -> copy the best `.zip` to your Mac -> watch it here in a native
+Train on Kaggle (GPU) -> copy the best `.zip` to your Mac -> watch it here in a native
 MuJoCo window, in real time. Inference is cheap, so it runs smoothly on CPU (the drone
 body ships in the repo as envs/assets/drone.xml).
 

@@ -51,7 +51,7 @@ def mbpo_rollout(dynamics_model, agent, start_obs: np.ndarray,
             break
         act = select_actions(agent, obs, evaluate=False)   # batched (vectorized)
         next_obs = ens.predict(dynamics_model, obs, act)
-        rew = reward_fn(obs, act)
+        rew = reward_fn(next_obs, act)   # score the state the action LANDS in -> r(s',a), identical to the real env
         done = done_fn(next_obs)
         if alive.any():
             transitions.append(

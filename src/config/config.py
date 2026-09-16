@@ -12,16 +12,20 @@ import os
 
 # EXPERIMENT
 SEED                = 0
-SEEDS               = [0, 1, 2]          # set [0] for a quick smoke, 5 for final figures
+SEEDS               = [0, 1, 2, 3, 4]    # 5 seeds for statistically meaningful figures ([0] = quick smoke)
 ALGORITHMS          = ["macura", "mbpo", "m2ac", "sac"]
-TOTAL_ENV_STEPS     = 10000              # per algorithm (raise to ~20-40k for a decisive comparison)
+TOTAL_ENV_STEPS     = 40000              # per algorithm - fair budget: model-based methods separate from
+                                         # SAC and MACURA reaches full adaptive UTD well before the end
+                                         # ([0] seed + ~2000 steps for a smoke; the paper uses 100-400k)
 WARMUP_RANDOM_STEPS = 500
 EVAL_EVERY_STEPS    = 1000               # ~10 eval points over the run
 EVAL_EPISODES       = 2
 EVAL_SEEDS          = [100, 101, 102, 103, 104]   # SAME across all algorithms (fairness)
 
-# DRIVE  -  bootstrap.setup() makes these folders; only small things go here.
-DRIVE_ROOT = os.environ.get("MACURA_DRIVE_ROOT", "/content/drive/MyDrive/macura-backflip")
+# OUTPUT ROOT  -  bootstrap.setup() makes these folders (checkpoints/logs/plots/videos).
+# /kaggle/working is the only writable dir Kaggle saves as the kernel's downloadable output,
+# so results go to /kaggle/working/runs. Override with MACURA_OUTPUT_ROOT if you like.
+OUTPUT_ROOT = os.environ.get("MACURA_OUTPUT_ROOT", "/kaggle/working/runs")
 
 # RENDERING - OFF in the training kernel (MUJOCO_GL=disable; loading libOSMesa next to
 # torch/SB3 segfaults). The env-preview video renders in an isolated osmesa subprocess.
@@ -79,8 +83,10 @@ SAC = {
 SELECTION = {"start_step": 1000, "eval_every": 1000, "final_eval_episodes": 10}
 
 # ROLLOUT strategies (the ONLY thing that differs across algorithms).
-# model_buffer_capacity is sized to the STEP BUDGET so MACURA's adaptive UTD (Eq. 22)
-# reaches the same update budget as MBPO/M2AC within the run - raise it with TOTAL_ENV_STEPS.
+# model_buffer_capacity is chosen so MACURA fills it (and thus reaches full adaptive UTD,
+# Eq. 22) within roughly the first third of the run - NOT scaled linearly with
+# TOTAL_ENV_STEPS: a too-large buffer would leave MACURA perpetually below MBPO/M2AC's fixed
+# update budget. At 40k steps MACURA reaches |D_mod|_max around step ~12k.
 ROLLOUT = {
     "freq_steps": 500, "num_rollouts": 200, "model_buffer_capacity": 20000,
     # MACURA: uncertainty-adaptive truncation (Algorithm 2)
@@ -104,7 +110,7 @@ CFG = {
         "name": "macura_drone", "seeds": SEEDS, "algorithms": ALGORITHMS,
         "total_env_steps": TOTAL_ENV_STEPS, "warmup_random_steps": WARMUP_RANDOM_STEPS,
         "eval_every_steps": EVAL_EVERY_STEPS, "eval_episodes": EVAL_EPISODES,
-        "eval_seeds": EVAL_SEEDS, "drive_root": DRIVE_ROOT,
+        "eval_seeds": EVAL_SEEDS, "output_root": OUTPUT_ROOT,
     },
     "env": ENV, "ensemble": ENSEMBLE, "sac": SAC,
     "selection": SELECTION, "rollout": ROLLOUT, "exploration": EXPLORATION,

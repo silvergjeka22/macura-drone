@@ -69,7 +69,8 @@ def m2ac_rollout(dynamics_model, agent, start_obs: np.ndarray,
         means, variances = ens.member_gaussians(dynamics_model, obs, act)
         u = ovr_uncertainty(means, variances) if unc_kind == "ovr" else compute_gjs(means, variances)
         next_obs = ens.predict(dynamics_model, obs, act)
-        rew = reward_fn(obs, act) - penalty * u       # uncertainty reward penalty
+        # score the state the action LANDS in -> r(s',a), identical to the real env, minus the uncertainty penalty
+        rew = reward_fn(next_obs, act) - penalty * u
         done = done_fn(next_obs)
         a = alive.copy()
         raw.append((obs[a], act[a], rew[a], next_obs[a], done[a], u[a]))

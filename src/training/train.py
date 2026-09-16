@@ -20,13 +20,13 @@ Selection: best checkpoint = highest periodic greedy-eval return on fixed shared
 gated by `selection.start_step`; each new best saves policy + ensemble + meta. One larger
 final greedy eval on the reloaded best is the run summary.
 
-Pure-function library. The Colab notebook calls these.
+Pure-function library. The notebook calls these.
 
 Public functions:
-    train_one(algo_name, cfg, drive_dir, seed)  -> run_dict (saves best ckpt only)
+    train_one(algo_name, cfg, output_dir, seed)  -> run_dict (saves best ckpt only)
     evaluate(agent, env, eval_episodes)         -> metrics
-    evaluate_best(cfg, drive_dir, device, ...)  -> [{algo, seed, eval_*}]  (loads best)
-    record_best_videos(cfg, drive_dir, ...)     -> {algo_seed: mp4_path}   (loads best)
+    evaluate_best(cfg, output_dir, device, ...)  -> [{algo, seed, eval_*}]  (loads best)
+    record_best_videos(cfg, output_dir, ...)     -> {algo_seed: mp4_path}   (loads best)
 """
 
 from __future__ import annotations
@@ -104,7 +104,7 @@ def evaluate(agent, env, eval_episodes: int) -> dict:
 
 
 # ── a single training run ─────────────────────────────────────────────────────
-def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
+def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict:
     """Train one algorithm in {'macura','mbpo','m2ac','sac'} and log curves.
     Saves only the best checkpoint (highest periodic greedy-eval return)."""
     if torch is None:
@@ -191,6 +191,8 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
                     cfg["rollout"]["macura"]["adaptive_gradient_steps"])
                 log["kappa"].append((step, diag["kappa"]))
                 log["rollout_length"].append((step, diag["mean_rollout_length"]))
+                log["base_uncertainty"].append((step, diag["base_uncertainty"]))
+                log["rollout_len_hist"] = diag["lengths"]        # latest round's truncation lengths
             elif algo_name == "mbpo":
                 trans, diag = mbpo_mod.mbpo_rollout(
                     dynamics_model, agent, start, reward_fn, done_fn, step, cfg)
@@ -200,6 +202,7 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
                 trans, diag = m2ac_mod.m2ac_rollout(
                     dynamics_model, agent, start, reward_fn, done_fn, cfg)
                 num_updates = cfg["rollout"]["m2ac"]["fixed_gradient_steps"]
+                log["rollout_length"].append((step, cfg["rollout"]["m2ac"]["t_max"]))  # fixed horizon
             _store_model_transitions(agent, trans)
             model_trained = True
 
@@ -226,19 +229,19 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
             if improved:                       # overwrite best checkpoint (policy + ensemble + meta)
                 best_return = m["eval_return"]
                 best_step = step
-                best_ckpt = _save_best(agent, dynamics_model, drive_dir, run_name)
+                best_ckpt = _save_best(agent, dynamics_model, output_dir, run_name)
             print(f"[{algo_name} seed{seed}] step {step:>6}  return {m['eval_return']:7.1f}"
                   f"  reach {m['eval_success_rate']:.2f}  crash {m['eval_failure_rate']:.2f}"
                   f"{'  <- best' if improved else ''}")
 
     if best_ckpt is None:                       # never improved (e.g. no eval / before start_step)
-        best_ckpt = _save_best(agent, dynamics_model, drive_dir, run_name)
+        best_ckpt = _save_best(agent, dynamics_model, output_dir, run_name)
 
     # --- one larger final GREEDY eval on the reloaded best checkpoint → run summary ---
     final_eval = _final_eval(agent, eval_env, best_ckpt, final_eval_episodes)
     meta = {"algo": algo_name, "seed": seed, "best_step": best_step,
             "best_return": float(best_return), "final_eval": final_eval}
-    _save_meta(meta, drive_dir, run_name)
+    _save_meta(meta, output_dir, run_name)
     print(f"[{algo_name} seed{seed}] FINAL  return {final_eval['eval_return']:.1f}"
           f"±{final_eval['eval_return_std']:.1f}  crash {final_eval['eval_failure_rate']:.2f}"
           f"  (best @ step {best_step})")
@@ -246,7 +249,7 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
     run = {"algo": algo_name, "seed": seed, "checkpoint": best_ckpt,
            "best_return": float(best_return), "best_step": best_step,
            "final_eval": final_eval, **log}
-    _save_run(run, drive_dir, run_name)
+    _save_run(run, output_dir, run_name)
     env.close()
     eval_env.close()
     return run
@@ -256,7 +259,10 @@ def train_one(algo_name: str, cfg: dict, drive_dir: str, seed: int = 0) -> dict:
 def _empty_log():
     return {"steps": [], "eval_return": [], "eval_return_std": [],
             "eval_failure_rate": [], "eval_success_rate": [],
-            "kappa": [], "rollout_length": []}
+            "kappa": [], "rollout_length": [],
+            # diagnostics (do not affect training): MACURA first-step GJS uncertainty over
+            # training, and the last round's per-rollout truncation lengths (distribution plot).
+            "base_uncertainty": [], "rollout_len_hist": []}
 
 
 def _final_eval(agent, eval_env, best_ckpt, eval_episodes):
@@ -382,11 +388,11 @@ def _seed_everything(seed):
         torch.manual_seed(seed)
 
 
-def _save_best(agent, dynamics_model, drive_dir, name):
+def _save_best(agent, dynamics_model, output_dir, name):
     """Overwrite the single best checkpoint on Drive: <name>_best.zip (SB3 policy) and,
     for model-based agents, <name>_best_ensemble.pt (world-model weights + normalizer).
     Returns the policy .zip path (or None on failure)."""
-    path = os.path.join(drive_dir, "checkpoints", f"{name}_best")
+    path = os.path.join(output_dir, "checkpoints", f"{name}_best")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     try:
         agent.save(path)
@@ -400,22 +406,22 @@ def _save_best(agent, dynamics_model, drive_dir, name):
     return path + ".zip"
 
 
-def _save_meta(meta, drive_dir, name):
-    path = os.path.join(drive_dir, "checkpoints")
+def _save_meta(meta, output_dir, name):
+    path = os.path.join(output_dir, "checkpoints")
     os.makedirs(path, exist_ok=True)
     with open(os.path.join(path, f"{name}_best_meta.json"), "w") as f:
         json.dump(meta, f, indent=2)
 
 
-def _save_run(run, drive_dir, name):
-    path = os.path.join(drive_dir, "logs")
+def _save_run(run, output_dir, name):
+    path = os.path.join(output_dir, "logs")
     os.makedirs(path, exist_ok=True)
     with open(os.path.join(path, f"{name}.json"), "w") as f:
         json.dump(run, f)
 
 
 # ── final-evaluation helpers (load best models from Drive) ────────────────────
-def evaluate_best(cfg: dict, drive_dir: str, device: str = "cuda",
+def evaluate_best(cfg: dict, output_dir: str, device: str = "cuda",
                   seeds=None, eval_episodes=None) -> list:
     """Load every <algo>_seed<seed>_best.zip from Drive and evaluate it.
     Returns a list of {algo, seed, eval_return, ...} dicts."""
@@ -426,7 +432,7 @@ def evaluate_best(cfg: dict, drive_dir: str, device: str = "cuda",
     out = []
     for algo in cfg["experiment"]["algorithms"]:
         for seed in seeds:
-            ck = os.path.join(drive_dir, "checkpoints", f"{algo}_seed{seed}_best.zip")
+            ck = os.path.join(output_dir, "checkpoints", f"{algo}_seed{seed}_best.zip")
             if not os.path.exists(ck):
                 continue
             agent = SAC.load(ck, device=device)
@@ -435,7 +441,7 @@ def evaluate_best(cfg: dict, drive_dir: str, device: str = "cuda",
     return out
 
 
-def record_best_videos(cfg: dict, drive_dir: str, device: str = "cuda",
+def record_best_videos(cfg: dict, output_dir: str, device: str = "cuda",
                        seeds=None, seconds=12) -> dict:
     """For EVERY algorithm × seed, load the best model and save a ~`seconds`
     deterministic evaluation clip to {DRIVE}/videos/<algo>_seed<seed>.mp4."""
@@ -451,11 +457,11 @@ def record_best_videos(cfg: dict, drive_dir: str, device: str = "cuda",
     paths = {}
     for algo in cfg["experiment"]["algorithms"]:
         for seed in seeds:
-            ck = os.path.join(drive_dir, "checkpoints", f"{algo}_seed{seed}_best.zip")
+            ck = os.path.join(output_dir, "checkpoints", f"{algo}_seed{seed}_best.zip")
             if not os.path.exists(ck):
                 print("no best checkpoint:", algo, seed); continue
             agent = SAC.load(ck, device=device)
-            out = os.path.join(drive_dir, "videos", f"{algo}_seed{seed}.mp4")
+            out = os.path.join(output_dir, "videos", f"{algo}_seed{seed}.mp4")
             try:
                 plots.record_policy_video(agent, renv, seconds=seconds, save_path=out, fps=30)
                 paths[f"{algo}_seed{seed}"] = out

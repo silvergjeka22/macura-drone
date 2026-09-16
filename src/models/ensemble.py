@@ -2,7 +2,7 @@
 
 A small ensemble of Gaussian MLPs predicting the next-state DELTA distribution,
 shared by every model-based algorithm (MACURA, MBPO, M2AC). This replaces the
-mbrl-lib dependency (unmaintained, not installable on Colab's Python 3.12) with
+mbrl-lib dependency (unmaintained, hard to install on modern Python) with
 a compact, modern implementation. The math the algorithms rely on — per-member
 predictive Gaussians for the GJS uncertainty — is exposed by `member_gaussians`.
 

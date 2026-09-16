@@ -1,0 +1,13 @@
+{
+  "id": "MYUSERNAME/macura-drone",
+  "title": "macura-drone",
+  "code_file": "notebooks/drone.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": []
+}

@@ -74,7 +74,7 @@ def record_env_video_subprocess(root, save_path, seconds=6, policy="random", see
     imports torch + stable-baselines3 those clash and SEGFAULT. The training kernel is
     therefore pinned to MUJOCO_GL=disable, and this child renders with MUJOCO_GL=osmesa
     while importing ONLY mujoco/gymnasium/numpy/imageio (never torch or SB3) - so libOSMesa
-    never touches the training kernel. `backend` is 'osmesa' on Colab, 'glfw' locally.
+    never touches the training kernel. `backend` is 'osmesa' on Kaggle, 'glfw' locally.
     """
     import subprocess
     import sys
@@ -112,8 +112,11 @@ def _group_by_algo(runs):
 
 
 def _mean_std_curve(run_list, ykey):
-    steps = np.asarray(run_list[0]["steps"])
-    ys = np.array([r[ykey][: len(steps)] for r in run_list])
+    # robust to seeds with slightly different numbers of eval points: clip every run
+    # (and the step axis) to the shortest, so mean/std never hit a ragged-array error.
+    n = min(min(len(r["steps"]), len(r[ykey])) for r in run_list)
+    steps = np.asarray(run_list[0]["steps"][:n])
+    ys = np.array([r[ykey][:n] for r in run_list])
     return steps, ys.mean(axis=0), ys.std(axis=0)
 
 
@@ -130,8 +133,20 @@ def _curve_figure(runs, ykey, ylabel, title, save_path):
 
 
 def plot_sample_efficiency(runs, save_path=None):
-    """Return vs real env steps, mean +/- std over seeds, all four algorithms."""
-    return _curve_figure(runs, "eval_return", "evaluation return", "Sample efficiency", save_path)
+    """Return vs real env steps, mean +/- std over seeds, all four algorithms. A dashed
+    horizontal line marks model-free SAC's FINAL return (the paper's SAC reference): the
+    model-based methods aim to reach it in far fewer steps."""
+    fig = _curve_figure(runs, "eval_return", "evaluation return",
+                        "Sample efficiency (return vs real steps)", None)
+    ax = fig.axes[0]
+    by = _group_by_algo(runs)
+    if "sac" in by:
+        sac_final = np.mean([r["eval_return"][-1] for r in by["sac"] if r["eval_return"]])
+        ax.axhline(sac_final, ls="--", color=_color("sac"), lw=1.5,
+                   label="SAC (final)")
+        ax.legend()
+    _maybe_save(fig, save_path)
+    return fig
 
 
 def plot_success_rate(runs, save_path=None):
@@ -175,6 +190,149 @@ def plot_rollout_depth(macura_run, save_path=None):
         ax2.plot(ks, kv, "C3", label="kappa")
         ax2.set_ylabel("kappa", color="C3")
     ax1.set_title("MACURA: adaptive rollout length & kappa"); ax1.grid(alpha=0.3)
+    _maybe_save(fig, save_path)
+    return fig
+
+
+# ── (step, value) diagnostic series logged during training ────────────────────
+def _series_mean_std(run_list, key):
+    """Mean +/- std over seeds of a logged [(step, value), ...] diagnostic series.
+    Aligns on the shared step axis (clipped to the shortest run)."""
+    series = [np.asarray(r[key], dtype=float) for r in run_list if r.get(key)]
+    if not series:
+        return None, None, None
+    n = min(len(s) for s in series)
+    steps = series[0][:n, 0]
+    vals = np.stack([s[:n, 1] for s in series])
+    return steps, vals.mean(axis=0), vals.std(axis=0)
+
+
+def plot_imagined_horizon(runs, save_path=None):
+    """How far each model-based method IMAGINES over training: MACURA adapts its rollout
+    length to model uncertainty (grows as the model earns trust), MBPO follows a fixed
+    ramp, M2AC holds a fixed horizon. This is the core mechanism the paper is about."""
+    fig, ax = plt.subplots(figsize=(7, 5))
+    for algo, run_list in _group_by_algo(runs).items():
+        if algo == "sac":
+            continue
+        steps, mean, std = _series_mean_std(run_list, "rollout_length")
+        if steps is None:
+            continue
+        ax.plot(steps, mean, label=algo.upper(), color=_color(algo))
+        ax.fill_between(steps, mean - std, mean + std, alpha=0.15, color=_color(algo))
+    ax.set_xlabel("real environment steps"); ax.set_ylabel("imagined rollout length (steps)")
+    ax.set_title("How far each method trusts the model"); ax.legend(); ax.grid(alpha=0.3)
+    _maybe_save(fig, save_path)
+    return fig
+
+
+def plot_uncertainty(macura_runs, save_path=None):
+    """MACURA's model uncertainty story: the first-step GJS uncertainty of fresh states
+    (how wrong the model could be) against the adaptive trust threshold kappa, over
+    training. `macura_runs` is one macura run_dict or a list of them (averaged over seeds)."""
+    run_list = macura_runs if isinstance(macura_runs, list) else [macura_runs]
+    fig, ax = plt.subplots(figsize=(7, 5))
+    for key, color, label in (("base_uncertainty", "#9467bd", "first-step GJS uncertainty"),
+                              ("kappa", "#d62728", "kappa (trust threshold)")):
+        steps, mean, std = _series_mean_std(run_list, key)
+        if steps is None:
+            continue
+        ax.plot(steps, mean, color=color, label=label)
+        ax.fill_between(steps, mean - std, mean + std, alpha=0.15, color=color)
+    ax.set_xlabel("real environment steps"); ax.set_ylabel("GJS uncertainty")
+    ax.set_title("MACURA: model uncertainty vs the adaptive trust threshold")
+    ax.legend(); ax.grid(alpha=0.3)
+    _maybe_save(fig, save_path)
+    return fig
+
+
+def plot_rollout_distribution(macura_run, save_path=None):
+    """Histogram of MACURA's per-rollout truncation lengths in the latest rollout round:
+    a fixed-horizon method would be a single spike at t_max; MACURA spreads across lengths
+    because it stops each branch where THAT branch leaves the trust region."""
+    hist = macura_run.get("rollout_len_hist") or []
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    if hist:
+        hi = int(max(hist))
+        ax.hist(hist, bins=np.arange(-0.5, hi + 1.5, 1.0),
+                color=_color("macura"), edgecolor="white")
+        ax.axvline(float(np.mean(hist)), ls="--", color="k", lw=1.2,
+                   label=f"mean = {np.mean(hist):.1f}")
+        ax.legend()
+    ax.set_xlabel("rollout length before truncation (steps)")
+    ax.set_ylabel("number of branched rollouts")
+    ax.set_title("MACURA: per-rollout truncation lengths")
+    ax.grid(alpha=0.3, axis="y")
+    _maybe_save(fig, save_path)
+    return fig
+
+
+def plot_summary_table(runs, save_path=None):
+    """A compact results table (one row per algorithm, mean +/- std over seeds):
+    best return, final return, final success (reached-and-held) rate, final crash rate."""
+    order = ["macura", "mbpo", "m2ac", "sac"]
+    by = _group_by_algo(runs)
+    col_labels = ["algorithm", "best return", "final return", "success", "crash"]
+    rows, colors = [], []
+
+    def ms(vals):
+        vals = [v for v in vals if v is not None]
+        return f"{np.mean(vals):.1f} +/- {np.std(vals):.1f}" if vals else "-"
+
+    for algo in [a for a in order if a in by] + [a for a in by if a not in order]:
+        rl = by[algo]
+        best = [max(r["eval_return"]) for r in rl if r["eval_return"]]
+        final = [r["eval_return"][-1] for r in rl if r["eval_return"]]
+        succ = [r["eval_success_rate"][-1] for r in rl if r.get("eval_success_rate")]
+        crash = [r["eval_failure_rate"][-1] for r in rl if r.get("eval_failure_rate")]
+        rows.append([algo.upper(), ms(best), ms(final),
+                     f"{np.mean(succ):.2f}" if succ else "-",
+                     f"{np.mean(crash):.2f}" if crash else "-"])
+        colors.append(_color(algo))
+
+    fig, ax = plt.subplots(figsize=(8, 0.6 + 0.5 * len(rows)))
+    ax.axis("off")
+    tbl = ax.table(cellText=rows, colLabels=col_labels, cellLoc="center", loc="center")
+    tbl.auto_set_font_size(False); tbl.set_fontsize(11); tbl.scale(1, 1.5)
+    for j in range(len(col_labels)):                       # header row bold
+        tbl[0, j].set_text_props(weight="bold")
+    for i, c in enumerate(colors, start=1):                # tint the algorithm cell
+        if c:
+            tbl[i, 0].set_facecolor(c); tbl[i, 0].set_text_props(color="white", weight="bold")
+    ax.set_title("Results summary (mean +/- std over seeds)", pad=12)
+    _maybe_save(fig, save_path)
+    return fig
+
+
+def plot_overview(runs, save_path=None):
+    """One paper-style 2x2 panel: return, success rate, crash rate, and imagined horizon
+    -- the whole comparison at a glance."""
+    fig, axes = plt.subplots(2, 2, figsize=(13, 9))
+    panels = [("eval_return", "evaluation return", "Return"),
+              ("eval_success_rate", "success rate", "Reached & held target"),
+              ("eval_failure_rate", "crash rate", "Crash rate")]
+    for ax, (ykey, ylabel, title) in zip(axes.flat[:3], panels):
+        for algo, run_list in _group_by_algo(runs).items():
+            steps, mean, std = _mean_std_curve(run_list, ykey)
+            ax.plot(steps, mean, label=algo.upper(), color=_color(algo))
+            ax.fill_between(steps, mean - std, mean + std, alpha=0.18, color=_color(algo))
+        ax.set_xlabel("real environment steps"); ax.set_ylabel(ylabel)
+        ax.set_title(title); ax.grid(alpha=0.3); ax.legend(fontsize=8)
+
+    ax = axes.flat[3]
+    for algo, run_list in _group_by_algo(runs).items():
+        if algo == "sac":
+            continue
+        steps, mean, std = _series_mean_std(run_list, "rollout_length")
+        if steps is None:
+            continue
+        ax.plot(steps, mean, label=algo.upper(), color=_color(algo))
+        ax.fill_between(steps, mean - std, mean + std, alpha=0.15, color=_color(algo))
+    ax.set_xlabel("real environment steps"); ax.set_ylabel("imagined rollout length")
+    ax.set_title("How far each method trusts the model"); ax.grid(alpha=0.3); ax.legend(fontsize=8)
+
+    fig.suptitle("MACURA vs MBPO vs M2AC vs SAC -- drone recover-and-reach", fontsize=14)
+    fig.tight_layout(rect=(0, 0, 1, 0.98))
     _maybe_save(fig, save_path)
     return fig
 

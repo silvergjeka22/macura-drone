@@ -11,7 +11,7 @@ MuJoCo's interactive viewer must own the main thread:
 
 Setup on the Mac (once):
     python -m pip install mujoco stable-baselines3 torch gymnasium numpy
-Then copy the best .zip checkpoints trained on Colab into a local folder and
+Then copy the best .zip checkpoints trained on Kaggle into a local folder and
 point --ckpt / --compare at them.
 """
 

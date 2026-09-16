@@ -3,8 +3,9 @@
 A quadrotor learns to **recover from a tumbling start, fly to a target, and hold a stable
 hover**, and that aggressive maneuver is used to compare the four algorithms of the MACURA
 paper — **MACURA, MBPO, M2AC, SAC**. All four share one SAC backbone and one probabilistic
-ensemble, so any difference is attributable to the **rollout strategy** alone. Train on
-Google Colab (GPU), then watch the trained policies fly on your Mac.
+ensemble, so any difference is attributable to the **rollout strategy** alone. Train on a
+**Kaggle GPU kernel** (pushed from VS Code, runs with your PC off), then watch the trained
+policies fly on your Mac.
 
 > Paper: *Trust the Model Where It Trusts Itself — Model-Based Actor-Critic with
 > Uncertainty-Aware Rollout Adaption*, ICML 2024 (arXiv:2405.19014).
@@ -33,17 +34,17 @@ Google Colab (GPU), then watch the trained policies fly on your Mac.
 ## Notebook
 
 `notebooks/drone.ipynb` — the one place training runs. It clones `src/`, runs
-`bootstrap.setup()`, then `%run src/imports.py`, and follows a thin layout:
+`bootstrap.setup()`, then `%run $ROOT/src/imports.py`, and follows a thin layout:
 
 ```
-Connect Colab -> Setup -> Fresh start -> Meet the drone -> Train -> Results -> Flight demo -> Save
+Get the code -> Setup -> Fresh start -> Meet the drone -> Train -> Results -> Flight demo -> Save
 ```
 
 ## Source layout
 
 ```
 src/
-  bootstrap.py            Colab: mount Drive, install deps, pick a safe render backend
+  bootstrap.py            Kaggle: install deps, pick a safe render backend, make output dirs
   imports.py              load every symbol into the notebook namespace (%run target)
   config/config.py        every quantity: env, reward, ensemble, sac, rollout, exploration
   envs/
@@ -67,19 +68,58 @@ run_live_mac.py           watch a saved policy fly on macOS (mjpython)
 Every `.py` under `src/` is a library of pure functions; the notebook orchestrates them,
 and `run_live_mac.py` is the one executable entry point.
 
-## Running on Colab
+## Run it on Kaggle from VS Code (PC off)
 
-Open `notebooks/drone.ipynb`, select a **GPU** runtime, and run top to bottom: it clones
-`src/` from GitHub, `bootstrap.setup()` (mount Drive, install, pick a render backend), then
-`%run src/imports.py`. Best checkpoints, plots and logs go to Drive under `config.DRIVE_ROOT`.
-Push before running, since Colab clones `src/` from GitHub. The training budget is
-`config.TOTAL_ENV_STEPS` × `SEEDS` × the four algorithms (raise the steps for a decisive run).
+Everything runs on a Kaggle GPU kernel in batch mode: push the job from your terminal, turn
+your PC off, and download the results later. There is nothing to keep open.
+
+**One-time local setup**
+
+1. Install the Kaggle CLI: `pip install kaggle`
+2. Get an API token — on kaggle.com: Account → Settings → **Create New Token** (downloads
+   `kaggle.json`). Put it where the CLI looks:
+   - macOS/Linux: `~/.kaggle/kaggle.json` (then `chmod 600 ~/.kaggle/kaggle.json`)
+   - Windows: `C:\Users\<you>\.kaggle\kaggle.json`
+3. On Kaggle add a **Secret** named `GITHUB_TOKEN` (a GitHub personal-access token) so the
+   kernel can clone this private repo. Internet + GPU are already enabled in
+   `kernel-metadata.json`.
+
+**Fill in two placeholders** (your Kaggle username):
+`kernel-metadata.json` → `"id": "MYUSERNAME/macura-drone"` and `run.sh` → `KERNEL=...`.
+
+**`kernel-metadata.json`** tells Kaggle how to run the notebook (JSON can't hold comments, so
+the fields are explained here):
+
+| field | meaning |
+| --- | --- |
+| `id` | `your-username/kernel-slug` — where the kernel lives on Kaggle |
+| `code_file` | the notebook to run: `notebooks/drone.ipynb` |
+| `language` / `kernel_type` | a Python notebook |
+| `is_private` | keep the kernel private to you |
+| `enable_gpu` | run on a GPU (needed for training) |
+| `enable_internet` | allow the GitHub clone + pip installs |
+| `dataset_sources` / `competition_sources` / `kernel_sources` | none — no external data needed |
+
+**Push, check, download** (from the repo folder):
+
+```bash
+./run.sh push      # send the job to Kaggle and start it -> then turn your PC off
+./run.sh status    # queued / running / complete
+./run.sh get       # download results into ./out  (once status is complete)
+```
+
+Outputs are written to `/kaggle/working/runs` on the kernel and download into `./out`:
+`checkpoints/` (best policies), `logs/` (per-run JSON), `plots/` (all figures). No
+`/kaggle/input` dataset is needed — the drone model and code come from the repo and training
+makes its own data. Budget: `config.TOTAL_ENV_STEPS` (40k) × `SEEDS` (5) × four algorithms;
+for a quick health check first set `SEEDS=[0]`, `TOTAL_ENV_STEPS≈2000`, push, and confirm it
+completes before the full run.
 
 ## Watch on your Mac
 
 ```bash
 python -m pip install mujoco stable-baselines3 torch gymnasium numpy
-# copy the best .zip checkpoints from Drive into ./runs/checkpoints/, then:
+# copy the best .zip checkpoints from ./out/runs/checkpoints into ./runs/checkpoints/, then:
 mjpython run_live_mac.py --compare runs/checkpoints
 ```
 

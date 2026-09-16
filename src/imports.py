@@ -1,4 +1,4 @@
-# SHARED IMPORTS -> %run /content/macura-backflip/src/imports.py
+# SHARED IMPORTS -> %run $ROOT/src/imports.py  (ROOT = /kaggle/working/macura-backflip)
 # Loads every project symbol into the notebook namespace. The repo root goes on
 # sys.path and config is imported through src, so there is one cfg object.
 
@@ -53,4 +53,4 @@ set_seed(cfg.SEED)
 
 print("ROOT   :", ROOT)
 print("Device :", device)
-print("Steps  :", cfg.TOTAL_ENV_STEPS, "| seeds", cfg.SEEDS, "| ->", cfg.DRIVE_ROOT)
+print("Steps  :", cfg.TOTAL_ENV_STEPS, "| seeds", cfg.SEEDS, "| ->", cfg.OUTPUT_ROOT)
