@@ -98,9 +98,3 @@ def m2ac_rollout(dynamics_model, agent, start_obs: np.ndarray,
     return transitions, {"kept_fraction": n_keep / len(u_all)}
 
 
-def build_m2ac(obs_dim: int, act_dim: int, cfg: dict, device: str = "cuda"):
-    from src.algorithms.sac import build_sac
-
-    agent = build_sac(obs_dim, act_dim, cfg["sac"], device)
-    dynamics_model = ens.build_ensemble(cfg["ensemble"], obs_dim, act_dim, device)
-    return {"agent": agent, "dynamics_model": dynamics_model}

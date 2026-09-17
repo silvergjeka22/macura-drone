@@ -452,22 +452,103 @@ def plot_steps_to_threshold(runs, threshold=None, frac=0.6, save_path=None):
 
 
 # ── policy video ──────────────────────────────────────────────────────────────
-def record_policy_video(agent, env, seconds=8, fps=30, save_path=None):
-    """Record a deterministic evaluation clip (~`seconds`) of a trained SB3 agent.
-    Resets on crash/timeout so the clip fills the duration. `env` must render()."""
-    import imageio
-    pol = lambda o: agent.predict(np.asarray(o, np.float32), deterministic=True)[0]
+def record_policy_video(ckpt_path, cfg, save_path, seconds=8, seed=999, label=None, device="cpu"):
+    """Save an mp4 of a trained policy flying, in a way that is safe on a headless GPU box.
+    Step 1: roll the policy out here to record the body pose per frame (SB3, no graphics).
+    Step 2: render those frames in a separate mujoco-only process (graphics never touch the
+    training kernel). Returns save_path, or None if rendering is unavailable (run still ok)."""
+    import tempfile
+    try:
+        qpos, mocap, fps = _policy_trajectory(ckpt_path, cfg["env"], seconds, seed, device)
+    except Exception as e:
+        print("policy rollout failed:", e)
+        return None
+    frames_file = tempfile.mktemp(suffix=".npz")
+    np.savez(frames_file, qpos=qpos, mocap=mocap)
+    return _render_trajectory_subprocess(frames_file, save_path, int(fps), label or "")
+
+
+def _policy_trajectory(ckpt_path, env_cfg, seconds, seed, device):
+    """Run the trained policy (deterministic) and return (qpos frames, mocap frames, fps).
+    No graphics here, so SB3 and MuJoCo coexist safely."""
+    from stable_baselines3 import SAC
+    from src.envs import drone_env
+    env, _, _ = drone_env.make_env(env_cfg, seed=seed, render=False)
+    agent = SAC.load(ckpt_path, device=device)
+    fps = int(round(1.0 / (env.model.opt.timestep * env.action_repeat)))
     obs, _ = env.reset()
-    frames = [_pad16(env.render())]
+    qpos, mocap = [], []
     for _ in range(int(seconds * fps)):
-        obs, _, terminated, truncated, _ = env.step(pol(obs))
-        frames.append(_pad16(env.render()))
-        if terminated or truncated:
+        act = agent.predict(np.asarray(obs, np.float32), deterministic=True)[0]
+        obs, _, term, trunc, _ = env.step(act)
+        qpos.append(np.array(env.data.qpos, np.float64))
+        mocap.append(np.array(env.data.mocap_pos, np.float64))
+        if term or trunc:
             obs, _ = env.reset()
-    if save_path:
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        imageio.mimsave(save_path, frames, fps=fps)
-    return save_path
+    env.close()
+    return np.array(qpos), np.array(mocap), fps
+
+
+# child script: renders a saved pose trajectory. Imports ONLY mujoco (never torch/SB3), so
+# software graphics can never crash the training kernel.
+_RENDER_CHILD = '''
+import os, sys
+os.environ["MUJOCO_GL"] = "%(backend)s"
+import numpy as np, mujoco, imageio
+d = np.load("%(frames)s")
+qpos, mocap = d["qpos"], d["mocap"]
+m = mujoco.MjModel.from_xml_path("%(asset)s")
+data = mujoco.MjData(m)
+r = mujoco.Renderer(m, height=480, width=640)
+cam = mujoco.MjvCamera(); cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+cam.distance, cam.elevation, cam.azimuth = 4.5, -20.0, 90.0
+label = "%(label)s"
+try:
+    from PIL import Image, ImageDraw
+except Exception:
+    Image = None
+frames = []
+for i in range(len(qpos)):
+    data.qpos[:] = qpos[i]
+    if mocap.shape[1] > 0:
+        data.mocap_pos[:] = mocap[i]
+    mujoco.mj_forward(m, data)
+    cam.lookat[:] = data.xpos[1]
+    r.update_scene(data, camera=cam)
+    img = r.render()
+    if label and Image is not None:
+        im = Image.fromarray(img); dr = ImageDraw.Draw(im)
+        dr.rectangle([0, 0, 12 + 9 * len(label), 22], fill=(0, 0, 0))
+        dr.text((6, 5), label, fill=(255, 255, 255))
+        img = np.asarray(im)
+    h, w = img.shape[0] // 16 * 16, img.shape[1] // 16 * 16
+    frames.append(img[:h, :w])
+imageio.mimsave("%(out)s", frames, fps=%(fps)d)
+print("OK")
+'''
+
+
+def _render_trajectory_subprocess(frames_file, save_path, fps, label, backend=None):
+    """Render a saved pose trajectory to mp4 in a mujoco-only subprocess (osmesa on a headless
+    box, glfw locally). Returns save_path, or None if it could not render."""
+    import subprocess
+    import sys
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    asset = os.path.join(root, "src", "envs", "assets", "drone.xml")
+    os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+    backend = backend or ("osmesa" if os.path.isdir("/kaggle") else "glfw")
+    child = _RENDER_CHILD % dict(backend=backend, frames=frames_file, asset=asset,
+                                 out=save_path, fps=fps, label=label)
+    try:
+        res = subprocess.run([sys.executable, "-c", child],
+                             capture_output=True, text=True, timeout=600)
+        if res.returncode == 0 and os.path.exists(save_path):
+            return save_path
+        print("policy-video render failed:", (res.stderr or "")[-500:])
+        return None
+    except Exception as e:
+        print("policy-video render error:", e)
+        return None
 
 
 def _pad16(frame):

@@ -165,14 +165,3 @@ def gradient_steps(model_buffer_size: int, model_buffer_capacity: int,
     return max(1, int(round(g_max * frac)))
 
 
-def build_macura(obs_dim: int, act_dim: int, cfg: dict, device: str = "cuda"):
-    """Convenience builder: returns the shared SAC + ensemble for MACURA.
-
-    The rollout logic above is stateless; training/train.py wires it together
-    with `kappa_state = {}` carried across rounds.
-    """
-    from src.algorithms.sac import build_sac
-
-    agent = build_sac(obs_dim, act_dim, cfg["sac"], device)
-    dynamics_model = ens.build_ensemble(cfg["ensemble"], obs_dim, act_dim, device)
-    return {"agent": agent, "dynamics_model": dynamics_model, "kappa_state": {}}

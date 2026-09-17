@@ -23,10 +23,10 @@ final greedy eval on the reloaded best is the run summary.
 Pure-function library. The notebook calls these.
 
 Public functions:
-    train_one(algo_name, cfg, output_dir, seed)  -> run_dict (saves best ckpt only)
-    evaluate(agent, env, eval_episodes)         -> metrics
-    evaluate_best(cfg, output_dir, device, ...)  -> [{algo, seed, eval_*}]  (loads best)
-    record_best_videos(cfg, output_dir, ...)     -> {algo_seed: mp4_path}   (loads best)
+    train_one(algo_name, cfg, output_dir, seed)    -> run_dict (saves best ckpt only)
+    train_algo(algo_name, cfg, output_dir, seeds)  -> [run_dict] over all seeds (reloads if logged)
+    evaluate(agent, env, eval_episodes)            -> metrics
+    evaluate_best(cfg, output_dir, device, ...)    -> [{algo, seed, eval_*}]  (loads best)
 """
 
 from __future__ import annotations
@@ -255,7 +255,27 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
     return run
 
 
-# ── small internals ───────────────────────────────────────────────────────────
+def train_algo(algo_name: str, cfg: dict, output_dir: str, seeds=None) -> list:
+    """Train one algorithm across all seeds and return the list of run dicts. A seed whose
+    log already exists is reloaded instead of retrained, so re-running the notebook resumes."""
+    seeds = seeds if seeds is not None else cfg["experiment"]["seeds"]
+    runs = []
+    for seed in seeds:
+        log_path = os.path.join(output_dir, "logs", f"{algo_name}_seed{seed}.json")
+        if os.path.exists(log_path):
+            with open(log_path) as f:
+                runs.append(json.load(f))
+        else:
+            runs.append(train_one(algo_name, cfg, output_dir, seed))
+    return runs
+
+
+def best_run(runs: list) -> dict:
+    """Return the run with the highest best_return (the strongest seed of an algorithm)."""
+    return max(runs, key=lambda r: r.get("best_return", -1e18))
+
+
+# small internals
 def _empty_log():
     return {"steps": [], "eval_return": [], "eval_return_std": [],
             "eval_failure_rate": [], "eval_success_rate": [],
@@ -439,34 +459,3 @@ def evaluate_best(cfg: dict, output_dir: str, device: str = "cuda",
             out.append({"algo": algo, "seed": seed, **evaluate(agent, eval_env, n)})
     eval_env.close()
     return out
-
-
-def record_best_videos(cfg: dict, output_dir: str, device: str = "cuda",
-                       seeds=None, seconds=12) -> dict:
-    """For EVERY algorithm × seed, load the best model and save a ~`seconds`
-    deterministic evaluation clip to {DRIVE}/videos/<algo>_seed<seed>.mp4."""
-    from stable_baselines3 import SAC
-    from src.viz import plots
-    seeds = seeds or cfg["experiment"]["seeds"]
-    renv, _, _ = env_mod.make_env(cfg["env"], seed=999, render=True)
-    if not getattr(renv, "render_enabled", True):      # headless GL: skip videos, keep the run
-        print("record_best_videos: rendering unavailable, skipping videos "
-              "(watch the drone on your Mac via run_live_mac.py).")
-        renv.close()
-        return {}
-    paths = {}
-    for algo in cfg["experiment"]["algorithms"]:
-        for seed in seeds:
-            ck = os.path.join(output_dir, "checkpoints", f"{algo}_seed{seed}_best.zip")
-            if not os.path.exists(ck):
-                print("no best checkpoint:", algo, seed); continue
-            agent = SAC.load(ck, device=device)
-            out = os.path.join(output_dir, "videos", f"{algo}_seed{seed}.mp4")
-            try:
-                plots.record_policy_video(agent, renv, seconds=seconds, save_path=out, fps=30)
-                paths[f"{algo}_seed{seed}"] = out
-                print("saved", out)
-            except Exception as e:
-                print("video failed:", algo, seed, e)
-    renv.close()
-    return paths
