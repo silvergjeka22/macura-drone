@@ -76,10 +76,16 @@ class _RealBuffer:
 
 
 # ── evaluation (identical protocol for all algorithms) ────────────────────────
-def evaluate(agent, env, eval_episodes: int) -> dict:
+def evaluate(agent, env, eval_episodes: int, eval_seeds=None) -> dict:
+    # FIXED per-episode scenarios: reset each eval episode from a deterministic seed so every
+    # evaluation (and every algorithm) faces the IDENTICAL set of wind/obstacle/init scenarios.
+    # Without this, env.reset() drew fresh scenarios each time, so a 5-episode eval had ~±0.22
+    # crash-rate / ~±44 return sampling noise - which is what made the learning curve look wildly
+    # unstable even when the policy was steady. Same base -> comparable across algos (fairness).
+    base = int(eval_seeds[0]) if eval_seeds else 100
     returns, lengths, failures, successes = [], [], [], []
-    for _ in range(eval_episodes):
-        obs, _ = env.reset()
+    for i in range(eval_episodes):
+        obs, _ = env.reset(seed=base + i)
         done = False
         ep_ret, ep_len, failed, reached = 0.0, 0, False, False
         while not done:
@@ -219,7 +225,8 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
 
         # --- periodic GREEDY evaluation on FIXED shared seeds → headline curve + selection ---
         if step % eval_every == 0:
-            m = evaluate(agent, eval_env, cfg["experiment"]["eval_episodes"])
+            m = evaluate(agent, eval_env, cfg["experiment"]["eval_episodes"],
+                         cfg["experiment"]["eval_seeds"])
             log["steps"].append(step)
             log["eval_return"].append(m["eval_return"])
             log["eval_return_std"].append(m["eval_return_std"])
@@ -238,7 +245,8 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
         best_ckpt = _save_best(agent, dynamics_model, output_dir, run_name)
 
     # --- one larger final GREEDY eval on the reloaded best checkpoint → run summary ---
-    final_eval = _final_eval(agent, eval_env, best_ckpt, final_eval_episodes)
+    final_eval = _final_eval(agent, eval_env, best_ckpt, final_eval_episodes,
+                             cfg["experiment"]["eval_seeds"])
     meta = {"algo": algo_name, "seed": seed, "best_step": best_step,
             "best_return": float(best_return), "final_eval": final_eval}
     _save_meta(meta, output_dir, run_name)
@@ -285,7 +293,7 @@ def _empty_log():
             "base_uncertainty": [], "rollout_len_hist": []}
 
 
-def _final_eval(agent, eval_env, best_ckpt, eval_episodes):
+def _final_eval(agent, eval_env, best_ckpt, eval_episodes, eval_seeds=None):
     """Reload the best policy and run ONE larger greedy eval as the run summary.
     Best-effort: if reload fails (or there is no checkpoint) evaluate the in-memory agent."""
     if best_ckpt:
@@ -293,7 +301,7 @@ def _final_eval(agent, eval_env, best_ckpt, eval_episodes):
             agent.set_parameters(best_ckpt, device=agent.device)
         except Exception:
             pass
-    return evaluate(agent, eval_env, eval_episodes)
+    return evaluate(agent, eval_env, eval_episodes, eval_seeds)
 
 
 # ── exploration noise (pink/white, applied identically to all algorithms) ──────
@@ -456,6 +464,7 @@ def evaluate_best(cfg: dict, output_dir: str, device: str = "cuda",
             if not os.path.exists(ck):
                 continue
             agent = SAC.load(ck, device=device)
-            out.append({"algo": algo, "seed": seed, **evaluate(agent, eval_env, n)})
+            out.append({"algo": algo, "seed": seed,
+                        **evaluate(agent, eval_env, n, cfg["experiment"]["eval_seeds"])})
     eval_env.close()
     return out

@@ -11,11 +11,12 @@ import os
 # and eval seeds - ONLY the rollout strategy differs.
 
 # EXPERIMENT
-# SEEDS and ALGORITHMS are overridable from the environment so you can split the study across
-# Kaggle commits WITHOUT editing code (a commit that runs past the 12h session wall is killed and
-# saves NOTHING). Set MACURA_ALGOS / MACURA_SEEDS in the notebook's "Run plan" cell.
-#   default (no env):  4 algos x 5 seeds x 25k steps ~= 9-10h  -> fits ONE 12h commit, all plots in one run.
-#   best CIs:          10 seeds, split by algorithm across commits (each < 8h) -> merge logs, plot after.
+# SEEDS and ALGORITHMS are overridable from the environment (set them in a notebook cell BEFORE
+# `from src.bootstrap import setup`, i.e. before config is first imported). Handy for a fast smoke
+# test without editing code: e.g. `os.environ["MACURA_SEEDS"] = "0"`.
+#   default (no env):  4 algos x 5 seeds x 25k steps ~= 9-10h  -> fits ONE Kaggle 12h commit,
+#                      all plots + videos in a single run (a commit that runs past 12h is killed
+#                      and saves NOTHING, so do not enlarge this without splitting across commits).
 def _env_list(name, default, cast):
     raw = os.environ.get(name, "")
     if not raw.strip():
@@ -31,8 +32,12 @@ TOTAL_ENV_STEPS     = 25000              # fair budget sized to finish all 4 alg
                                          # enough for the model-based-vs-SAC win + MACURA's stability edge + full UTD.
 WARMUP_RANDOM_STEPS = 500
 EVAL_EVERY_STEPS    = 1000               # ~20 eval points over the run
-EVAL_EPISODES       = 5                  # 5 (not 2) -> lower-variance eval so a small MACURA gap is legible
-EVAL_SEEDS          = [100, 101, 102, 103, 104]   # SAME across all algorithms (fairness)
+EVAL_EPISODES       = 20                 # 20 FIXED-seed episodes/eval -> per-point crash noise ~sqrt(p(1-p)/20)
+                                         # ~=0.11 (was ~0.22 at 5): the learning curve reflects the POLICY, not
+                                         # scenario luck. Cheap (eval is a small fraction of runtime); the UTD cut
+                                         # below more than pays for it.
+EVAL_SEEDS          = [100, 101, 102, 103, 104]   # base for the fixed eval scenarios (evaluate() uses
+                                         # base+i, i.e. seeds 100..119 for 20 episodes) - SAME across all algorithms.
 
 # OUTPUT ROOT  -  bootstrap.setup() makes these folders (checkpoints/logs/plots/videos).
 # /kaggle/working is the only writable dir Kaggle saves as the kernel's downloadable output,
@@ -105,13 +110,17 @@ SAC = {
     "gamma": 0.99, "tau": 0.005, "alpha": "auto",
     "actor_lr": 3.0e-4, "critic_lr": 3.0e-4,   # critic_lr ignored (SB3 uses one learning_rate)
     "hidden_size": 256, "batch_size": 256, "target_update_interval": 1,
-    "gradient_steps_max": 8,        # Gmax in Eq. 22 (model-based UTD ceiling)
+    "gradient_steps_max": 4,        # Gmax in Eq. 22 (model-based UTD ceiling). Lowered 8->4: a high UTD
+                                    # overtrains the critic on imagined data and drives the back-half churn
+                                    # you saw; 4 is steadier and still 4x the model-free baseline. Also ~halves
+                                    # model-based wall-clock, paying for the extra eval episodes above.
     "baseline_gradient_steps": 1,   # model-free SAC baseline UTD (~1 = standard SAC)
-    "real_ratio": 0.05,             # fixed within-batch real mixing (Janner/MBPO; MACURA inherits)
+    "real_ratio": 0.1,              # within-batch real mixing (Janner/MBPO; MACURA inherits). Raised 0.05->0.1:
+                                    # grounds the critic in twice as much REAL data -> less model exploitation.
 }
 
 # checkpoint selection & final eval (best = highest periodic greedy-eval return)
-SELECTION = {"start_step": 1000, "eval_every": 1000, "final_eval_episodes": 10}
+SELECTION = {"start_step": 1000, "eval_every": 1000, "final_eval_episodes": 30}
 
 # ROLLOUT strategies (the ONLY thing that differs across algorithms).
 # model_buffer_capacity is chosen so MACURA fills it (and thus reaches full adaptive UTD,
@@ -131,11 +140,11 @@ ROLLOUT = {
     "macura": {"t_max": 10, "zeta": 0.95, "xi": 1.0, "adaptive_gradient_steps": True},
     # MBPO: fixed truncated-linear schedule; ramp scaled to REACH horizon 10 within the run.
     "mbpo": {"rollout_schedule": [1, 10, 500, 3000],
-             "adaptive_gradient_steps": False, "fixed_gradient_steps": 8},
+             "adaptive_gradient_steps": False, "fixed_gradient_steps": 4},  # matches SAC gradient_steps_max
     # M2AC: fixed length + mask least-trustworthy transitions. "ovr" = M2AC's own one-vs-rest
     # disagreement (paper-faithful); "gjs" = reuse MACURA's GJS (same-signal ablation).
     "m2ac": {"t_max": 10, "mask_fraction": 0.5, "uncertainty_penalty": 1.0,
-             "uncertainty": "ovr", "fixed_gradient_steps": 8},
+             "uncertainty": "ovr", "fixed_gradient_steps": 4},  # matches SAC gradient_steps_max
     "sac": {},
 }
 
