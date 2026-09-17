@@ -11,10 +11,21 @@ import os
 # and eval seeds - ONLY the rollout strategy differs.
 
 # EXPERIMENT
+# SEEDS and ALGORITHMS are overridable from the environment so you can split the study across
+# Kaggle commits WITHOUT editing code (a commit that runs past the 12h session wall is killed and
+# saves NOTHING). Set MACURA_ALGOS / MACURA_SEEDS in the notebook's "Run plan" cell.
+#   default (no env):  4 algos x 5 seeds x 25k steps ~= 9-10h  -> fits ONE 12h commit, all plots in one run.
+#   best CIs:          10 seeds, split by algorithm across commits (each < 8h) -> merge logs, plot after.
+def _env_list(name, default, cast):
+    raw = os.environ.get(name, "")
+    if not raw.strip():
+        return default
+    return [cast(x) for x in raw.replace(",", " ").split()]
+
 SEED                = 0
-SEEDS               = [0, 1, 2, 3, 4]    # 5 seeds - min for IQM + bootstrap CIs, and fits Kaggle's 12h GPU cap
-                                         # (10 seeds x 28k = ~19h > 12h -> would be killed with no SAC baseline).
-ALGORITHMS          = ["macura", "mbpo", "m2ac", "sac"]
+SEEDS               = _env_list("MACURA_SEEDS", [0, 1, 2, 3, 4], int)
+ALGORITHMS          = _env_list("MACURA_ALGOS", ["macura", "mbpo", "m2ac", "sac"],
+                                lambda x: x.strip().lower())
 TOTAL_ENV_STEPS     = 25000              # fair budget sized to finish all 4 algos x 5 seeds in ~9h (fits 12h cap).
                                          # A bit more convergence than 20k while keeping 5 seeds for credible IQM;
                                          # enough for the model-based-vs-SAC win + MACURA's stability edge + full UTD.
@@ -110,7 +121,14 @@ SELECTION = {"start_step": 1000, "eval_every": 1000, "final_eval_episodes": 10}
 ROLLOUT = {
     "freq_steps": 500, "num_rollouts": 200, "model_buffer_capacity": 12000,
     # MACURA: uncertainty-adaptive truncation (Algorithm 2)
-    "macura": {"t_max": 10, "zeta": 0.95, "xi": 5.0, "adaptive_gradient_steps": True},
+    # xi is the ONE per-task knob (paper Table 5: xi in {0.3, 2, 5, 30} across envs; Tmax=10,
+    # zeta=0.95 fixed). xi=1 is the paper's recommended starting point ("reasonable in all
+    # environments", App. D.2). We use it here: xi=5 was too large for this windy drone task and
+    # ENFORCED MODEL EXPLOITATION - MACURA barely truncated, behaved like MBPO@10, and the return
+    # collapsed in the back half (peak ~step 13k then decayed, crash back to ~1.0). The paper's
+    # own diagnosis (Sec 6.2 / App D.2): "instabilities due to model exploitation occur" for too-
+    # large xi. Lower xi -> tighter kappa -> MACURA actually truncates uncertain rollouts -> stable.
+    "macura": {"t_max": 10, "zeta": 0.95, "xi": 1.0, "adaptive_gradient_steps": True},
     # MBPO: fixed truncated-linear schedule; ramp scaled to REACH horizon 10 within the run.
     "mbpo": {"rollout_schedule": [1, 10, 500, 3000],
              "adaptive_gradient_steps": False, "fixed_gradient_steps": 8},
