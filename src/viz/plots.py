@@ -337,6 +337,120 @@ def plot_overview(runs, save_path=None):
     return fig
 
 
+# ── robust aggregation: IQM + stratified bootstrap CIs (rliable-style, pure numpy) ────
+def _iqm(vals):
+    """Interquartile mean: mean of the middle 50% (drop the top/bottom 25%)."""
+    v = np.sort(np.asarray(vals, dtype=float))
+    k = int(len(v) * 0.25)
+    core = v[k:len(v) - k] if len(v) - 2 * k >= 1 else v
+    return float(core.mean())
+
+
+def _agg_ci(vals, kind="iqm", n_boot=2000, alpha=0.05, seed=0):
+    """Center statistic (iqm or mean) of `vals` over seeds, with a bootstrap CI.
+    Returns (center, lo, hi)."""
+    vals = np.asarray(vals, dtype=float)
+    stat = _iqm if kind == "iqm" else (lambda a: float(np.mean(a)))
+    center = stat(vals)
+    if len(vals) < 3:
+        return center, center, center
+    rng = np.random.default_rng(seed)
+    boots = [stat(rng.choice(vals, size=len(vals), replace=True)) for _ in range(n_boot)]
+    lo, hi = np.percentile(boots, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+    return center, float(lo), float(hi)
+
+
+def _stack(run_list, ykey):
+    """(n_seeds, n_evals) matrix of a per-eval metric, clipped to the shortest run."""
+    n = min(min(len(r["steps"]), len(r[ykey])) for r in run_list)
+    steps = np.asarray(run_list[0]["steps"][:n])
+    mat = np.array([r[ykey][:n] for r in run_list])
+    return steps, mat
+
+
+def _agg_curve(mat, kind):
+    """Per-eval-point center + CI band across seeds (columns of `mat`)."""
+    c, lo, hi = [], [], []
+    for j in range(mat.shape[1]):
+        cc, ll, hh = _agg_ci(mat[:, j], kind=kind, seed=j)
+        c.append(cc); lo.append(ll); hi.append(hh)
+    return np.array(c), np.array(lo), np.array(hi)
+
+
+def plot_iqm_efficiency(runs, save_path=None):
+    """Sample efficiency with the IQM (interquartile mean) over seeds + 95% bootstrap CIs -
+    the rliable-standard way to compare runs at a small seed count: a real MACURA edge shows
+    as a higher IQM with a tighter, separated band even when raw means overlap."""
+    fig, ax = plt.subplots(figsize=(7.5, 5))
+    for algo, run_list in _group_by_algo(runs).items():
+        steps, mat = _stack(run_list, "eval_return")
+        c, lo, hi = _agg_curve(mat, "iqm")
+        ax.plot(steps, c, label=algo.upper(), color=_color(algo))
+        ax.fill_between(steps, lo, hi, alpha=0.18, color=_color(algo))
+    ax.set_xlabel("real environment steps"); ax.set_ylabel("IQM evaluation return")
+    ax.set_title("Sample efficiency - IQM +/- 95% bootstrap CI"); ax.legend(); ax.grid(alpha=0.3)
+    _maybe_save(fig, save_path)
+    return fig
+
+
+def plot_crash_rate_ci(runs, save_path=None):
+    """Crash rate over training, mean over seeds + 95% bootstrap CI - MACURA's most dependable
+    edge (it avoids the model-exploitation blow-ups that make MBPO crash)."""
+    fig, ax = plt.subplots(figsize=(7.5, 5))
+    for algo, run_list in _group_by_algo(runs).items():
+        steps, mat = _stack(run_list, "eval_failure_rate")
+        c, lo, hi = _agg_curve(mat, "mean")
+        ax.plot(steps, c, label=algo.upper(), color=_color(algo))
+        ax.fill_between(steps, lo, hi, alpha=0.18, color=_color(algo))
+    ax.set_xlabel("real environment steps"); ax.set_ylabel("crash rate")
+    ax.set_title("Crash rate - mean +/- 95% bootstrap CI"); ax.legend(); ax.grid(alpha=0.3)
+    ax.set_ylim(-0.02, 1.02)
+    _maybe_save(fig, save_path)
+    return fig
+
+
+def plot_steps_to_threshold(runs, threshold=None, frac=0.6, save_path=None):
+    """Data efficiency: steps to first reach a return threshold, per algorithm (median over
+    seeds, IQR whiskers; lower = better). If `threshold` is None it is set to `frac` of the
+    best mean return reached by any algorithm. Seeds that never reach it are marked censored."""
+    by = _group_by_algo(runs)
+    if threshold is None:
+        best = max(max(r["eval_return"]) for rl in by.values() for r in rl)
+        worst = min(min(r["eval_return"]) for rl in by.values() for r in rl)
+        threshold = worst + frac * (best - worst)
+    order = [a for a in ["macura", "mbpo", "m2ac", "sac"] if a in by] + \
+            [a for a in by if a not in ("macura", "mbpo", "m2ac", "sac")]
+    labels, meds, los, his, cens = [], [], [], [], []
+    for algo in order:
+        steps_to = []
+        n_cens = 0
+        for r in by[algo]:
+            st = np.asarray(r["steps"]); ret = np.asarray(r["eval_return"])
+            hit = np.where(ret >= threshold)[0]
+            if len(hit):
+                steps_to.append(float(st[hit[0]]))
+            else:
+                steps_to.append(float(st[-1])); n_cens += 1     # censored: never reached
+        steps_to = np.array(steps_to)
+        labels.append(algo.upper()); meds.append(np.median(steps_to))
+        los.append(np.median(steps_to) - np.percentile(steps_to, 25))
+        his.append(np.percentile(steps_to, 75) - np.median(steps_to))
+        cens.append(n_cens)
+    fig, ax = plt.subplots(figsize=(7, 4.8))
+    xs = np.arange(len(labels))
+    ax.bar(xs, meds, yerr=[los, his], capsize=5,
+           color=[_color(l.lower()) for l in labels])
+    for i, (m, n) in enumerate(zip(meds, cens)):
+        if n:
+            ax.text(i, m, f"{n} censored", ha="center", va="bottom", fontsize=8, color="0.3")
+    ax.set_xticks(xs); ax.set_xticklabels(labels)
+    ax.set_ylabel("steps to reach threshold (median, IQR)")
+    ax.set_title(f"Data efficiency - steps to return >= {threshold:.0f}  (lower = better)")
+    ax.grid(alpha=0.3, axis="y")
+    _maybe_save(fig, save_path)
+    return fig
+
+
 # ── policy video ──────────────────────────────────────────────────────────────
 def record_policy_video(agent, env, seconds=8, fps=30, save_path=None):
     """Record a deterministic evaluation clip (~`seconds`) of a trained SB3 agent.

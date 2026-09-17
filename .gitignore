@@ -39,3 +39,5 @@ checkpoints/
 *.swp
 .idea/
 .vscode/
+# local Claude tooling (not part of the project)
+.claude/

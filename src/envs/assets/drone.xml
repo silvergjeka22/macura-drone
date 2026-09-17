@@ -47,6 +47,22 @@
       <site name="thrust3" pos="-0.13 -0.13 0.02" size="0.01"/>
       <site name="thrust4" pos=" 0.13 -0.13 0.02" size="0.01"/>
     </body>
+
+    <!-- Visual markers only (mocap = kinematic, massless, no collision): the env moves them
+         to the sampled pad / obstacle positions each reset. They never touch the physics or
+         the hover-thrust calc; the obstacles are enforced analytically in termination_fn. -->
+    <body name="pad" mocap="true" pos="0 0 0.02">
+      <geom name="pad_geom" type="cylinder" size="0.35 0.02" mass="0" contype="0" conaffinity="0"
+            rgba="0.10 0.80 0.35 0.55"/>
+    </body>
+    <body name="obs0" mocap="true" pos="1.2 1.2 1.5">
+      <geom name="obs0_geom" type="cylinder" size="0.40 1.5" mass="0" contype="0" conaffinity="0"
+            rgba="0.90 0.30 0.20 0.45"/>
+    </body>
+    <body name="obs1" mocap="true" pos="-1.2 1.2 1.5">
+      <geom name="obs1_geom" type="cylinder" size="0.40 1.5" mass="0" contype="0" conaffinity="0"
+            rgba="0.90 0.30 0.20 0.45"/>
+    </body>
   </worldbody>
 
   <actuator>

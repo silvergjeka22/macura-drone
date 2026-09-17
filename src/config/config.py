@@ -12,7 +12,7 @@ import os
 
 # EXPERIMENT
 SEED                = 0
-SEEDS               = [0, 1, 2, 3, 4, 5, 6, 7]   # 8 seeds - beat the noise in a short run (fair: same for all)
+SEEDS               = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]   # 10 seeds - beat the noise & enable IQM + bootstrap CIs (fair: same for all)
 ALGORITHMS          = ["macura", "mbpo", "m2ac", "sac"]
 TOTAL_ENV_STEPS     = 28000              # SHORT-but-fair budget: small enough to be cheap, large enough for
                                          # the model-based-vs-SAC win + MACURA's stability edge to show, and
@@ -31,32 +31,51 @@ OUTPUT_ROOT = os.environ.get("MACURA_OUTPUT_ROOT", "/kaggle/working/runs")
 # torch/SB3 segfaults). The env-preview video renders in an isolated osmesa subprocess.
 RENDER = os.environ.get("MACURA_RENDER", "0") == "1"
 
-# ENV (drone recover-and-reach). Dense reward, analytic in (obs, action) - identical for
-# real and imagined transitions. The drone spawns TILTED and TUMBLING (init_tilt/init_spin)
-# and must recover, then reach the target and hold hover.
+# ENV (drone in wind: fly through obstacles, land softly on a pad). Dense reward, analytic in
+# (obs, action) - identical for real and imagined transitions. PROCESS NOISE (gusts + actuator
+# noise) makes the learned model uncertain across the whole trajectory: a fixed-horizon rollout
+# (MBPO) over-imagines and diverges, while MACURA truncates where the ensemble disagrees. This
+# is MACURA's strongest honest case on the drone (paper App. D.4: MACURA excels under process noise).
 REWARD = {
-    "w_pos":     2.0,    # reward being AT the target (max, via exp(-dist/scale))
-    "pos_scale": 1.0,    # distance scale (m) of the proximity reward
-    "w_level":   0.5,    # reward staying level (body-z world component) -> drives recovery
+    "w_pos":     2.0,    # reward being AT the landing pad (max, via exp(-dist/scale))
+    "pos_scale": 1.5,    # distance scale (m) of the proximity reward
+    "w_level":   0.5,    # reward staying upright (body-z world component)
     "w_spin":    0.01,   # penalize angular velocity
-    "w_vel":     0.05,   # penalize speed (so it STOPS at the target, not overshoot)
+    "w_vel":     0.10,   # penalize speed -> a soft, slow landing (not a fast dive)
     "w_ctrl":    0.01,   # mild control penalty (thrust deviation from hover)
+    "w_obs":     0.6,    # obstacle-avoidance penalty (grows as the drone nears an obstacle)
+    "obs_scale": 0.5,    # distance scale (m) of the obstacle penalty
 }
 ENV = {
     "mjcf_scene":        "",     # "" -> bundled src/envs/assets/drone.xml
     "action_repeat":     2,      # 50 Hz control (timestep 0.01 * 2)
     "max_episode_steps": 250,    # ~5 s episodes
-    "init_height":       1.5,    # spawn height (m) - room to recover before the ground
+    "init_height":       2.0,    # spawn height (m) - descend from here to the pad
     "init_noise":        0.05,   # small random pose + velocity perturbation at reset
-    "init_tilt":         0.9,    # aggressive: random start tilt up to ~0.9 rad (~52 deg)
-    "init_spin":         2.5,    # aggressive: random start angular velocity up to 2.5 rad/s
-    "target_range_xy":   2.0,    # target sampled in x,y in [-2, 2] m
-    "target_z_min":      0.8,
-    "target_z_max":      2.0,
+    "init_tilt":         0.3,    # mild random start tilt (rad) - the wind is the main challenge
+    "init_spin":         0.5,    # mild random start angular velocity (rad/s)
+    "target_range_xy":   1.8,    # pad + obstacles sampled in x,y in [-1.8, 1.8] m
+    "pad_z":             0.2,    # landing-pad height (the drone lands here)
     "thrust_gain":       1.0,    # action*gain about hover: action 0 = hover, +-1 = 0..2x hover
     "max_dist":          8.0,    # flew away this far = crashed
-    "fail_tilt":        -1.0,    # tilt-termination DISABLED: recovery = being tilted then leveling
-    "fail_height":       0.15,   # hit the ground = crashed
+    "fail_tilt":         0.0,    # flipped past horizontal (up_z < 0) = crashed
+
+    # PROCESS NOISE - the MACURA lever (gusts + actuator noise). Only in the REAL dynamics;
+    # the ensemble learns them and its predictive spread IS the uncertainty MACURA acts on.
+    "wind_force":        1.0,    # OU gust force std (N); the drone weighs ~0.45 kg (~4.3 N hover)
+    "wind_correlation":  0.95,   # gust temporal correlation (smooth, sustained gusts)
+    "actuator_noise":    0.08,   # per-rotor multiplicative thrust noise (8% std)
+
+    # OBSTACLES - virtual no-fly cylinders (analytic, so imagined rollouts see the same envelope)
+    "n_obstacles":       2,
+    "obstacle_radius":   0.4,    # crash if the drone's xy enters this radius of an obstacle
+    "obstacle_min_clear": 0.7,   # keep obstacles clear of the start and pad at reset
+
+    # LANDING / crash envelope
+    "land_radius":       0.35,   # within this 3-D distance of the pad (at low speed, upright) = landed
+    "soft_speed":        0.5,    # land softly below this speed
+    "impact_height":     0.06,   # below this height...
+    "hard_speed":        1.0,    # ...moving faster than this = a hard crash
     "reward":            REWARD,
 }
 
