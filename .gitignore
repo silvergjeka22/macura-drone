@@ -39,5 +39,8 @@ checkpoints/
 *.swp
 .idea/
 .vscode/
+
+# downloaded Kaggle results
+out/
 # local Claude tooling (not part of the project)
 .claude/
