@@ -24,14 +24,13 @@ def _env_list(name, default, cast):
     return [cast(x) for x in raw.replace(",", " ").split()]
 
 SEED                = 0
-SEEDS               = _env_list("MACURA_SEEDS", [0], int)   # SINGLE-SEED long spot-check (see below).
-                                         # For the credible multi-seed study set this back to [0,1,2,3,4]
-                                         # (or MACURA_SEEDS="0 1 2 3 4") - a single seed is a look, not proof.
+SEEDS               = _env_list("MACURA_SEEDS", [0, 1, 2, 3, 4], int)   # 5-seed study: enough for IQM +
+                                         # bootstrap CIs, the credible basis for a "MACURA wins" claim
+                                         # (single-seed spot-check: MACURA_SEEDS="0").
 ALGORITHMS          = _env_list("MACURA_ALGOS", ["macura", "mbpo", "m2ac", "sac"],
                                 lambda x: x.strip().lower())
-TOTAL_ENV_STEPS     = 50000              # LONG single-seed run: give each method time to actually learn to LAND
-                                         # (reach the pad), and let MACURA's stability edge separate from MBPO.
-                                         # 4 algos x 1 seed x 50k with UTD 4 ~= 2-3h -> fits one 12h Kaggle commit.
+TOTAL_ENV_STEPS     = 25000              # 4 algos x 5 seeds x 25k with UTD 4 ~= 5-6h -> fits one 12h Kaggle commit,
+                                         # every plot + the IQM/crash-CI comparison in a single run.
 WARMUP_RANDOM_STEPS = 500
 EVAL_EVERY_STEPS    = 1000               # ~20 eval points over the run
 EVAL_EPISODES       = 20                 # 20 FIXED-seed episodes/eval -> per-point crash noise ~sqrt(p(1-p)/20)
