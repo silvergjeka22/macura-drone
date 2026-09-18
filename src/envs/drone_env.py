@@ -76,6 +76,17 @@ def _drone_reward(obs, act, rw, n_obs, obs_radius, obs_scale) -> np.ndarray:
     r_vel = float(rw["w_vel"]) * speed                            # penalize speed -> soft landing
     r_ctrl = float(rw["w_ctrl"]) * np.sum(act ** 2, axis=-1)
 
+    # settle bonus: a reward "well" that peaks inside the landing envelope (close AND slow AND
+    # upright) -> actively drives the drone to REACH & hold the pad. Pure fn of obs, so real == imagined.
+    w_settle = float(rw.get("w_settle", 0.0))
+    if w_settle > 0.0:
+        settle_dist = max(float(rw.get("settle_dist", 0.3)), 1e-6)
+        settle_speed = max(float(rw.get("settle_speed", 0.4)), 1e-6)
+        r_settle = (w_settle * np.exp(-dist / settle_dist)
+                    * np.exp(-speed / settle_speed) * np.clip(up_z, 0.0, 1.0))
+    else:
+        r_settle = 0.0
+
     # obstacle-avoidance: smooth penalty that grows as the drone nears an obstacle surface
     r_obs = 0.0
     if n_obs > 0:
@@ -84,7 +95,7 @@ def _drone_reward(obs, act, rw, n_obs, obs_radius, obs_scale) -> np.ndarray:
         surface = np.maximum(d - float(obs_radius), 0.0)
         r_obs = float(rw["w_obs"]) * np.exp(-surface / max(float(obs_scale), 1e-6)).sum(axis=-1)
 
-    return r_pos + r_level - r_spin - r_vel - r_ctrl - r_obs
+    return r_pos + r_level + r_settle - r_spin - r_vel - r_ctrl - r_obs
 
 
 class DroneTargetEnv(gym.Env):

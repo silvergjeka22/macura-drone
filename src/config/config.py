@@ -24,12 +24,14 @@ def _env_list(name, default, cast):
     return [cast(x) for x in raw.replace(",", " ").split()]
 
 SEED                = 0
-SEEDS               = _env_list("MACURA_SEEDS", [0, 1, 2, 3, 4], int)
+SEEDS               = _env_list("MACURA_SEEDS", [0], int)   # SINGLE-SEED long spot-check (see below).
+                                         # For the credible multi-seed study set this back to [0,1,2,3,4]
+                                         # (or MACURA_SEEDS="0 1 2 3 4") - a single seed is a look, not proof.
 ALGORITHMS          = _env_list("MACURA_ALGOS", ["macura", "mbpo", "m2ac", "sac"],
                                 lambda x: x.strip().lower())
-TOTAL_ENV_STEPS     = 25000              # fair budget sized to finish all 4 algos x 5 seeds in ~9h (fits 12h cap).
-                                         # A bit more convergence than 20k while keeping 5 seeds for credible IQM;
-                                         # enough for the model-based-vs-SAC win + MACURA's stability edge + full UTD.
+TOTAL_ENV_STEPS     = 50000              # LONG single-seed run: give each method time to actually learn to LAND
+                                         # (reach the pad), and let MACURA's stability edge separate from MBPO.
+                                         # 4 algos x 1 seed x 50k with UTD 4 ~= 2-3h -> fits one 12h Kaggle commit.
 WARMUP_RANDOM_STEPS = 500
 EVAL_EVERY_STEPS    = 1000               # ~20 eval points over the run
 EVAL_EPISODES       = 20                 # 20 FIXED-seed episodes/eval -> per-point crash noise ~sqrt(p(1-p)/20)
@@ -55,13 +57,19 @@ RENDER = os.environ.get("MACURA_RENDER", "0") == "1"
 # is MACURA's strongest honest case on the drone (paper App. D.4: MACURA excels under process noise).
 REWARD = {
     "w_pos":     2.0,    # reward being AT the landing pad (max, via exp(-dist/scale))
-    "pos_scale": 1.5,    # distance scale (m) of the proximity reward
+    "pos_scale": 1.0,    # distance scale (m) of the proximity reward (was 1.5 -> steeper pull INTO the pad)
     "w_level":   0.5,    # reward staying upright (body-z world component)
     "w_spin":    0.01,   # penalize angular velocity
-    "w_vel":     0.10,   # penalize speed -> a soft, slow landing (not a fast dive)
+    "w_vel":     0.20,   # penalize speed (was 0.10 -> actually rewards slowing down to land)
     "w_ctrl":    0.01,   # mild control penalty (thrust deviation from hover)
     "w_obs":     0.4,    # obstacle-avoidance penalty (softened so it doesn't destabilize learning)
     "obs_scale": 0.5,    # distance scale (m) of the obstacle penalty
+    # SETTLE bonus: a reward "well" that fires ONLY inside the landing envelope (close AND slow AND
+    # upright) so the policy is actually driven to REACH the pad, not just hover ~1 m away. Pure
+    # function of obs (dist, speed, up_z) -> real == imagined kept, and applied to all 4 algos (fair).
+    "w_settle":     4.0,   # strength of the landing-envelope bonus
+    "settle_dist":  0.30,  # distance scale (m): tight, so it only rewards being ON the pad
+    "settle_speed": 0.40,  # speed scale (m/s): only rewards a slow, controlled arrival
 }
 ENV = {
     "mjcf_scene":        "",     # "" -> bundled src/envs/assets/drone.xml
