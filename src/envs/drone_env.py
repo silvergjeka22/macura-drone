@@ -116,6 +116,7 @@ class DroneTargetEnv(gym.Env):
         self.init_tilt = float(cfg.get("init_tilt", 0.0))
         self.init_spin = float(cfg.get("init_spin", 0.0))
         self.target_range_xy = float(cfg.get("target_range_xy", 1.8))
+        self.pad_min_dist = float(cfg.get("pad_min_dist", 1.4))   # min start->pad distance (room for the gate)
         self.pad_z = float(cfg.get("pad_z", 0.2))                 # landing-pad height
         self.thrust_gain = float(cfg.get("thrust_gain", 1.0))
         self.max_dist = float(cfg.get("max_dist", 8.0))
@@ -126,10 +127,12 @@ class DroneTargetEnv(gym.Env):
         self.wind_corr = float(cfg.get("wind_correlation", 0.95))# gust temporal correlation (0..1)
         self.act_noise = float(cfg.get("actuator_noise", 0.0))   # multiplicative per-rotor thrust noise (frac std)
 
-        # OBSTACLES (virtual no-fly cylinders; analytic, so imagined rollouts see the same) -
+        # OBSTACLES (virtual no-fly columns forming a RING around the pad; analytic) --------
         self.n_obstacles = int(cfg.get("n_obstacles", 2))
         self.obs_radius = float(cfg.get("obstacle_radius", 0.4))
         self.min_clear = float(cfg.get("obstacle_min_clear", 0.7))
+        self.ring_radius = float(cfg.get("ring_radius", 0.75))            # column distance from the pad
+        self.ring_gap_half = np.radians(float(cfg.get("ring_gap_half_deg", 55.0)))  # entry-gap half-angle
 
         # LANDING / crash envelope ---------------------------------------------------------
         self.land_radius = float(cfg.get("land_radius", 0.35))   # within this of the pad = "at the pad"
@@ -188,17 +191,26 @@ class DroneTargetEnv(gym.Env):
         return np.array(base, dtype=np.float32)
 
     def _place_obstacles(self):
-        """Sample obstacle xy, keeping them clear of the start (origin) and the pad."""
-        obs = []
-        for _ in range(self.n_obstacles):
-            for _try in range(20):
-                p = self._rng.uniform(-self.target_range_xy, self.target_range_xy, size=2)
-                clear = (np.linalg.norm(p) > self.min_clear + self.obs_radius and
-                         np.linalg.norm(p - self._target[:2]) > self.min_clear + self.obs_radius and
-                         all(np.linalg.norm(p - q) > 2 * self.obs_radius + 0.2 for q in obs))
-                if clear:
-                    break
-            obs.append(p)
+        """Place the obstacles as a RING of no-fly columns AROUND the pad, leaving ONE entry gap
+        that faces the start. The drone must thread the gap and land in the middle of the ring.
+
+        This concentrates the model uncertainty at the gap and the tight pocket - exactly where a
+        fixed-horizon rollout (MBPO) over-imagines (a path that clips a column) and MACURA's
+        uncertainty-triggered truncation avoids the bad data. The columns are evenly spaced around
+        the arc OUTSIDE the entry gap, so the pad is enclosed on every side except the opening the
+        drone comes in through."""
+        pad = self._target[:2]
+        # the gap faces the start (origin), i.e. the direction from the pad back toward the start
+        gap_dir = -pad
+        gap_theta = float(np.arctan2(gap_dir[1], gap_dir[0]))
+        if self.n_obstacles <= 0:
+            return np.zeros((0, 2))
+        # spread the columns evenly over the arc that EXCLUDES the entry gap
+        arc_lo = gap_theta + self.ring_gap_half
+        arc_hi = gap_theta + 2.0 * np.pi - self.ring_gap_half
+        thetas = (np.linspace(arc_lo, arc_hi, self.n_obstacles)
+                  if self.n_obstacles > 1 else np.array([gap_theta + np.pi]))
+        obs = [pad + self.ring_radius * np.array([np.cos(t), np.sin(t)]) for t in thetas]
         return np.array(obs).reshape(self.n_obstacles, 2)
 
     # ── gym API ────────────────────────────────────────────────────────────────
@@ -226,12 +238,13 @@ class DroneTargetEnv(gym.Env):
             v[3:6] = self._rng.uniform(-self.init_spin, self.init_spin, size=3)
         self.data.qvel[:] = v
 
-        # landing pad on the ground, obstacles between start and pad
-        self._target = np.array([
-            self._rng.uniform(-self.target_range_xy, self.target_range_xy),
-            self._rng.uniform(-self.target_range_xy, self.target_range_xy),
-            self.pad_z,
-        ])
+        # landing pad on the ground, a MIN distance from the start so there is room for the
+        # obstacle gate between them (and so the demo shows a real traversal, not a spawn-on-pad).
+        for _try in range(20):
+            pad_xy = self._rng.uniform(-self.target_range_xy, self.target_range_xy, size=2)
+            if np.linalg.norm(pad_xy) >= self.pad_min_dist:
+                break
+        self._target = np.array([pad_xy[0], pad_xy[1], self.pad_z])
         self._obstacles = self._place_obstacles()
         self._sync_markers()
         mujoco.mj_forward(self.model, self.data)

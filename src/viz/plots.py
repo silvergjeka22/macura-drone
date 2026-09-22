@@ -452,41 +452,74 @@ def plot_steps_to_threshold(runs, threshold=None, frac=0.6, save_path=None):
 
 
 # ── policy video ──────────────────────────────────────────────────────────────
-def record_policy_video(ckpt_path, cfg, save_path, seconds=8, seed=999, label=None, device="cpu"):
-    """Save an mp4 of a trained policy flying, in a way that is safe on a headless GPU box.
-    Step 1: roll the policy out here to record the body pose per frame (SB3, no graphics).
-    Step 2: render those frames in a separate mujoco-only process (graphics never touch the
-    training kernel). Returns save_path, or None if rendering is unavailable (run still ok)."""
+def record_policy_video(ckpt_path, cfg, save_path, seconds=60, seed=999, label=None,
+                        device="cpu", n_candidates=60):
+    """Save a ~`seconds` mp4 of a trained policy's BEST episodes, safe on a headless GPU box.
+
+    Step 1 (here, no graphics): roll the deterministic policy over `n_candidates` full episodes,
+    scoring each. Step 2: rank them (successful LANDINGS first, then no-crash, then higher return,
+    then longer) and stitch the best ones back-to-back until the clip is ~`seconds` long, with a
+    per-episode caption burned in. Step 3: render in a mujoco-only subprocess. Returns save_path
+    or None. Showing the best episodes is honest for a DEMO (it is a highlight reel, clearly the
+    strongest runs) - the scientific claim still comes from the aggregate plots, not the video."""
     import tempfile
     try:
-        qpos, mocap, fps = _policy_trajectory(ckpt_path, cfg["env"], seconds, seed, device)
+        eps = _policy_episodes(ckpt_path, cfg["env"], int(n_candidates), seed, device)
     except Exception as e:
         print("policy rollout failed:", e)
         return None
+    if not eps:
+        return None
+    fps = eps[0]["fps"]
+    # rank best-first: landed > not-crashed > higher return > longer (steadier)
+    eps.sort(key=lambda e: (e["reached"], not e["crashed"], e["ret"], e["len"]), reverse=True)
+    target = int(seconds * fps)
+    qpos, mocap, labels = [], [], []
+    shown = 0
+    n_land = sum(e["reached"] for e in eps)
+    for e in eps:
+        if len(qpos) >= target and shown >= 3:
+            break
+        shown += 1
+        outcome = "LANDED ✓" if e["reached"] else ("crash ✗" if e["crashed"] else "hover")
+        tag = f"{(label + ' | ') if label else ''}clip {shown}: {outcome}  (return {e['ret']:.0f})"
+        for k in range(e["len"]):
+            qpos.append(e["qpos"][k]); mocap.append(e["mocap"][k]); labels.append(tag)
+    print(f"  {label or 'policy'}: {n_land}/{len(eps)} episodes landed; showing best {shown} "
+          f"({len(qpos)} frames ~ {len(qpos)/fps:.0f}s)")
     frames_file = tempfile.mktemp(suffix=".npz")
-    np.savez(frames_file, qpos=qpos, mocap=mocap)
+    np.savez(frames_file, qpos=np.array(qpos), mocap=np.array(mocap),
+             labels=np.array(labels, dtype=object))
     return _render_trajectory_subprocess(frames_file, save_path, int(fps), label or "")
 
 
-def _policy_trajectory(ckpt_path, env_cfg, seconds, seed, device):
-    """Run the trained policy (deterministic) and return (qpos frames, mocap frames, fps).
-    No graphics here, so SB3 and MuJoCo coexist safely."""
+def _policy_episodes(ckpt_path, env_cfg, n_episodes, seed, device):
+    """Run the trained policy (deterministic) for `n_episodes` FULL episodes; return a list of
+    per-episode dicts {qpos, mocap, ret, len, reached, crashed, fps}. No graphics here, so SB3 and
+    MuJoCo coexist safely. Each episode uses a distinct seed for variety."""
     from stable_baselines3 import SAC
     from src.envs import drone_env
     env, _, _ = drone_env.make_env(env_cfg, seed=seed, render=False)
     agent = SAC.load(ckpt_path, device=device)
     fps = int(round(1.0 / (env.model.opt.timestep * env.action_repeat)))
-    obs, _ = env.reset()
-    qpos, mocap = [], []
-    for _ in range(int(seconds * fps)):
-        act = agent.predict(np.asarray(obs, np.float32), deterministic=True)[0]
-        obs, _, term, trunc, _ = env.step(act)
-        qpos.append(np.array(env.data.qpos, np.float64))
-        mocap.append(np.array(env.data.mocap_pos, np.float64))
-        if term or trunc:
-            obs, _ = env.reset()
+    eps = []
+    for i in range(n_episodes):
+        obs, _ = env.reset(seed=seed + i)
+        qpos, mocap = [], []
+        ret = 0.0; reached = False; crashed = False; done = False
+        while not done:
+            act = agent.predict(np.asarray(obs, np.float32), deterministic=True)[0]
+            obs, r, term, trunc, info = env.step(act)
+            ret += float(r)
+            qpos.append(np.array(env.data.qpos, np.float64))
+            mocap.append(np.array(env.data.mocap_pos, np.float64))
+            reached = reached or info.get("reached", False)
+            crashed = crashed or info.get("failure", False)
+            done = term or trunc
+        eps.append({"qpos": np.array(qpos), "mocap": np.array(mocap), "ret": ret,
+                    "len": len(qpos), "reached": reached, "crashed": crashed, "fps": fps})
     env.close()
-    return np.array(qpos), np.array(mocap), fps
+    return eps
 
 
 # child script: renders a saved pose trajectory. Imports ONLY mujoco (never torch/SB3), so
@@ -495,35 +528,41 @@ _RENDER_CHILD = '''
 import os, sys
 os.environ["MUJOCO_GL"] = "%(backend)s"
 import numpy as np, mujoco, imageio
-d = np.load("%(frames)s")
+d = np.load("%(frames)s", allow_pickle=True)
 qpos, mocap = d["qpos"], d["mocap"]
+labels = d["labels"] if "labels" in d.files else None
+fallback = "%(label)s"
 m = mujoco.MjModel.from_xml_path("%(asset)s")
 data = mujoco.MjData(m)
 r = mujoco.Renderer(m, height=480, width=640)
 cam = mujoco.MjvCamera(); cam.type = mujoco.mjtCamera.mjCAMERA_FREE
-cam.distance, cam.elevation, cam.azimuth = 4.5, -20.0, 90.0
-label = "%(label)s"
+cam.distance, cam.elevation, cam.azimuth = 5.2, -22.0, 90.0
+lookat = None
 try:
     from PIL import Image, ImageDraw
 except Exception:
     Image = None
-frames = []
+# stream frames to disk (do NOT hold a ~1-min clip in memory)
+writer = imageio.get_writer("%(out)s", fps=%(fps)d, macro_block_size=16)
 for i in range(len(qpos)):
     data.qpos[:] = qpos[i]
     if mocap.shape[1] > 0:
         data.mocap_pos[:] = mocap[i]
     mujoco.mj_forward(m, data)
-    cam.lookat[:] = data.xpos[1]
+    tgt = data.xpos[1]
+    lookat = tgt.copy() if lookat is None else 0.90 * lookat + 0.10 * tgt   # smooth follow
+    cam.lookat[:] = lookat
     r.update_scene(data, camera=cam)
     img = r.render()
-    if label and Image is not None:
+    txt = str(labels[i]) if labels is not None else fallback
+    if txt and Image is not None:
         im = Image.fromarray(img); dr = ImageDraw.Draw(im)
-        dr.rectangle([0, 0, 12 + 9 * len(label), 22], fill=(0, 0, 0))
-        dr.text((6, 5), label, fill=(255, 255, 255))
+        dr.rectangle([0, 0, 12 + 8 * len(txt), 22], fill=(0, 0, 0))
+        dr.text((6, 5), txt, fill=(255, 255, 255))
         img = np.asarray(im)
     h, w = img.shape[0] // 16 * 16, img.shape[1] // 16 * 16
-    frames.append(img[:h, :w])
-imageio.mimsave("%(out)s", frames, fps=%(fps)d)
+    writer.append_data(np.ascontiguousarray(img[:h, :w]))
+writer.close()
 print("OK")
 '''
 
@@ -556,25 +595,31 @@ def _pad16(frame):
     return frame[:h, :w]
 
 
-def stitch_videos_grid(video_paths: dict, save_path: str, fps=30, cols=2, downscale=2):
-    """Side-by-side reel: tile the given {label: mp4_path} clips into one grid video
-    with each label burned in. Shorter clips hold their last frame."""
+def stitch_videos_grid(video_paths: dict, save_path: str, fps=30, cols=2, downscale=2,
+                       max_frames=3600):
+    """Side-by-side reel: tile the given {label: mp4_path} clips into one grid video with each label
+    burned in. STREAMS frame-by-frame (readers as iterators; shorter clips hold their last frame),
+    so a 4x1-min grid never loads every frame into memory at once."""
     import imageio
-    clips, names = [], []
+    readers, names, iters, last = [], [], [], []
     for name, path in video_paths.items():
         rd = imageio.get_reader(path)
-        frames = [np.asarray(f)[::downscale, ::downscale, :3] for f in rd]
-        rd.close()
-        if frames:
-            clips.append(frames); names.append(name)
-    if not clips:
+        readers.append(rd); names.append(name); iters.append(iter(rd)); last.append(None)
+    if not readers:
         raise ValueError("no readable clips in video_paths")
 
-    h = max(c[0].shape[0] for c in clips)
-    w = max(c[0].shape[1] for c in clips)
-    T = max(len(c) for c in clips)
-    rows = int(np.ceil(len(clips) / cols))
+    def _next(k):
+        try:
+            f = np.asarray(next(iters[k]))[::downscale, ::downscale, :3]
+            last[k] = f
+            return f, True
+        except StopIteration:
+            return last[k], False
 
+    first = [_next(k)[0] for k in range(len(readers))]
+    h = max(f.shape[0] for f in first if f is not None)
+    w = max(f.shape[1] for f in first if f is not None)
+    rows = int(np.ceil(len(readers) / cols))
     try:
         from PIL import Image, ImageDraw
 
@@ -587,21 +632,33 @@ def stitch_videos_grid(video_paths: dict, save_path: str, fps=30, cols=2, downsc
         def _label(img, text):
             return img
 
-    def _tile(clip, t, name):
-        f = clip[min(t, len(clip) - 1)]
+    def _tile(f, name):
         out = np.zeros((h, w, 3), np.uint8)
-        out[: f.shape[0], : f.shape[1]] = f
+        if f is not None:
+            out[: f.shape[0], : f.shape[1]] = f
         return _label(out, name.upper())
 
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    writer = imageio.get_writer(save_path, fps=fps)
+    os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+    writer = imageio.get_writer(save_path, fps=fps, macro_block_size=16)
     blank = np.zeros((h, w, 3), np.uint8)
-    for t in range(T):
-        tiles = [_tile(c, t, n) for c, n in zip(clips, names)]
+    cur = first
+    t = 0
+    while t < max_frames:
+        tiles = [_tile(cur[k], names[k]) for k in range(len(readers))]
         tiles += [blank] * (rows * cols - len(tiles))
         grid = np.vstack([np.hstack(tiles[r * cols:(r + 1) * cols]) for r in range(rows)])
         writer.append_data(_pad16(grid))
+        t += 1
+        nxt, alive = [], False
+        for k in range(len(readers)):
+            f, a = _next(k)
+            nxt.append(f); alive = alive or a
+        cur = nxt
+        if not alive:                      # every clip has ended
+            break
     writer.close()
+    for rd in readers:
+        rd.close()
     return save_path
 
 
@@ -609,3 +666,139 @@ def _maybe_save(fig, save_path):
     if save_path:
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         fig.savefig(save_path, dpi=130, bbox_inches="tight")
+
+
+# ── environment explainers (how the ring task is built) ───────────────────────
+def plot_env_layout(cfg, seeds=(0, 1, 2, 3), save_path=None):
+    """Top-down MAP of the ring task for a few resets: the pad (green) with its landing tolerance,
+    the no-fly columns (red) that RING it leaving one entry gap, and the drone start (blue) outside.
+    Shows the drone must thread the gap and land in the middle."""
+    import matplotlib.patches as mpatches
+    from src.envs import drone_env
+    ec = cfg["env"]
+    env, _, _ = drone_env.make_env(ec, seed=0, render=False)
+    orad = env.obs_radius
+    lr = float(ec.get("land_radius", 0.5))
+    seeds = list(seeds)
+    fig, axes = plt.subplots(1, len(seeds), figsize=(3.7 * len(seeds), 3.9))
+    if len(seeds) == 1:
+        axes = [axes]
+    for ax, sd in zip(axes, seeds):
+        env.reset(seed=sd)
+        pad = env._target[:2]
+        ax.add_patch(mpatches.Circle((0, 0), 0.13, color="#1f77b4", zorder=3))
+        ax.annotate("start", (0, 0), color="#1f77b4", fontsize=8, ha="center", va="top",
+                    xytext=(0, -0.3), textcoords="data")
+        ax.add_patch(mpatches.Circle(pad, lr, color="#2ca02c", alpha=0.20, zorder=1))
+        ax.add_patch(mpatches.Circle(pad, 0.09, color="#2ca02c", zorder=3))
+        ax.annotate("pad", pad, color="#2ca02c", fontsize=8, ha="center",
+                    xytext=(pad[0], pad[1] + 0.28), textcoords="data")
+        for o in env._obstacles:
+            ax.add_patch(mpatches.Circle(o, orad, color="#d62728", alpha=0.55, zorder=2))
+        ax.plot([0, pad[0]], [0, pad[1]], "k--", lw=0.9, alpha=0.5, zorder=0)  # approach
+        ax.set_aspect("equal"); ax.grid(alpha=0.3)
+        ax.set_title(f"reset seed {sd}", fontsize=10)
+        ax.set_xlim(-2.7, 2.7); ax.set_ylim(-2.7, 2.7)
+    env.close()
+    fig.suptitle("Ring task (top-down): the drone threads the gap and lands on the pad inside the ring",
+                 fontsize=12)
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    _maybe_save(fig, save_path)
+    return fig
+
+
+def plot_wind_process(cfg, steps=250, seeds=(0, 1, 2), save_path=None):
+    """The PROCESS NOISE that makes the model uncertain: temporally-correlated (OU) wind gusts.
+    Plots a few gust-force traces so you can see they are smooth/sustained (not white noise), with
+    the +/-1 std band and the drone's hover thrust for scale."""
+    ec = cfg["env"]
+    wf = float(ec.get("wind_force", 0.0))
+    corr = float(ec.get("wind_correlation", 0.95))
+    an = float(ec.get("actuator_noise", 0.0))
+    fig, ax = plt.subplots(figsize=(8.5, 4.2))
+    for sd in seeds:
+        rng = np.random.default_rng(sd)
+        w = 0.0
+        tr = []
+        for _ in range(steps):
+            w = corr * w + np.sqrt(1.0 - corr ** 2) * rng.normal(0.0, wf)
+            tr.append(w)
+        ax.plot(tr, alpha=0.85, lw=1.3, label=f"gust seed {sd}")
+    ax.axhspan(-wf, wf, color="0.6", alpha=0.15, label=f"±1 std ({wf} N)")
+    ax.axhline(0, color="k", lw=0.5)
+    ax.set_title(f"Wind = OU gusts: std {wf} N, correlation {corr}  |  actuator noise {an*100:.0f}%  "
+                 f"(hover thrust ≈ 4.3 N)")
+    ax.set_xlabel("control step"); ax.set_ylabel("gust force, one axis (N)")
+    ax.grid(alpha=0.3); ax.legend(fontsize=8, ncol=2)
+    _maybe_save(fig, save_path)
+    return fig
+
+
+def plot_reward_landscape(cfg, save_path=None):
+    """How the reward SHAPES behaviour: (left) the per-step reward pulling the drone toward the pad;
+    (right) the 'settle well' - reward is high only when the drone is BOTH close AND slow (= a real
+    landing), which is what drives `reach`. Uses the exact env reward, so this is what the agent sees."""
+    from src.envs.drone_env import _drone_reward
+    ec = cfg["env"]; rw = ec["reward"]
+    n_obs = int(ec.get("n_obstacles", 4))
+    orad = float(ec.get("obstacle_radius", 0.3))
+    osc = float(rw.get("obs_scale", 0.5))
+    dim = 14 + 2 * n_obs
+
+    def obs_at(d, s):
+        o = np.zeros(dim)
+        o[0] = d                        # pad-relative x = horizontal distance
+        o[3] = float(ec.get("pad_z", 0.2))
+        o[4] = 1.0                      # qw = 1 (upright)
+        o[8] = s                        # vx = speed
+        o[14:14 + 2 * n_obs] = 5.0      # obstacles far away
+        return o
+
+    D = np.linspace(0, 3, 140)
+    r0 = np.array([_drone_reward(obs_at(d, 0.0), np.zeros(4), rw, n_obs, orad, osc)[0] for d in D])
+    S = np.linspace(0, 2, 90)
+    Z = np.array([[_drone_reward(obs_at(d, s), np.zeros(4), rw, n_obs, orad, osc)[0] for d in D] for s in S])
+
+    fig, ax = plt.subplots(1, 2, figsize=(12.5, 4.6))
+    ax[0].plot(D, r0, color="#1f77b4", lw=2)
+    ax[0].axvline(float(ec.get("land_radius", 0.5)), ls="--", color="#2ca02c", label="land_radius")
+    ax[0].set_xlabel("distance to pad (m)"); ax[0].set_ylabel("per-step reward (upright, speed 0)")
+    ax[0].set_title("Reward pulls the drone toward the pad"); ax[0].legend(); ax[0].grid(alpha=0.3)
+    im = ax[1].pcolormesh(D, S, Z, shading="auto", cmap="viridis")
+    fig.colorbar(im, ax=ax[1], label="per-step reward")
+    ax[1].set_xlabel("distance to pad (m)"); ax[1].set_ylabel("speed (m/s)")
+    ax[1].set_title("The 'settle well': high reward only when CLOSE and SLOW (= land)")
+    fig.tight_layout()
+    _maybe_save(fig, save_path)
+    return fig
+
+
+def plot_env_difficulty(cfg, episodes=40, seed=0, save_path=None):
+    """How hard the RAW env is: outcomes and episode lengths under an untrained RANDOM policy.
+    Most episodes crash/expire and none land - that is the gap the learned policies must close."""
+    from src.envs import drone_env
+    env, _, ad = drone_env.make_env(cfg["env"], seed=seed, render=False)
+    rng = np.random.default_rng(seed)
+    lens = []; outcome = {"reached": 0, "crash": 0, "timeout": 0}
+    for ep in range(episodes):
+        obs, _ = env.reset(seed=2000 + ep)
+        done = False; L = 0; reached = False; crashed = False
+        while not done:
+            a = np.clip(rng.normal(0, 0.5, size=ad), -1, 1).astype(np.float32)
+            obs, _, te, tr, info = env.step(a); L += 1
+            reached = reached or info.get("reached", False)
+            crashed = crashed or info.get("failure", False)
+            done = te or tr
+        lens.append(L)
+        outcome["reached" if reached else ("crash" if crashed else "timeout")] += 1
+    env.close()
+    fig, ax = plt.subplots(1, 2, figsize=(11, 4.2))
+    ax[0].bar(list(outcome), list(outcome.values()),
+              color=["#2ca02c", "#d62728", "#7f7f7f"])
+    ax[0].set_ylabel("episodes"); ax[0].set_title(f"Outcomes under a RANDOM policy ({episodes} eps)")
+    ax[1].hist(lens, bins=18, color="#1f77b4", edgecolor="white")
+    ax[1].set_xlabel("episode length (control steps)"); ax[1].set_ylabel("count")
+    ax[1].set_title("Episode length under a random policy"); ax[1].grid(alpha=0.3, axis="y")
+    fig.tight_layout()
+    _maybe_save(fig, save_path)
+    return fig

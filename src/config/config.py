@@ -29,8 +29,10 @@ SEEDS               = _env_list("MACURA_SEEDS", [0, 1, 2, 3, 4], int)   # 5-seed
                                          # (single-seed spot-check: MACURA_SEEDS="0").
 ALGORITHMS          = _env_list("MACURA_ALGOS", ["macura", "mbpo", "m2ac", "sac"],
                                 lambda x: x.strip().lower())
-TOTAL_ENV_STEPS     = 25000              # 4 algos x 5 seeds x 25k with UTD 4 ~= 5-6h -> fits one 12h Kaggle commit,
-                                         # every plot + the IQM/crash-CI comparison in a single run.
+TOTAL_ENV_STEPS     = 40000              # balanced ring run: 5 seeds x 40k x UTD 4 x 4 algos ~= 9h and each
+                                         # SEED finishes in ~1.5-1.8h (so it survives a Colab-free disconnect and
+                                         # the per-seed resume locks it in). More steps -> better reach; UTD 4 ->
+                                         # faster/robust; the RING (not UTD) is now MACURA's differentiator.
 WARMUP_RANDOM_STEPS = 500
 EVAL_EVERY_STEPS    = 1000               # ~20 eval points over the run
 EVAL_EPISODES       = 20                 # 20 FIXED-seed episodes/eval -> per-point crash noise ~sqrt(p(1-p)/20)
@@ -79,6 +81,8 @@ ENV = {
     "init_tilt":         0.2,    # gentler start tilt (rad) so the policy can converge
     "init_spin":         0.3,    # gentler start angular velocity (rad/s)
     "target_range_xy":   1.8,    # pad + obstacles sampled in x,y in [-1.8, 1.8] m
+    "pad_min_dist":      1.7,    # min start->pad distance: keeps the drone's start OUTSIDE the ring
+                                 # (ring reaches ~1.05 m from the pad) with room to approach the gap
     "pad_z":             0.2,    # landing-pad height (the drone lands here)
     "thrust_gain":       1.0,    # action*gain about hover: action 0 = hover, +-1 = 0..2x hover
     "max_dist":          8.0,    # flew away this far = crashed
@@ -90,10 +94,16 @@ ENV = {
     "wind_correlation":  0.95,   # gust temporal correlation (smooth, sustained gusts) - keeps MACURA's edge
     "actuator_noise":    0.04,   # per-rotor multiplicative thrust noise (4% std)
 
-    # OBSTACLES - virtual no-fly cylinders (analytic, so imagined rollouts see the same envelope)
-    "n_obstacles":       2,
-    "obstacle_radius":   0.4,    # crash if the drone's xy enters this radius of an obstacle
-    "obstacle_min_clear": 0.7,   # keep obstacles clear of the start and pad at reset
+    # OBSTACLES - a RING of virtual no-fly columns AROUND the pad, with ONE entry gap facing the
+    # start: the drone must thread the gap and land in the middle (analytic, so imagined rollouts
+    # see the same envelope). This concentrates model uncertainty at the gap/pocket - exactly where
+    # MBPO's fixed-horizon rollout over-imagines (clipping a column) and MACURA's truncation wins.
+    "n_obstacles":       4,      # columns forming the ring
+    "obstacle_radius":   0.3,    # crash within this xy radius of a column (thinner -> threadable gap)
+    "obstacle_min_clear": 0.5,   # keep columns clear of the start and each other at reset
+    "ring_radius":       0.85,   # columns sit this far from the pad center (pocket radius ~0.55 m)
+    "ring_gap_half_deg": 65.0,   # wider entry gap (~0.94 m opening) so landing is achievable while the
+                                 # far columns still enclose the pad and punish MBPO's over-imagination
 
     # LANDING / crash envelope
     "land_radius":       0.5,    # within this 3-D distance of the pad (at low speed, upright) = landed
@@ -117,10 +127,10 @@ SAC = {
     "gamma": 0.99, "tau": 0.005, "alpha": "auto",
     "actor_lr": 3.0e-4, "critic_lr": 3.0e-4,   # critic_lr ignored (SB3 uses one learning_rate)
     "hidden_size": 256, "batch_size": 256, "target_update_interval": 1,
-    "gradient_steps_max": 4,        # Gmax in Eq. 22 (model-based UTD ceiling). Lowered 8->4: a high UTD
-                                    # overtrains the critic on imagined data and drives the back-half churn
-                                    # you saw; 4 is steadier and still 4x the model-free baseline. Also ~halves
-                                    # model-based wall-clock, paying for the extra eval episodes above.
+    "gradient_steps_max": 4,        # Gmax in Eq. 22 (model-based UTD ceiling), SAME for all model-based (fair).
+                                    # UTD 4 (not 6): faster per-seed -> each seed finishes inside a Colab-free
+                                    # session and the per-seed resume locks it in; the RING is MACURA's
+                                    # differentiator now, so it doesn't need the higher UTD to separate.
     "baseline_gradient_steps": 1,   # model-free SAC baseline UTD (~1 = standard SAC)
     "real_ratio": 0.1,              # within-batch real mixing (Janner/MBPO; MACURA inherits). Raised 0.05->0.1:
                                     # grounds the critic in twice as much REAL data -> less model exploitation.
@@ -138,13 +148,13 @@ ROLLOUT = {
     "freq_steps": 500, "num_rollouts": 200, "model_buffer_capacity": 12000,
     # MACURA: uncertainty-adaptive truncation (Algorithm 2)
     # xi is the ONE per-task knob (paper Table 5: xi in {0.3, 2, 5, 30} across envs; Tmax=10,
-    # zeta=0.95 fixed). xi=1 is the paper's recommended starting point ("reasonable in all
-    # environments", App. D.2). We use it here: xi=5 was too large for this windy drone task and
-    # ENFORCED MODEL EXPLOITATION - MACURA barely truncated, behaved like MBPO@10, and the return
-    # collapsed in the back half (peak ~step 13k then decayed, crash back to ~1.0). The paper's
-    # own diagnosis (Sec 6.2 / App D.2): "instabilities due to model exploitation occur" for too-
-    # large xi. Lower xi -> tighter kappa -> MACURA actually truncates uncertain rollouts -> stable.
-    "macura": {"t_max": 10, "zeta": 0.95, "xi": 1.0, "adaptive_gradient_steps": True},
+    # zeta=0.95 fixed). DIAGNOSIS from the 5-seed run: at xi=1 MACURA's mean rollout length was
+    # ~9/10 (kappa ~15-20) - it barely truncated, so it behaved almost identically to MBPO@10 and
+    # only TIED it. To make MACURA's adaptive truncation actually DO something on this task we lower
+    # xi to 0.4 (paper: Walker also needed xi<1, App. D.2) -> tighter kappa -> rollouts get cut
+    # short in the uncertain regions (near the obstacle gate, under gusts) while staying long where
+    # the model is trustworthy. That is the whole mechanism; without it MACURA == MBPO here.
+    "macura": {"t_max": 10, "zeta": 0.95, "xi": 0.4, "adaptive_gradient_steps": True},
     # MBPO: fixed truncated-linear schedule; ramp scaled to REACH horizon 10 within the run.
     "mbpo": {"rollout_schedule": [1, 10, 500, 3000],
              "adaptive_gradient_steps": False, "fixed_gradient_steps": 4},  # matches SAC gradient_steps_max
