@@ -123,9 +123,32 @@ class DroneTargetEnv(gym.Env):
         self.fail_tilt = float(cfg.get("fail_tilt", 0.0))        # up_z below this = flipped = crash
 
         # PROCESS NOISE (the MACURA lever) -------------------------------------------------
-        self.wind_force = float(cfg.get("wind_force", 0.0))      # OU stationary std of the gust force (N)
+        # Everything here lives ONLY in the real dynamics; reward + termination stay analytic in
+        # (obs, agent action), so real == imagined scoring is unchanged.
+        self.wind_force = float(cfg.get("wind_force", 0.0))      # CALM-transit OU gust std (N)
         self.wind_corr = float(cfg.get("wind_correlation", 0.95))# gust temporal correlation (0..1)
         self.act_noise = float(cfg.get("actuator_noise", 0.0))   # multiplicative per-rotor thrust noise (frac std)
+        # LANDING-ZONE turbulence: extra choppy gusts that switch on near the pad, so the model is
+        # reliable in transit but NOT where the landing is decided (uneven model trust).
+        self.turb_force = float(cfg.get("turb_force", 0.0))      # zone gust std (N)
+        self.turb_corr = float(cfg.get("turb_correlation", 0.8)) # choppier than the calm wind
+        self.turb_radius = float(cfg.get("turb_radius", 1.3))    # horizontal distance to pad (m)
+        self.turb_ramp = float(cfg.get("turb_ramp", 0.15))       # soft edge width of the zone (m)
+        # hidden ADDITIVE action noise (paper App. D.4 method), weaker in transit, stronger in the zone
+        self.action_noise = float(cfg.get("action_noise", 0.0))
+        self.action_noise_zone = float(cfg.get("action_noise_zone", self.action_noise))
+        # GROUND EFFECT: extra lift close to the ground (nonlinear, only felt while landing)
+        self.ge_gain = float(cfg.get("ge_gain", 0.0))            # +gain*exp(-h/scale) thrust factor
+        self.ge_scale = float(cfg.get("ge_scale", 0.25))         # decay height (m)
+        # COLUMN WAKE + PAD DOWNWASH: a DETERMINISTIC, spatially complex air flow around the ring.
+        # Unlike random turbulence (which the ensemble learns as noise and then AGREES about), a
+        # complex deterministic field in a rarely-visited region is something the members fit
+        # DIFFERENTLY -> real epistemic disagreement exactly where the drone must land.
+        self.wake_gamma = float(cfg.get("wake_gamma", 0.0))      # swirl strength around each column (m^2/s)
+        self.wake_core = float(cfg.get("wake_core", 0.35))       # vortex core radius (m)
+        self.wake_decay = float(cfg.get("wake_decay", 0.8))      # swirl fades beyond ~this distance (m)
+        self.pad_downwash = float(cfg.get("pad_downwash", 0.0))  # vertical air-speed pattern over the pad (m/s)
+        self.air_drag = float(cfg.get("air_drag", 0.8))          # force per unit air speed (N per m/s)
 
         # OBSTACLES (virtual no-fly columns forming a RING around the pad; analytic) --------
         self.n_obstacles = int(cfg.get("n_obstacles", 2))
@@ -176,6 +199,7 @@ class DroneTargetEnv(gym.Env):
         self._target = np.zeros(3)
         self._obstacles = np.zeros((self.n_obstacles, 2))
         self._wind = np.zeros(3)
+        self._turb = np.zeros(3)
 
     # ── observation ────────────────────────────────────────────────────────────
     def _get_obs(self) -> np.ndarray:
@@ -220,6 +244,7 @@ class DroneTargetEnv(gym.Env):
         mujoco.mj_resetData(self.model, self.data)
         self._step_count = 0
         self._wind = np.zeros(3)
+        self._turb = np.zeros(3)
 
         n = self.model.nq
         q = np.zeros(n)
@@ -259,18 +284,58 @@ class DroneTargetEnv(gym.Env):
             if key in self._mocap:
                 self.data.mocap_pos[self._mocap[key]] = [self._obstacles[i, 0], self._obstacles[i, 1], 1.5]
 
+    def air_velocity(self, pos) -> np.ndarray:
+        """Deterministic local air flow (m/s): alternating swirls around each column (the wake of
+        flow past the pillars) + a downdraft/updraft ring pattern over the pad. Zero in transit."""
+        v = np.zeros(3)
+        if self.wake_gamma > 0.0:
+            for i, c in enumerate(self._obstacles):
+                d = np.asarray(pos[:2]) - c
+                r = float(np.linalg.norm(d)) + 1e-6
+                tangent = np.array([-d[1], d[0]]) / r
+                speed = (self.wake_gamma * r / (r * r + self.wake_core ** 2)
+                         * np.exp(-(r / self.wake_decay) ** 2))
+                v[:2] += (1.0 if i % 2 == 0 else -1.0) * speed * tangent
+        if self.pad_downwash > 0.0:
+            rp = float(np.linalg.norm(np.asarray(pos[:2]) - self._target[:2]))
+            v[2] -= self.pad_downwash * np.cos(np.pi * rp / 0.6) * np.exp(-(rp / 0.9) ** 2)
+        return v
+
+    def zone_weight(self, pos_xy) -> float:
+        """0 in calm transit, 1 inside the landing-zone turbulence (soft edge at turb_radius)."""
+        d = float(np.linalg.norm(self._target[:2] - np.asarray(pos_xy)[:2]))
+        return float(1.0 / (1.0 + np.exp((d - self.turb_radius) / max(self.turb_ramp, 1e-6))))
+
     def step(self, action: np.ndarray):
-        action = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)
-        thrust = self._hover * (1.0 + action * self.thrust_gain)
+        action = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)   # the AGENT's action
+        pos = np.array(self.data.qpos[0:3])
+        s = self.zone_weight(pos[:2])                         # how deep in the landing zone
+
+        # hidden additive action noise (unobserved -> process noise; paper App. D.4)
+        applied = action
+        sigma = self.action_noise + s * (self.action_noise_zone - self.action_noise)
+        if sigma > 0.0:
+            applied = np.clip(action + self._rng.normal(0.0, sigma, size=self.n_act), -1.0, 1.0)
+        thrust = self._hover * (1.0 + applied * self.thrust_gain)
         if self.act_noise > 0.0:                              # per-rotor actuator (process) noise
             thrust = thrust * (1.0 + self._rng.normal(0.0, self.act_noise, size=self.n_act))
+        if self.ge_gain > 0.0:                                # ground effect: extra lift near the floor
+            thrust = thrust * (1.0 + self.ge_gain * np.exp(-max(pos[2], 0.0) / max(self.ge_scale, 1e-6)))
         self.data.ctrl[:] = np.clip(thrust, 0.0, self._ctrl_hi)
 
-        if self.wind_force > 0.0:                             # temporally-correlated gust force (OU)
+        # wind = calm OU gusts everywhere + choppy OU turbulence weighted by the landing zone
+        if self.wind_force > 0.0:
             self._wind = (self.wind_corr * self._wind +
                           np.sqrt(1.0 - self.wind_corr ** 2) *
                           self._rng.normal(0.0, self.wind_force, size=3))
-            self.data.xfrc_applied[self._core_id, 0:3] = self._wind
+        if self.turb_force > 0.0:
+            self._turb = (self.turb_corr * self._turb +
+                          np.sqrt(1.0 - self.turb_corr ** 2) *
+                          self._rng.normal(0.0, self.turb_force, size=3))
+        force = self._wind + s * self._turb
+        if self.wake_gamma > 0.0 or self.pad_downwash > 0.0:   # deterministic column wake + pad downwash
+            force = force + self.air_drag * self.air_velocity(pos)
+        self.data.xfrc_applied[self._core_id, 0:3] = force
 
         for _ in range(self.action_repeat):
             mujoco.mj_step(self.model, self.data)

@@ -246,6 +246,45 @@ def plot_uncertainty(macura_runs, save_path=None):
     return fig
 
 
+def plot_trust_by_zone(macura_runs, save_path=None):
+    """Where does MACURA stop trusting its model? Left: mean model uncertainty (GJS) of imagined states
+    near the pad (inside `turb_radius`, i.e. the ring + gap) vs in transit. Right: fraction of imagined
+    steps MACURA kept (trusted) in each region. Lower trust near the pad = MACURA is cutting exactly the
+    imagined landings a fixed-horizon method (MBPO) would still train on."""
+    run_list = macura_runs if isinstance(macura_runs, list) else [macura_runs]
+
+    def _nan_series(key):
+        series = [np.asarray(r[key], dtype=float) for r in run_list if r.get(key)]
+        if not series:
+            return None, None
+        n = min(len(s) for s in series)
+        steps = series[0][:n, 0]
+        vals = np.stack([s[:n, 1] for s in series])
+        import warnings
+        with warnings.catch_warnings():            # rounds with no near-pad states are NaN
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            return steps, np.nanmean(vals, axis=0)
+
+    fig, ax = plt.subplots(1, 2, figsize=(13, 4.6))
+    panels = ((ax[0], ("unc_near", "unc_far"), "model uncertainty (GJS)",
+               "How unsure the model is"),
+              (ax[1], ("trust_near", "trust_far"), "fraction of imagined steps trusted",
+               "Where MACURA trusts its model"))
+    for a, (kn, kf), ylab, title in panels:
+        for key, color, lab in ((kn, "#d62728", "near the pad (ring + gap)"),
+                                (kf, "#1f77b4", "transit")):
+            steps, m = _nan_series(key)
+            if steps is not None:
+                a.plot(steps, m, color=color, lw=2, label=lab)
+        a.set_xlabel("real environment steps"); a.set_ylabel(ylab); a.set_title(title)
+        a.grid(alpha=0.3); a.legend()
+    ax[1].set_ylim(-0.02, 1.02)
+    fig.suptitle("MACURA: uncertainty and trust, near the pad vs in transit", fontsize=13)
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    _maybe_save(fig, save_path)
+    return fig
+
+
 def plot_rollout_distribution(macura_run, save_path=None):
     """Histogram of MACURA's per-rollout truncation lengths in the latest rollout round:
     a fixed-horizon method would be a single spike at t_max; MACURA spreads across lengths
@@ -331,7 +370,7 @@ def plot_overview(runs, save_path=None):
     ax.set_xlabel("real environment steps"); ax.set_ylabel("imagined rollout length")
     ax.set_title("How far each method trusts the model"); ax.grid(alpha=0.3); ax.legend(fontsize=8)
 
-    fig.suptitle("MACURA vs MBPO vs M2AC vs SAC -- drone recover-and-reach", fontsize=14)
+    fig.suptitle("MACURA vs MBPO vs M2AC vs SAC -- drone ring landing", fontsize=14)
     fig.tight_layout(rect=(0, 0, 1, 0.98))
     _maybe_save(fig, save_path)
     return fig
@@ -689,6 +728,12 @@ def plot_env_layout(cfg, seeds=(0, 1, 2, 3), save_path=None):
         ax.add_patch(mpatches.Circle((0, 0), 0.13, color="#1f77b4", zorder=3))
         ax.annotate("start", (0, 0), color="#1f77b4", fontsize=8, ha="center", va="top",
                     xytext=(0, -0.3), textcoords="data")
+        tr = float(ec.get("turb_radius", 0.0))
+        zone_on = any(float(ec.get(k, 0.0)) > 0.0
+                      for k in ("turb_force", "wake_gamma", "pad_downwash", "ge_gain"))
+        if zone_on and tr > 0.0:                                 # the hard-to-predict landing zone
+            ax.add_patch(mpatches.Circle(pad, tr, color="#ff7f0e", alpha=0.13, zorder=0))
+            ax.add_patch(mpatches.Circle(pad, tr, fill=False, ls=":", color="#ff7f0e", lw=1.2, zorder=0))
         ax.add_patch(mpatches.Circle(pad, lr, color="#2ca02c", alpha=0.20, zorder=1))
         ax.add_patch(mpatches.Circle(pad, 0.09, color="#2ca02c", zorder=3))
         ax.annotate("pad", pad, color="#2ca02c", fontsize=8, ha="center",
@@ -700,36 +745,123 @@ def plot_env_layout(cfg, seeds=(0, 1, 2, 3), save_path=None):
         ax.set_title(f"reset seed {sd}", fontsize=10)
         ax.set_xlim(-2.7, 2.7); ax.set_ylim(-2.7, 2.7)
     env.close()
-    fig.suptitle("Ring task (top-down): the drone threads the gap and lands on the pad inside the ring",
-                 fontsize=12)
+    fig.suptitle("Ring task (top-down): calm transit, then thread the gap into the hard-to-predict "
+                 "landing zone (orange) and land on the pad", fontsize=12)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
     _maybe_save(fig, save_path)
     return fig
 
 
-def plot_wind_process(cfg, steps=250, seeds=(0, 1, 2), save_path=None):
-    """The PROCESS NOISE that makes the model uncertain: temporally-correlated (OU) wind gusts.
-    Plots a few gust-force traces so you can see they are smooth/sustained (not white noise), with
-    the +/-1 std band and the drone's hover thrust for scale."""
+def plot_wind_process(cfg, steps=250, seed=0, save_path=None):
+    """The process noise the learned model has to cope with (it lives only in the real physics).
+    Uniform config (landing-zone physics off): OU gust traces + gust strength vs hover thrust.
+    Landing-zone config: gusts / wake flow map, disturbance vs distance to the pad, ground effect."""
     ec = cfg["env"]
-    wf = float(ec.get("wind_force", 0.0))
-    corr = float(ec.get("wind_correlation", 0.95))
-    an = float(ec.get("actuator_noise", 0.0))
-    fig, ax = plt.subplots(figsize=(8.5, 4.2))
-    for sd in seeds:
-        rng = np.random.default_rng(sd)
-        w = 0.0
-        tr = []
+    wf = float(ec.get("wind_force", 0.0)); wc = float(ec.get("wind_correlation", 0.95))
+    tf = float(ec.get("turb_force", 0.0)); tc = float(ec.get("turb_correlation", 0.8))
+    tr = float(ec.get("turb_radius", 1.3)); ramp = float(ec.get("turb_ramp", 0.15))
+    an0 = float(ec.get("action_noise", 0.0)); an1 = float(ec.get("action_noise_zone", an0))
+    geg = float(ec.get("ge_gain", 0.0)); ges = float(ec.get("ge_scale", 0.25))
+
+    wake = float(ec.get("wake_gamma", 0.0)) > 0.0 or float(ec.get("pad_downwash", 0.0)) > 0.0
+    drag = float(ec.get("air_drag", 0.8))
+    act = float(ec.get("actuator_noise", 0.0))
+
+    if not (tf > 0 or wake or max(an0, an1) > 0 or geg > 0):
+        # UNIFORM process noise (the landing-zone physics is off): OU gusts + actuator noise everywhere
+        hover = 4.3
+        fig, ax = plt.subplots(1, 2, figsize=(13, 4.4))
+        for sd in (seed, seed + 1, seed + 2):
+            rng = np.random.default_rng(sd); w = 0.0; trace = []
+            for _ in range(steps):
+                w = wc * w + np.sqrt(1 - wc ** 2) * rng.normal(0, wf); trace.append(w)
+            ax[0].plot(trace, lw=1.3, alpha=0.85, label=f"gust sample {sd}")
+        ax[0].axhspan(-wf, wf, color="0.6", alpha=0.15, label=f"±1 std ({wf} N)")
+        ax[0].axhline(0, color="k", lw=0.5)
+        ax[0].set_xlabel("control step"); ax[0].set_ylabel("gust force, one axis (N)")
+        ax[0].set_title(f"Wind: smooth OU gusts (correlation {wc})"); ax[0].legend(fontsize=8)
+        ax[0].grid(alpha=0.3)
+        rng = np.random.default_rng(seed); w = np.zeros(3); mags = []
+        for _ in range(20000):
+            w = wc * w + np.sqrt(1 - wc ** 2) * rng.normal(0, wf, 3); mags.append(np.linalg.norm(w))
+        ax[1].hist(100 * np.array(mags) / hover, bins=40, color="#1f77b4", edgecolor="white")
+        ax[1].set_xlabel("gust force as % of hover thrust"); ax[1].set_ylabel("count")
+        ax[1].set_title(f"Gust strength (+ {act*100:.0f}% random thrust noise per rotor)")
+        ax[1].grid(alpha=0.3, axis="y")
+        fig.suptitle("Process noise: wind gusts + actuator noise, the same everywhere "
+                     "(hover thrust ≈ 4.3 N)", fontsize=12)
+        fig.tight_layout(rect=(0, 0, 1, 0.93))
+        _maybe_save(fig, save_path)
+        return fig
+
+    fig, ax = plt.subplots(1, 3, figsize=(16, 4.6))
+    if wake:
+        # top-down map of the deterministic air flow around the ring (column wake + pad downwash)
+        import matplotlib.patches as mpatches
+        from src.envs import drone_env
+        env, _, _ = drone_env.make_env(ec, seed=0, render=False)
+        env.reset(seed=seed)
+        pad = env._target[:2]
+        g = np.linspace(-1.6, 1.6, 23)
+        X, Y = np.meshgrid(pad[0] + g, pad[1] + g)
+        U = np.zeros_like(X); Vv = np.zeros_like(X); W = np.zeros_like(X)
+        for i in range(X.shape[0]):
+            for j in range(X.shape[1]):
+                v = env.air_velocity(np.array([X[i, j], Y[i, j], 0.5]))
+                U[i, j], Vv[i, j], W[i, j] = v
+        sp = np.hypot(U, Vv)
+        q = ax[0].quiver(X, Y, U, Vv, sp, cmap="plasma", scale=25, width=0.004)
+        fig.colorbar(q, ax=ax[0], label="horizontal air speed (m/s)")
+        for o in env._obstacles:
+            ax[0].add_patch(mpatches.Circle(o, env.obs_radius, color="#d62728", alpha=0.6))
+        ax[0].add_patch(mpatches.Circle(pad, 0.09, color="#2ca02c"))
+        ax[0].set_aspect("equal")
+        ax[0].set_title("Air flow around the ring (deterministic wake)")
+        ax[0].set_xlabel("x (m)"); ax[0].set_ylabel("y (m)")
+        # radial profile: mean horizontal air speed and |downwash| at each distance from the pad
+        d = np.linspace(0, 3.0, 120)
+        ang = np.linspace(0, 2 * np.pi, 48, endpoint=False)
+        hs, vs = [], []
+        for r in d:
+            vv = [env.air_velocity(np.array([pad[0] + r * np.cos(a), pad[1] + r * np.sin(a), 0.5]))
+                  for a in ang]
+            hs.append(np.mean([np.hypot(v[0], v[1]) for v in vv])); vs.append(np.mean([abs(v[2]) for v in vv]))
+        env.close()
+        ax[1].plot(d, drag * np.array(hs), color="#ff7f0e", lw=2, label="wake force, mean (N)")
+        ax[1].plot(d, drag * np.array(vs), color="#8c564b", lw=2, label="downwash force, mean (N)")
+    else:
+        rng = np.random.default_rng(seed)
+        w = t = 0.0; calm, zone = [], []
         for _ in range(steps):
-            w = corr * w + np.sqrt(1.0 - corr ** 2) * rng.normal(0.0, wf)
-            tr.append(w)
-        ax.plot(tr, alpha=0.85, lw=1.3, label=f"gust seed {sd}")
-    ax.axhspan(-wf, wf, color="0.6", alpha=0.15, label=f"±1 std ({wf} N)")
-    ax.axhline(0, color="k", lw=0.5)
-    ax.set_title(f"Wind = OU gusts: std {wf} N, correlation {corr}  |  actuator noise {an*100:.0f}%  "
-                 f"(hover thrust ≈ 4.3 N)")
-    ax.set_xlabel("control step"); ax.set_ylabel("gust force, one axis (N)")
-    ax.grid(alpha=0.3); ax.legend(fontsize=8, ncol=2)
+            w = wc * w + np.sqrt(1 - wc ** 2) * rng.normal(0, wf)
+            t = tc * t + np.sqrt(1 - tc ** 2) * rng.normal(0, tf) if tf > 0 else 0.0
+            calm.append(w); zone.append(w + t)
+        ax[0].plot(zone, color="#ff7f0e", lw=1.2, label=f"landing zone (+turbulence {tf} N)")
+        ax[0].plot(calm, color="#1f77b4", lw=1.6, label=f"calm transit ({wf} N)")
+        ax[0].axhline(0, color="k", lw=0.5)
+        ax[0].set_xlabel("control step"); ax[0].set_ylabel("gust force, one axis (N)")
+        ax[0].set_title("Gusts: calm in transit, choppy near the pad"); ax[0].legend(fontsize=8)
+        ax[0].grid(alpha=0.3)
+        d = np.linspace(0, 3.0, 200)
+
+    s = 1.0 / (1.0 + np.exp((d - tr) / max(ramp, 1e-6)))
+    ax[1].plot(d, np.sqrt(wf ** 2 + (s * tf) ** 2), color="#1f77b4", lw=2, label="random gust std (N)")
+    if max(an0, an1) > 0:
+        ax[1].plot(d, an0 + s * (an1 - an0), color="#9467bd", lw=2, label="hidden action noise σ")
+    ax[1].axvline(tr, ls=":", color="k", lw=1, label=f"landing-zone edge ({tr} m)")
+    ax[1].set_xlabel("horizontal distance to pad (m)"); ax[1].set_ylabel("disturbance strength")
+    ax[1].set_title("Disturbance vs distance to the pad"); ax[1].legend(fontsize=8); ax[1].grid(alpha=0.3)
+
+    h = np.linspace(0, 2.0, 200)
+    ax[2].plot(h, 100 * geg * np.exp(-h / max(ges, 1e-6)), color="#2ca02c", lw=2)
+    ax[2].axvline(float(ec.get("pad_z", 0.2)), ls=":", color="k", lw=1, label="landing height")
+    ax[2].set_xlabel("height above ground (m)"); ax[2].set_ylabel("extra lift (%)")
+    ax[2].set_title("Ground effect: extra lift only near the ground"); ax[2].legend(fontsize=8)
+    ax[2].grid(alpha=0.3)
+
+    fig.suptitle("Process noise: the model is reliable in calm transit, unreliable in the landing zone "
+                 "(hover thrust ≈ 4.3 N)", fontsize=12)
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
     _maybe_save(fig, save_path)
     return fig
 

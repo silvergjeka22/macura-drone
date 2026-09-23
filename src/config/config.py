@@ -24,15 +24,14 @@ def _env_list(name, default, cast):
     return [cast(x) for x in raw.replace(",", " ").split()]
 
 SEED                = 0
-SEEDS               = _env_list("MACURA_SEEDS", [0, 1, 2, 3, 4], int)   # 5-seed study: enough for IQM +
-                                         # bootstrap CIs, the credible basis for a "MACURA wins" claim
-                                         # (single-seed spot-check: MACURA_SEEDS="0").
+SEEDS               = _env_list("MACURA_SEEDS", [0], int)   # PILOT: 1 seed to check the mechanism fast.
+                                         # A single seed is a look, not proof - for the full study set this to
+                                         # [0,1,2,3,4] (or MACURA_SEEDS="0 1 2 3 4") and read the IQM/crash CIs.
 ALGORITHMS          = _env_list("MACURA_ALGOS", ["macura", "mbpo", "m2ac", "sac"],
                                 lambda x: x.strip().lower())
-TOTAL_ENV_STEPS     = 40000              # balanced ring run: 5 seeds x 40k x UTD 4 x 4 algos ~= 9h and each
-                                         # SEED finishes in ~1.5-1.8h (so it survives a Colab-free disconnect and
-                                         # the per-seed resume locks it in). More steps -> better reach; UTD 4 ->
-                                         # faster/robust; the RING (not UTD) is now MACURA's differentiator.
+TOTAL_ENV_STEPS     = 40000              # PILOT = the 40k ring baseline run with ONE change: UTD 4 -> 8.
+                                         # 1 seed x 4 algos ~= 2.5-3h (one Kaggle commit). Full study later:
+                                         # 5 seeds ~= 13-15h (two commits, per-seed resume).
 WARMUP_RANDOM_STEPS = 500
 EVAL_EVERY_STEPS    = 1000               # ~20 eval points over the run
 EVAL_EPISODES       = 20                 # 20 FIXED-seed episodes/eval -> per-point crash noise ~sqrt(p(1-p)/20)
@@ -88,11 +87,26 @@ ENV = {
     "max_dist":          8.0,    # flew away this far = crashed
     "fail_tilt":         0.0,    # flipped past horizontal (up_z < 0) = crashed
 
-    # PROCESS NOISE - the MACURA lever (gusts + actuator noise). Only in the REAL dynamics;
-    # the ensemble learns them and its predictive spread IS the uncertainty MACURA acts on.
-    "wind_force":        0.4,    # OU gust force std (N) ~9% of hover: real turbulence but recoverable
-    "wind_correlation":  0.95,   # gust temporal correlation (smooth, sustained gusts) - keeps MACURA's edge
+    # PROCESS NOISE - only in the REAL dynamics (reward/termination stay analytic).
+    "wind_force":        0.4,    # OU gust std (N), ~9% of hover - same as the 40k ring baseline run
+    "wind_correlation":  0.95,   # smooth, sustained gusts
     "actuator_noise":    0.04,   # per-rotor multiplicative thrust noise (4% std)
+
+    # LANDING-ZONE PHYSICS - implemented in drone_env but OFF (all 0). Offline ensemble tests
+    # (2026-09-23) showed each of them makes the 7-member ensemble AGREE MORE near the pad, not less:
+    # GJS near/transit = turbulence 0.43x, ground effect 0.87x, deterministic wake 0.47-0.59x (vs 1.04x
+    # without them) - the members widen their predicted variance where they can't fit, so MACURA would
+    # trust the landing zone MORE. Kept as options for future tests, not used.
+    "turb_force":        0.0,    # landing-zone turbulence std (N)
+    "turb_correlation":  0.8,
+    "turb_radius":       1.3,    # also the "landing zone" radius for MACURA's near-vs-transit diagnostic
+    "turb_ramp":         0.15,
+    "action_noise":      0.0,    # hidden additive action noise (paper App. D.4 method)
+    "action_noise_zone": 0.0,
+    "ge_gain":           0.0,    # ground effect
+    "ge_scale":          0.25,
+    "wake_gamma":        0.0,    # deterministic column wake (m^2/s)
+    "pad_downwash":      0.0,    # deterministic pad downwash (m/s)
 
     # OBSTACLES - a RING of virtual no-fly columns AROUND the pad, with ONE entry gap facing the
     # start: the drone must thread the gap and land in the middle (analytic, so imagined rollouts
@@ -115,7 +129,9 @@ ENV = {
 
 # ENSEMBLE (probabilistic dynamics model, shared by all model-based algos)
 ENSEMBLE = {
-    "num_members": 5, "hidden_size": 200, "num_layers": 4, "activation": "silu",
+    "num_members": 5, "hidden_size": 200, "num_layers": 4, "activation": "silu",   # = baseline run (paper
+                                                                                   # uses 7; kept at 5 so the
+                                                                                   # pilot changes ONE thing)
     "learning_rate": 1.0e-3, "weight_decay": 1.0e-5, "batch_size": 256,
     "train_epochs_per_round": 8,
     "logvar_bounds": [-10.0, 0.5],   # bound logvars -> stable uGJS (Eq. 15-19)
@@ -127,10 +143,12 @@ SAC = {
     "gamma": 0.99, "tau": 0.005, "alpha": "auto",
     "actor_lr": 3.0e-4, "critic_lr": 3.0e-4,   # critic_lr ignored (SB3 uses one learning_rate)
     "hidden_size": 256, "batch_size": 256, "target_update_interval": 1,
-    "gradient_steps_max": 4,        # Gmax in Eq. 22 (model-based UTD ceiling), SAME for all model-based (fair).
-                                    # UTD 4 (not 6): faster per-seed -> each seed finishes inside a Colab-free
-                                    # session and the per-seed resume locks it in; the RING is MACURA's
-                                    # differentiator now, so it doesn't need the higher UTD to separate.
+    "gradient_steps_max": 8,        # Gmax in Eq. 22 (model-based UTD ceiling), SAME for all model-based (fair).
+                                    # Raised 4->8: training HARD on imagined data is exactly where a fixed-
+                                    # horizon method (MBPO) memorizes its model's mistakes and destabilizes,
+                                    # while MACURA's truncated data stays clean (paper runs MBPO at G=10-30).
+                                    # MACURA's adaptive UTD (Eq. 22) gives it slightly FEWER updates (~88%),
+                                    # so this is conservative toward MACURA. SAC stays at 1.
     "baseline_gradient_steps": 1,   # model-free SAC baseline UTD (~1 = standard SAC)
     "real_ratio": 0.1,              # within-batch real mixing (Janner/MBPO; MACURA inherits). Raised 0.05->0.1:
                                     # grounds the critic in twice as much REAL data -> less model exploitation.
@@ -148,20 +166,18 @@ ROLLOUT = {
     "freq_steps": 500, "num_rollouts": 200, "model_buffer_capacity": 12000,
     # MACURA: uncertainty-adaptive truncation (Algorithm 2)
     # xi is the ONE per-task knob (paper Table 5: xi in {0.3, 2, 5, 30} across envs; Tmax=10,
-    # zeta=0.95 fixed). DIAGNOSIS from the 5-seed run: at xi=1 MACURA's mean rollout length was
-    # ~9/10 (kappa ~15-20) - it barely truncated, so it behaved almost identically to MBPO@10 and
-    # only TIED it. To make MACURA's adaptive truncation actually DO something on this task we lower
-    # xi to 0.4 (paper: Walker also needed xi<1, App. D.2) -> tighter kappa -> rollouts get cut
-    # short in the uncertain regions (near the obstacle gate, under gusts) while staying long where
-    # the model is trustworthy. That is the whole mechanism; without it MACURA == MBPO here.
+    # zeta=0.95 fixed; App. D.2 recipe: start at 1, lower only if learning is unstable).
+    # History on this task: xi=1 barely truncated (rollouts ~9/10 -> MACURA == MBPO); xi=0.4 truncated
+    # (~8/10 late) but was timid early. Kept at 0.4 = the 40k baseline run, so the UTD pilot changes
+    # ONE thing; under harder training the extra truncation is exactly the protection being tested.
     "macura": {"t_max": 10, "zeta": 0.95, "xi": 0.4, "adaptive_gradient_steps": True},
     # MBPO: fixed truncated-linear schedule; ramp scaled to REACH horizon 10 within the run.
     "mbpo": {"rollout_schedule": [1, 10, 500, 3000],
-             "adaptive_gradient_steps": False, "fixed_gradient_steps": 4},  # matches SAC gradient_steps_max
+             "adaptive_gradient_steps": False, "fixed_gradient_steps": 8},  # matches SAC gradient_steps_max
     # M2AC: fixed length + mask least-trustworthy transitions. "ovr" = M2AC's own one-vs-rest
     # disagreement (paper-faithful); "gjs" = reuse MACURA's GJS (same-signal ablation).
     "m2ac": {"t_max": 10, "mask_fraction": 0.5, "uncertainty_penalty": 1.0,
-             "uncertainty": "ovr", "fixed_gradient_steps": 4},  # matches SAC gradient_steps_max
+             "uncertainty": "ovr", "fixed_gradient_steps": 8},  # matches SAC gradient_steps_max
     "sac": {},
 }
 

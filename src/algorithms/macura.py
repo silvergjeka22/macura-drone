@@ -112,6 +112,10 @@ def macura_rollout(dynamics_model, agent, start_obs: np.ndarray,
     transitions = []
     kappa = kappa_state.get("kappa", np.inf)
     base_u = 0.0  # ζ-quantile of first-step uncertainties (logged for plots 5.5)
+    # diagnostics only (no effect on the algorithm): uncertainty + trust NEAR the pad vs in TRANSIT,
+    # to check that MACURA trusts the model in calm transit and truncates in the landing zone.
+    zone_r = float(cfg.get("env", {}).get("turb_radius", 1.3))
+    zs = {"u_near": 0.0, "n_near": 0, "t_near": 0, "u_far": 0.0, "n_far": 0, "t_far": 0}
 
     from src.algorithms.sac import select_actions
 
@@ -135,6 +139,12 @@ def macura_rollout(dynamics_model, agent, start_obs: np.ndarray,
         # keep transitions only where (still alive) AND (uncertainty < kappa)
         trust = u < kappa
         keep = alive & trust
+
+        near = np.linalg.norm(obs[:, 0:2], axis=-1) < zone_r      # pad-relative horizontal distance
+        for tag, m in (("near", alive & near), ("far", alive & ~near)):
+            zs["u_" + tag] += float(u[m].sum())
+            zs["n_" + tag] += int(m.sum())
+            zs["t_" + tag] += int((m & trust).sum())
         if keep.any():
             transitions.append(
                 (obs[keep], act[keep], rew[keep], next_obs[keep], done[keep])
@@ -151,6 +161,11 @@ def macura_rollout(dynamics_model, agent, start_obs: np.ndarray,
         "max_rollout_length": int(lengths.max()) if len(lengths) else 0,
         "base_uncertainty": base_u,        # ζ-quantile first-step GJS (plot 5.5)
         "lengths": lengths.tolist(),       # per-rollout length distribution (5.6)
+        # landing zone vs transit: mean GJS uncertainty and fraction of imagined steps trusted
+        "unc_near": zs["u_near"] / zs["n_near"] if zs["n_near"] else float("nan"),
+        "unc_far": zs["u_far"] / zs["n_far"] if zs["n_far"] else float("nan"),
+        "trust_near": zs["t_near"] / zs["n_near"] if zs["n_near"] else float("nan"),
+        "trust_far": zs["t_far"] / zs["n_far"] if zs["n_far"] else float("nan"),
     }
     return transitions, diag
 

@@ -199,6 +199,8 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
                 log["rollout_length"].append((step, diag["mean_rollout_length"]))
                 log["base_uncertainty"].append((step, diag["base_uncertainty"]))
                 log["rollout_len_hist"] = diag["lengths"]        # latest round's truncation lengths
+                for k in ("unc_near", "unc_far", "trust_near", "trust_far"):   # landing zone vs transit
+                    log[k].append((step, diag[k]))
             elif algo_name == "mbpo":
                 trans, diag = mbpo_mod.mbpo_rollout(
                     dynamics_model, agent, start, reward_fn, done_fn, step, cfg)
@@ -290,7 +292,9 @@ def _empty_log():
             "kappa": [], "rollout_length": [],
             # diagnostics (do not affect training): MACURA first-step GJS uncertainty over
             # training, and the last round's per-rollout truncation lengths (distribution plot).
-            "base_uncertainty": [], "rollout_len_hist": []}
+            "base_uncertainty": [], "rollout_len_hist": [],
+            # MACURA landing zone vs transit: mean model uncertainty + fraction of imagined steps trusted
+            "unc_near": [], "unc_far": [], "trust_near": [], "trust_far": []}
 
 
 def _final_eval(agent, eval_env, best_ckpt, eval_episodes, eval_seeds=None):
