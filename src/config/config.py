@@ -3,20 +3,17 @@ import os
 # Single source of truth for every quantity. Nothing is hard-coded in the other .py
 # files; each receives the relevant sub-dict (ENV, ENSEMBLE, SAC, ROLLOUT...).
 #
-# TASK: a quadrotor learns to RECOVER from a tumbling start, fly to a target, and hold a
-# stable hover. The high-angular-rate recovery + fast approach are aggressive - exactly
-# where a learned model is uncertain, so a fixed-horizon rollout (MBPO) over-imagines and
-# MACURA's uncertainty-adaptive truncation has a real job. The four algorithms
-# (MACURA, MBPO, M2AC, SAC) share the SAC backbone, the ensemble, pink-noise exploration
-# and eval seeds - ONLY the rollout strategy differs.
+# TASK: a quadrotor in wind flies from its start, threads the gap of a ring of no-fly columns
+# and lands softly on the pad in the middle. The four algorithms (MACURA, MBPO, M2AC, SAC)
+# share the SAC backbone, the ensemble, pink-noise exploration and eval seeds - ONLY the
+# rollout strategy differs.
 
 # EXPERIMENT
 # SEEDS and ALGORITHMS are overridable from the environment (set them in a notebook cell BEFORE
 # `from src.bootstrap import setup`, i.e. before config is first imported). Handy for a fast smoke
 # test without editing code: e.g. `os.environ["MACURA_SEEDS"] = "0"`.
-#   default (no env):  4 algos x 5 seeds x 25k steps ~= 9-10h  -> fits ONE Kaggle 12h commit,
-#                      all plots + videos in a single run (a commit that runs past 12h is killed
-#                      and saves NOTHING, so do not enlarge this without splitting across commits).
+#   A Kaggle commit that runs past 12h is killed and saves NOTHING: at 8 updates/step, 4 algos take
+#   ~3.4h per seed, so run at most 2-3 seeds per commit and merge the logs locally afterwards.
 def _env_list(name, default, cast):
     raw = os.environ.get(name, "")
     if not raw.strip():
@@ -24,14 +21,12 @@ def _env_list(name, default, cast):
     return [cast(x) for x in raw.replace(",", " ").split()]
 
 SEED                = 0
-SEEDS               = _env_list("MACURA_SEEDS", [0], int)   # PILOT: 1 seed to check the mechanism fast.
-                                         # A single seed is a look, not proof - for the full study set this to
-                                         # [0,1,2,3,4] (or MACURA_SEEDS="0 1 2 3 4") and read the IQM/crash CIs.
+SEEDS               = _env_list("MACURA_SEEDS", [0], int)   # CAGE PILOT (branch cage-env): 1 seed to see
+                                         # whether the cage task separates the methods before a full study.
 ALGORITHMS          = _env_list("MACURA_ALGOS", ["macura", "mbpo", "m2ac", "sac"],
                                 lambda x: x.strip().lower())
-TOTAL_ENV_STEPS     = 40000              # PILOT = the 40k ring baseline run with ONE change: UTD 4 -> 8.
-                                         # 1 seed x 4 algos ~= 2.5-3h (one Kaggle commit). Full study later:
-                                         # 5 seeds ~= 13-15h (two commits, per-seed resume).
+TOTAL_ENV_STEPS     = 40000              # same as the pilot (the 40k ring baseline run with UTD 4 -> 8).
+                                         # ~3.4h per seed for all 4 algos -> 2 seeds per commit ~= 7h.
 WARMUP_RANDOM_STEPS = 500
 EVAL_EVERY_STEPS    = 1000               # ~20 eval points over the run
 EVAL_EPISODES       = 20                 # 20 FIXED-seed episodes/eval -> per-point crash noise ~sqrt(p(1-p)/20)
@@ -70,11 +65,15 @@ REWARD = {
     "w_settle":     4.0,   # strength of the landing-envelope bonus
     "settle_dist":  0.30,  # distance scale (m): tight, so it only rewards being ON the pad
     "settle_speed": 0.40,  # speed scale (m/s): only rewards a slow, controlled arrival
+    # CAGE wall penalty (cage task): grows near the wall, only below its top (flying over is free)
+    "w_cage":       0.8,
+    "cage_scale":   0.15,  # distance scale (m) of the wall penalty
 }
 ENV = {
     "mjcf_scene":        "",     # "" -> bundled src/envs/assets/drone.xml
     "action_repeat":     2,      # 50 Hz control (timestep 0.01 * 2)
-    "max_episode_steps": 250,    # ~5 s episodes
+    "max_episode_steps": 400,    # 8 s episodes: a slow, careful descent into the cage under wind needs
+                                 # ~4 s median and ~6 s for the slowest 10% (measured with the autopilot)
     "init_height":       2.0,    # spawn height (m) - descend from here to the pad
     "init_noise":        0.05,   # small random pose + velocity perturbation at reset
     "init_tilt":         0.2,    # gentler start tilt (rad) so the policy can converge
@@ -99,7 +98,8 @@ ENV = {
     # trust the landing zone MORE. Kept as options for future tests, not used.
     "turb_force":        0.0,    # landing-zone turbulence std (N)
     "turb_correlation":  0.8,
-    "turb_radius":       1.3,    # also the "landing zone" radius for MACURA's near-vs-transit diagnostic
+    "turb_radius":       1.0,    # also the "landing zone" radius for MACURA's near-vs-transit diagnostic
+                                 # (cage task: inside the cage + a margin)
     "turb_ramp":         0.15,
     "action_noise":      0.0,    # hidden additive action noise (paper App. D.4 method)
     "action_noise_zone": 0.0,
@@ -112,7 +112,7 @@ ENV = {
     # start: the drone must thread the gap and land in the middle (analytic, so imagined rollouts
     # see the same envelope). This concentrates model uncertainty at the gap/pocket - exactly where
     # MBPO's fixed-horizon rollout over-imagines (clipping a column) and MACURA's truncation wins.
-    "n_obstacles":       4,      # columns forming the ring
+    "n_obstacles":       0,      # cage task: NO ring columns (the cage replaces them; obs = 14 dims)
     "obstacle_radius":   0.3,    # crash within this xy radius of a column (thinner -> threadable gap)
     "obstacle_min_clear": 0.5,   # keep columns clear of the start and each other at reset
     "ring_radius":       0.85,   # columns sit this far from the pad center (pocket radius ~0.55 m)
@@ -124,6 +124,26 @@ ENV = {
     "soft_speed":        0.8,    # land softly below this speed (achievable under moderate wind)
     "impact_height":     0.06,   # below this height...
     "hard_speed":        1.5,    # ...moving faster than this = a hard crash (forgives light touchdowns)
+    # TOUCHDOWN option (OFF): the pad becomes a solid raised platform and success means actually
+    # RESTING on it. Screened offline 2026-09-23 and REJECTED: contact makes the ensemble 19-26x more
+    # WRONG at landing, but the members AGREE MORE there (GJS landing/transit 0.33x equal data, 0.76x
+    # sparse; 0.92x / 1.38x without the platform) - MACURA would not detect it, both methods would suffer.
+    "touchdown":         False,
+    "pad_height":        0.15,   # platform top above the floor (m)
+    "pad_radius":        0.35,   # platform radius (m) - same as the visual pad
+    "touch_speed":       0.3,    # "resting on the pad" below this speed (m/s)
+    # CAGE TASK (branch cage-env): the pad sits inside a circular cage of vertical bars, open at the
+    # top. The drone spawns HIGH above the cage and must come in over the top and settle in the middle
+    # without touching the wall. Crash = within cage_margin of the wall AND below its top (analytic).
+    "cage":              True,
+    "cage_radius":       0.8,    # cage wall radius around the pad center (m)
+    "cage_height":       1.0,    # wall height (m) - flying over it is free, going through it is a crash
+    "cage_margin":       0.15,   # ~drone half-span: crash if the drone center gets this close to the wall
+    "cage_bars":         16,     # visual bars (rendering only)
+    "start_height_min":  2.2,    # spawn height range (m): always ABOVE the cage
+    "start_height_max":  2.6,
+    "start_offset":      1.0,    # spawn up to 1 m sideways from the pad (sometimes outside the cage
+                                 # footprint -> the drone has to come in over the wall)
     "reward":            REWARD,
 }
 

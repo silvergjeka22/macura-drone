@@ -17,6 +17,7 @@ from __future__ import annotations
 import numpy as np
 
 from src.models import ensemble as ens
+from src.algorithms.macura import compute_gjs, trust_threshold   # diagnostic only
 
 
 def rollout_length(env_step: int, schedule) -> int:
@@ -35,8 +36,12 @@ def rollout_length(env_step: int, schedule) -> int:
 
 
 def mbpo_rollout(dynamics_model, agent, start_obs: np.ndarray,
-                 reward_fn, done_fn, env_step: int, cfg: dict):
-    """Branched rollouts of a FIXED, scheduled length (no uncertainty check)."""
+                 reward_fn, done_fn, env_step: int, cfg: dict, diag_state: dict = None):
+    """Branched rollouts of a FIXED, scheduled length (no uncertainty check).
+
+    `diag_state` (optional, measurement only): if given, also score every imagined step with
+    MACURA's GJS uncertainty and trust threshold, and report the share of the data MBPO trains
+    on that MACURA would have thrown away. It never changes which transitions MBPO keeps."""
     schedule = cfg["rollout"]["mbpo"]["rollout_schedule"]
     horizon = rollout_length(env_step, schedule)
 
@@ -45,11 +50,19 @@ def mbpo_rollout(dynamics_model, agent, start_obs: np.ndarray,
     obs = np.array(start_obs, dtype=np.float32)
     alive = np.ones(obs.shape[0], dtype=bool)
     transitions = []
+    n_stored = n_untrusted = 0
+    kappa = np.inf
 
-    for _ in range(horizon):
+    for t in range(horizon):
         if not alive.any():
             break
         act = select_actions(agent, obs, evaluate=False)   # batched (vectorized)
+        if diag_state is not None:                         # measurement only (no randomness)
+            u = compute_gjs(*ens.member_gaussians(dynamics_model, obs, act))
+            if t == 0:
+                kappa = trust_threshold(diag_state, u, cfg)
+            n_stored += int(alive.sum())
+            n_untrusted += int((alive & (u >= kappa)).sum())
         next_obs = ens.predict(dynamics_model, obs, act)
         rew = reward_fn(next_obs, act)   # score the state the action LANDS in -> r(s',a), identical to the real env
         done = done_fn(next_obs)
@@ -60,6 +73,9 @@ def mbpo_rollout(dynamics_model, agent, start_obs: np.ndarray,
         alive = alive & (~done)
         obs = next_obs
 
-    return transitions, {"rollout_length": horizon}
+    diag = {"rollout_length": horizon}
+    if diag_state is not None:
+        diag["untrusted_frac"] = n_untrusted / n_stored if n_stored else float("nan")
+    return transitions, diag
 
 

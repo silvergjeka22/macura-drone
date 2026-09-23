@@ -54,10 +54,11 @@ _LV = slice(8, 11)
 _VZ = 10
 _AV = slice(11, 14)
 _OBS0 = 14                       # obstacle-relative xy entries start here
+_CORE_HALF_H = 0.02              # drone core box half-height: resting core height = surface + this
 
 
 # ── the dense fly-to-pad-and-land reward (vectorized; real and imagined use THIS) ──────
-def _drone_reward(obs, act, rw, n_obs, obs_radius, obs_scale) -> np.ndarray:
+def _drone_reward(obs, act, rw, n_obs, obs_radius, obs_scale, cage=None) -> np.ndarray:
     """Shaped land-on-pad reward from (obs, action). Returns (batch,).
 
     Works on a single obs or a batched (B, D) obs; always returns a 1-D array. Depends only
@@ -95,7 +96,36 @@ def _drone_reward(obs, act, rw, n_obs, obs_radius, obs_scale) -> np.ndarray:
         surface = np.maximum(d - float(obs_radius), 0.0)
         r_obs = float(rw["w_obs"]) * np.exp(-surface / max(float(obs_scale), 1e-6)).sum(axis=-1)
 
-    return r_pos + r_level + r_settle - r_spin - r_vel - r_ctrl - r_obs
+    # cage-wall avoidance (cage task): smooth penalty near the cage wall, only BELOW its top, so
+    # flying over the cage is free and the drone is pushed to come in over the top, not through it.
+    r_cage = 0.0
+    if cage is not None and float(rw.get("w_cage", 0.0)) > 0.0:
+        radius, height, margin = cage
+        dxy = np.linalg.norm(obs[:, 0:2], axis=-1)                  # horizontal distance to the pad
+        gap = np.maximum(np.abs(dxy - radius) - margin, 0.0)       # distance to the wall surface
+        below = 1.0 / (1.0 + np.exp((obs[:, _H] - height) / 0.08))  # ~1 below the cage top, ~0 above
+        r_cage = (float(rw["w_cage"]) * below
+                  * np.exp(-gap / max(float(rw.get("cage_scale", 0.15)), 1e-6)))
+
+    return r_pos + r_level + r_settle - r_spin - r_vel - r_ctrl - r_obs - r_cage
+
+
+def _cage_params(cfg: dict):
+    """(radius, height, margin) of the cage wall, or None when the cage task is off. Shared by the
+    env and by known_reward_fn / termination_fn, so real and imagined use identical numbers."""
+    if not cfg.get("cage", False):
+        return None
+    return (float(cfg.get("cage_radius", 0.8)), float(cfg.get("cage_height", 1.0)),
+            float(cfg.get("cage_margin", 0.15)))
+
+
+def _cage_hit(obs, cage) -> np.ndarray:
+    """Crash into the cage wall: drone within `margin` of the wall ring AND below its top.
+    Pure function of obs (pad-relative xy + height), so imagined rollouts crash the same way."""
+    obs = np.atleast_2d(np.asarray(obs))
+    radius, height, margin = cage
+    dxy = np.linalg.norm(obs[:, 0:2], axis=-1)
+    return (np.abs(dxy - radius) < margin) & (obs[:, _H] < height)
 
 
 class DroneTargetEnv(gym.Env):
@@ -162,10 +192,68 @@ class DroneTargetEnv(gym.Env):
         self.soft_speed = float(cfg.get("soft_speed", 0.5))      # land softly below this speed
         self.impact_height = float(cfg.get("impact_height", 0.06))
         self.hard_speed = float(cfg.get("hard_speed", 1.0))      # hitting the ground faster than this = crash
+        # TOUCHDOWN (off by default): the pad becomes a SOLID raised platform the drone must actually
+        # settle on. Contact is an abrupt change in the physics (impact, bounce, friction, edges) that
+        # smooth ensemble members fit DIFFERENTLY, in a region rarely visited early - a candidate for
+        # real model DISAGREEMENT right where the landing is decided.
+        self.touchdown = bool(cfg.get("touchdown", False))
+        self.pad_height = float(cfg.get("pad_height", 0.15))     # platform top above the floor (m)
+        self.pad_radius = float(cfg.get("pad_radius", 0.35))     # platform radius (m)
+        self.touch_speed = float(cfg.get("touch_speed", 0.3))    # "resting" below this speed (m/s)
+        if self.touchdown:                                        # target = drone resting ON the platform
+            self.pad_z = self.pad_height + _CORE_HALF_H
+        # CAGE task: the pad is surrounded by a circular cage of vertical bars, open at the top. The
+        # drone spawns HIGH above it and must come in over the top and settle in the middle without
+        # touching the wall. The wall is analytic (pad-relative xy + height are in the obs), so the
+        # crash check and the penalty are identical for real and imagined transitions.
+        self.cage = bool(cfg.get("cage", False))
+        self._cage = _cage_params(cfg)
+        self.cage_radius = float(cfg.get("cage_radius", 0.8))
+        self.cage_height = float(cfg.get("cage_height", 1.0))
+        self.cage_bars = int(cfg.get("cage_bars", 16))
+        self.start_height = (float(cfg.get("start_height_min", 2.2)),
+                             float(cfg.get("start_height_max", 2.6)))
+        self.start_offset = float(cfg.get("start_offset", 1.0))   # max spawn distance from the pad (m)
         self.rw = cfg["reward"]
         self.obs_scale = float(self.rw.get("obs_scale", cfg.get("obstacle_scale", 0.5)))
 
-        self.model = mujoco.MjModel.from_xml_path(cfg.get("mjcf_scene") or _ASSET)
+        scene = cfg.get("mjcf_scene") or _ASSET
+        if self.touchdown or self.cage:
+            import xml.etree.ElementTree as ET
+            root = ET.parse(scene).getroot()
+            if self.touchdown:
+                # Make the pad a SOLID platform in the XML *before* compiling, so MuJoCo derives every
+                # collision structure (bounding volumes, body contype/affinity) for it. (Editing geom
+                # fields after compile does NOT enable the collision - the drone fell through.)
+                for g in root.iter("geom"):
+                    if g.get("name") == "pad_geom":
+                        g.set("size", f"{self.pad_radius} {self.pad_height / 2.0}")
+                        g.set("contype", "1")               # drone geoms have contype 1 ->
+                        g.set("conaffinity", "1")           # they now collide with the pad
+                        g.set("rgba", "0.10 0.80 0.35 1")
+            if self.cage:
+                # visual cage (no physics - the wall is enforced analytically): one mocap body at the
+                # pad with vertical bars on a circle + a hoop along the top. The ring columns go away.
+                wb = root.find("worldbody")
+                for b in list(wb.findall("body")):
+                    if (b.get("name") or "").startswith("obs"):
+                        wb.remove(b)
+                cage = ET.SubElement(wb, "body", {"name": "cage", "mocap": "true", "pos": "0 0 0"})
+                r, hgt, n = self.cage_radius, self.cage_height, self.cage_bars
+                pts = [(r * np.cos(2 * np.pi * i / n), r * np.sin(2 * np.pi * i / n)) for i in range(n)]
+                for i, (x, y) in enumerate(pts):
+                    ET.SubElement(cage, "geom", {
+                        "name": f"cage_bar{i}", "type": "cylinder", "size": f"0.018 {hgt / 2}",
+                        "pos": f"{x:.4f} {y:.4f} {hgt / 2}", "mass": "0", "contype": "0",
+                        "conaffinity": "0", "rgba": "0.82 0.82 0.88 1"})
+                    x2, y2 = pts[(i + 1) % n]
+                    ET.SubElement(cage, "geom", {
+                        "name": f"cage_hoop{i}", "type": "capsule", "size": "0.015",
+                        "fromto": f"{x:.4f} {y:.4f} {hgt} {x2:.4f} {y2:.4f} {hgt}", "mass": "0",
+                        "contype": "0", "conaffinity": "0", "rgba": "0.82 0.82 0.88 1"})
+            self.model = mujoco.MjModel.from_xml_string(ET.tostring(root, encoding="unicode"))
+        else:
+            self.model = mujoco.MjModel.from_xml_path(scene)
         self.data = mujoco.MjData(self.model)
         self.n_act = self.model.nu
 
@@ -176,7 +264,7 @@ class DroneTargetEnv(gym.Env):
 
         # mocap ids for the visual pad + obstacle markers (rendering only; guarded)
         self._mocap = {}
-        for name in ["pad"] + [f"obs{i}" for i in range(self.n_obstacles)]:
+        for name in ["pad", "cage"] + [f"obs{i}" for i in range(self.n_obstacles)]:
             bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name)
             if bid >= 0 and self.model.body_mocapid[bid] >= 0:
                 self._mocap[name] = int(self.model.body_mocapid[bid])
@@ -270,6 +358,11 @@ class DroneTargetEnv(gym.Env):
             if np.linalg.norm(pad_xy) >= self.pad_min_dist:
                 break
         self._target = np.array([pad_xy[0], pad_xy[1], self.pad_z])
+        if self.cage:                          # spawn HIGH, above the cage, within start_offset of the pad
+            ang = self._rng.uniform(0.0, 2.0 * np.pi)
+            rad = self._rng.uniform(0.0, self.start_offset)
+            self.data.qpos[0:2] = self._target[:2] + rad * np.array([np.cos(ang), np.sin(ang)])
+            self.data.qpos[2] = self._rng.uniform(*self.start_height)
         self._obstacles = self._place_obstacles()
         self._sync_markers()
         mujoco.mj_forward(self.model, self.data)
@@ -278,7 +371,13 @@ class DroneTargetEnv(gym.Env):
     def _sync_markers(self):
         """Move the visual pad + obstacle markers (rendering only; no effect on physics)."""
         if "pad" in self._mocap:
-            self.data.mocap_pos[self._mocap["pad"]] = self._target
+            if self.touchdown:                # solid platform spanning floor .. pad_height
+                self.data.mocap_pos[self._mocap["pad"]] = [self._target[0], self._target[1],
+                                                           self.pad_height / 2.0]
+            else:
+                self.data.mocap_pos[self._mocap["pad"]] = self._target
+        if "cage" in self._mocap:
+            self.data.mocap_pos[self._mocap["cage"]] = [self._target[0], self._target[1], 0.0]
         for i in range(self.n_obstacles):
             key = f"obs{i}"
             if key in self._mocap:
@@ -343,7 +442,7 @@ class DroneTargetEnv(gym.Env):
 
         obs = self._get_obs()
         reward = float(_drone_reward(obs, action, self.rw, self.n_obstacles,
-                                     self.obs_radius, self.obs_scale)[0])
+                                     self.obs_radius, self.obs_scale, cage=self._cage)[0])
 
         dist = float(np.linalg.norm(obs[_REL]))
         up_z = 1.0 - 2.0 * (float(obs[_QX]) ** 2 + float(obs[_QY]) ** 2)
@@ -351,8 +450,14 @@ class DroneTargetEnv(gym.Env):
         height = float(obs[_H])
         hit_obs = self._nearest_obstacle(obs) < self.obs_radius
         hard = height < self.impact_height and abs(float(obs[_VZ])) > self.hard_speed
-        crashed = bool(up_z < self.fail_tilt or hit_obs or hard or dist > self.max_dist)
-        landed = bool(dist < self.land_radius and speed < self.soft_speed and up_z > 0.9)
+        hit_cage = self._cage is not None and bool(_cage_hit(obs, self._cage)[0])
+        crashed = bool(up_z < self.fail_tilt or hit_obs or hard or hit_cage or dist > self.max_dist)
+        if self.touchdown:                    # success = actually RESTING on the platform
+            on_pad = (float(np.linalg.norm(obs[_REL][:2])) < self.pad_radius
+                      and -0.02 < height - self.pad_z < 0.04)
+            landed = bool(on_pad and speed < self.touch_speed and up_z > 0.9)
+        else:
+            landed = bool(dist < self.land_radius and speed < self.soft_speed and up_z > 0.9)
 
         terminated = crashed
         truncated = self._step_count >= self.max_episode_steps
@@ -392,9 +497,10 @@ def known_reward_fn(cfg: dict):
     n_obs = int(cfg.get("n_obstacles", 2))
     obs_radius = float(cfg.get("obstacle_radius", 0.4))
     obs_scale = float(rw.get("obs_scale", cfg.get("obstacle_scale", 0.5)))
+    cage = _cage_params(cfg)
 
     def reward_fn(obs, act):
-        return _drone_reward(obs, act, rw, n_obs, obs_radius, obs_scale)
+        return _drone_reward(obs, act, rw, n_obs, obs_radius, obs_scale, cage=cage)
 
     return reward_fn
 
@@ -409,6 +515,7 @@ def termination_fn(cfg: dict):
     obs_radius = float(cfg.get("obstacle_radius", 0.4))
     impact_height = float(cfg.get("impact_height", 0.06))
     hard_speed = float(cfg.get("hard_speed", 1.0))
+    cage = _cage_params(cfg)
 
     def done_fn(obs):
         obs = np.atleast_2d(np.asarray(obs))
@@ -419,6 +526,8 @@ def termination_fn(cfg: dict):
         if n_obs > 0:
             oxy = obs[:, _OBS0:_OBS0 + 2 * n_obs].reshape(obs.shape[0], n_obs, 2)
             done = done | (np.linalg.norm(oxy, axis=-1).min(axis=-1) < obs_radius)
+        if cage is not None:
+            done = done | _cage_hit(obs, cage)
         return done
 
     return done_fn

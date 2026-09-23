@@ -85,6 +85,15 @@ def update_kappa(kappa_state: dict, first_step_uncertainties: np.ndarray,
     return kappa
 
 
+# ── diagnostic: MACURA's trust rule applied to ANY rollout (measurement only) ─────
+def trust_threshold(diag_state: dict, first_step_u: np.ndarray, cfg: dict) -> float:
+    """kappa exactly as MACURA would set it (Eq. 21) from this round's first-step GJS values, kept in
+    a SEPARATE `diag_state`. Used to measure how much of MBPO's / M2AC's imagined training data
+    MACURA would have thrown away. Pure measurement: no randomness, no effect on those algorithms."""
+    m = cfg["rollout"]["macura"]
+    return update_kappa(diag_state, first_step_u, float(m["zeta"]), float(m["xi"]))
+
+
 # ── branched rollouts with adaptive truncation (Algorithm 2) ──────────────────
 def macura_rollout(dynamics_model, agent, start_obs: np.ndarray,
                    reward_fn, done_fn, kappa_state: dict, cfg: dict):
@@ -166,6 +175,11 @@ def macura_rollout(dynamics_model, agent, start_obs: np.ndarray,
         "unc_far": zs["u_far"] / zs["n_far"] if zs["n_far"] else float("nan"),
         "trust_near": zs["t_near"] / zs["n_near"] if zs["n_near"] else float("nan"),
         "trust_far": zs["t_far"] / zs["n_far"] if zs["n_far"] else float("nan"),
+        # share of the data it TRAINS on that is above its own trust threshold: 0 by construction
+        "untrusted_frac": 0.0,
+        # share of the imagined steps it generated but THREW AWAY (the filter at work)
+        "discarded_frac": (1.0 - float(lengths.sum()) / (zs["n_near"] + zs["n_far"])
+                           if (zs["n_near"] + zs["n_far"]) else float("nan")),
     }
     return transitions, diag
 

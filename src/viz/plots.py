@@ -45,8 +45,14 @@ def record_env_video(env, save_path, seconds=8, fps=30, policy="random", seed=0,
     n_act = env.action_space.shape[0]
     obs, _ = env.reset(seed=seed)
     frames = []
+    pilot = None
+    if policy == "autopilot":                          # hand-coded controller, NOT a learned policy
+        from src.envs.autopilot import Autopilot
+        pilot = Autopilot(env)
     for _ in range(int(seconds * fps)):
-        if policy == "random":
+        if pilot is not None:
+            act = pilot.act()
+        elif policy == "random":
             act = np.clip(rng.normal(0, action_scale, size=n_act), -1, 1).astype(np.float32)
         elif policy == "still":
             act = np.zeros(n_act, np.float32)
@@ -280,6 +286,66 @@ def plot_trust_by_zone(macura_runs, save_path=None):
         a.grid(alpha=0.3); a.legend()
     ax[1].set_ylim(-0.02, 1.02)
     fig.suptitle("MACURA: uncertainty and trust, near the pad vs in transit", fontsize=13)
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    _maybe_save(fig, save_path)
+    return fig
+
+
+def plot_untrusted_data(runs, save_path=None):
+    """The WHY plot. Left: share of the imagined data each model-based method actually TRAINS on
+    that is above MACURA's trust threshold (the models disagree about it). MBPO and M2AC are
+    measured with MACURA's exact rule; MACURA is 0 by construction (dashed = the share it generated
+    but threw away). Right: MBPO's evaluation return next to its untrusted share, to see whether
+    its drops follow the untrustworthy data. Mean over the seeds that have the diagnostic."""
+    import warnings
+    by = _group_by_algo(runs)
+
+    def _series(run_list, key):
+        series = [np.asarray(r[key], dtype=float) for r in run_list if r.get(key)]
+        if not series:
+            return None, None
+        n = min(len(s) for s in series)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            return series[0][:n, 0], np.nanmean(np.stack([s[:n, 1] for s in series]), axis=0)
+
+    fig, ax = plt.subplots(1, 2, figsize=(14, 4.8))
+    any_data = False
+    for algo in ("mbpo", "m2ac", "macura"):
+        if algo not in by:
+            continue
+        st, m = _series(by[algo], "untrusted_frac")
+        if st is not None:
+            any_data = True
+            ax[0].plot(st, 100 * m, color=_color(algo), lw=2, label=f"{algo.upper()}: trains on it")
+    if "macura" in by:
+        st, m = _series(by["macura"], "discarded_frac")
+        if st is not None:
+            ax[0].plot(st, 100 * m, color=_color("macura"), lw=1.5, ls="--",
+                       label="MACURA: generated but threw away")
+    if not any_data:
+        ax[0].text(0.5, 0.5, "no runs with this diagnostic", ha="center", va="center",
+                   transform=ax[0].transAxes)
+    ax[0].set_xlabel("real environment steps"); ax[0].set_ylabel("% of imagined data")
+    ax[0].set_title("Imagined data the models disagree about")
+    ax[0].set_ylim(-2, 102); ax[0].grid(alpha=0.3); ax[0].legend(fontsize=8)
+
+    if "mbpo" in by:
+        mb = [r for r in by["mbpo"] if r.get("untrusted_frac")]
+        if mb:
+            steps, mean, _ = _mean_std_curve(mb, "eval_return")
+            ax[1].plot(steps, mean, color=_color("mbpo"), lw=2, label="MBPO return")
+            ax[1].set_ylabel("evaluation return", color=_color("mbpo"))
+            st, m = _series(mb, "untrusted_frac")
+            ax2 = ax[1].twinx()
+            ax2.plot(st, 100 * m, color="k", lw=1.2, alpha=0.6, label="MBPO untrusted data (%)")
+            ax2.set_ylabel("% untrusted imagined data")
+            ax2.set_ylim(-2, 102)
+    ax[1].set_xlabel("real environment steps")
+    ax[1].set_title("MBPO: return vs untrusted training data")
+    ax[1].grid(alpha=0.3)
+    fig.suptitle("How much untrustworthy imagined data each method learns from "
+                 "(above MACURA's trust threshold)", fontsize=12)
     fig.tight_layout(rect=(0, 0, 1, 0.94))
     _maybe_save(fig, save_path)
     return fig
@@ -725,9 +791,16 @@ def plot_env_layout(cfg, seeds=(0, 1, 2, 3), save_path=None):
     for ax, sd in zip(axes, seeds):
         env.reset(seed=sd)
         pad = env._target[:2]
-        ax.add_patch(mpatches.Circle((0, 0), 0.13, color="#1f77b4", zorder=3))
-        ax.annotate("start", (0, 0), color="#1f77b4", fontsize=8, ha="center", va="top",
-                    xytext=(0, -0.3), textcoords="data")
+        start = np.array(env.data.qpos[0:2])                 # the real spawn point
+        if getattr(env, "cage", False):                      # cage: wall ring + its crash band
+            cr, cm = env.cage_radius, float(ec.get("cage_margin", 0.15))
+            ax.add_patch(mpatches.Circle(pad, cr + cm, color="#7f7f7f", alpha=0.25, zorder=1))
+            ax.add_patch(mpatches.Circle(pad, cr - cm, color="white", zorder=1))
+            ax.add_patch(mpatches.Circle(pad, cr, fill=False, color="#555555", lw=2, zorder=2))
+        ax.add_patch(mpatches.Circle(start, 0.13, color="#1f77b4", zorder=3))
+        ax.annotate(f"start ({env.data.qpos[2]:.1f} m high)" if getattr(env, "cage", False) else "start",
+                    start, color="#1f77b4", fontsize=8, ha="center", va="top",
+                    xytext=(start[0], start[1] - 0.3), textcoords="data")
         tr = float(ec.get("turb_radius", 0.0))
         zone_on = any(float(ec.get(k, 0.0)) > 0.0
                       for k in ("turb_force", "wake_gamma", "pad_downwash", "ge_gain"))
@@ -740,13 +813,21 @@ def plot_env_layout(cfg, seeds=(0, 1, 2, 3), save_path=None):
                     xytext=(pad[0], pad[1] + 0.28), textcoords="data")
         for o in env._obstacles:
             ax.add_patch(mpatches.Circle(o, orad, color="#d62728", alpha=0.55, zorder=2))
-        ax.plot([0, pad[0]], [0, pad[1]], "k--", lw=0.9, alpha=0.5, zorder=0)  # approach
+        ax.plot([start[0], pad[0]], [start[1], pad[1]], "k--", lw=0.9, alpha=0.5, zorder=0)  # approach
         ax.set_aspect("equal"); ax.grid(alpha=0.3)
         ax.set_title(f"reset seed {sd}", fontsize=10)
-        ax.set_xlim(-2.7, 2.7); ax.set_ylim(-2.7, 2.7)
+        if getattr(env, "cage", False):                      # zoom on the cage
+            ax.set_xlim(pad[0] - 1.6, pad[0] + 1.6); ax.set_ylim(pad[1] - 1.6, pad[1] + 1.6)
+        else:
+            ax.set_xlim(-2.7, 2.7); ax.set_ylim(-2.7, 2.7)
+    cage_mode = getattr(env, "cage", False)
     env.close()
-    fig.suptitle("Ring task (top-down): calm transit, then thread the gap into the hard-to-predict "
-                 "landing zone (orange) and land on the pad", fontsize=12)
+    if cage_mode:
+        fig.suptitle("Cage task (top-down): the drone spawns HIGH (blue), comes in over the cage wall "
+                     "(grey = crash band) and lands on the pad (green) in the middle", fontsize=12)
+    else:
+        fig.suptitle("Ring task (top-down): calm transit, then thread the gap into the hard-to-predict "
+                     "landing zone (orange) and land on the pad", fontsize=12)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
     _maybe_save(fig, save_path)
     return fig
