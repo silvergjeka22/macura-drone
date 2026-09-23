@@ -94,6 +94,27 @@ def trust_threshold(diag_state: dict, first_step_u: np.ndarray, cfg: dict) -> fl
     return update_kappa(diag_state, first_step_u, float(m["zeta"]), float(m["xi"]))
 
 
+# ── diagnostic: FAST vs SLOW descent (delivery task; measurement only) ─────────
+_VZ = 10                                          # obs column of the vertical velocity (envs/drone_env.py)
+
+
+def fast_threshold(cfg: dict) -> float:
+    """Descent speed (m/s) above which an imagined state counts as a FAST descent in the diagnostics:
+    where the delivery task's lift loss starts (env `vrs_speed`)."""
+    return float(cfg.get("env", {}).get("vrs_speed", 1.2))
+
+
+def is_fast(obs: np.ndarray, threshold: float) -> np.ndarray:
+    """(batch,) bool: the state is descending faster than `threshold` m/s."""
+    return -np.asarray(obs)[:, _VZ] > threshold
+
+
+def fast_share(transitions, threshold: float) -> float:
+    """Share of the imagined transitions a method TRAINS on that start in a fast descent."""
+    n = sum(len(t[0]) for t in transitions)
+    return (sum(int(is_fast(t[0], threshold).sum()) for t in transitions) / n) if n else float("nan")
+
+
 # ── branched rollouts with adaptive truncation (Algorithm 2) ──────────────────
 def macura_rollout(dynamics_model, agent, start_obs: np.ndarray,
                    reward_fn, done_fn, kappa_state: dict, cfg: dict):
@@ -124,7 +145,8 @@ def macura_rollout(dynamics_model, agent, start_obs: np.ndarray,
     # diagnostics only (no effect on the algorithm): uncertainty + trust NEAR the pad vs in TRANSIT,
     # to check that MACURA trusts the model in calm transit and truncates in the landing zone.
     zone_r = float(cfg.get("env", {}).get("turb_radius", 1.3))
-    zs = {"u_near": 0.0, "n_near": 0, "t_near": 0, "u_far": 0.0, "n_far": 0, "t_far": 0}
+    v_fast = fast_threshold(cfg)                      # delivery task: fast vs slow descent
+    zs = {f"{q}_{tag}": 0 for q in ("u", "n", "t") for tag in ("near", "far", "fast", "slow")}
 
     from src.algorithms.sac import select_actions
 
@@ -150,7 +172,9 @@ def macura_rollout(dynamics_model, agent, start_obs: np.ndarray,
         keep = alive & trust
 
         near = np.linalg.norm(obs[:, 0:2], axis=-1) < zone_r      # pad-relative horizontal distance
-        for tag, m in (("near", alive & near), ("far", alive & ~near)):
+        fast = is_fast(obs, v_fast)
+        for tag, m in (("near", alive & near), ("far", alive & ~near),
+                       ("fast", alive & fast), ("slow", alive & ~fast)):
             zs["u_" + tag] += float(u[m].sum())
             zs["n_" + tag] += int(m.sum())
             zs["t_" + tag] += int((m & trust).sum())
@@ -175,6 +199,12 @@ def macura_rollout(dynamics_model, agent, start_obs: np.ndarray,
         "unc_far": zs["u_far"] / zs["n_far"] if zs["n_far"] else float("nan"),
         "trust_near": zs["t_near"] / zs["n_near"] if zs["n_near"] else float("nan"),
         "trust_far": zs["t_far"] / zs["n_far"] if zs["n_far"] else float("nan"),
+        # fast vs slow descent (delivery task): same two measures, split by how fast the state descends
+        "unc_fast": zs["u_fast"] / zs["n_fast"] if zs["n_fast"] else float("nan"),
+        "unc_slow": zs["u_slow"] / zs["n_slow"] if zs["n_slow"] else float("nan"),
+        "trust_fast": zs["t_fast"] / zs["n_fast"] if zs["n_fast"] else float("nan"),
+        "trust_slow": zs["t_slow"] / zs["n_slow"] if zs["n_slow"] else float("nan"),
+        "fast_frac": fast_share(transitions, v_fast),   # share of its training data in fast descents
         # share of the data it TRAINS on that is above its own trust threshold: 0 by construction
         "untrusted_frac": 0.0,
         # share of the imagined steps it generated but THREW AWAY (the filter at work)

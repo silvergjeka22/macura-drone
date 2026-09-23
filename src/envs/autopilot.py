@@ -50,6 +50,7 @@ class Autopilot:
         env, d = self.env, self.env.data
         if env._step_count == 0:                             # new episode -> reset the wind trim
             self._i[:] = 0.0
+            self.mass = float(env.model.body_subtreemass[env._core_id])   # knows the package weight
         p, v, w = np.array(d.qpos[0:3]), np.array(d.qvel[0:3]), np.array(d.qvel[3:6])
         Rm = _rotmat(d.qpos[3:7])
         tgt = env._target

@@ -3,17 +3,17 @@ import os
 # Single source of truth for every quantity. Nothing is hard-coded in the other .py
 # files; each receives the relevant sub-dict (ENV, ENSEMBLE, SAC, ROLLOUT...).
 #
-# TASK: a quadrotor in wind flies from its start, threads the gap of a ring of no-fly columns
-# and lands softly on the pad in the middle. The four algorithms (MACURA, MBPO, M2AC, SAC)
-# share the SAC backbone, the ensemble, pink-noise exploration and eval seeds - ONLY the
+# TASKS: by default the CAGE task (land inside an open-top cage, see ENV). MACURA_TASK=delivery switches
+# to the DELIVERY task (see the DELIVERY preset below the ENV dict). The four algorithms (MACURA, MBPO,
+# M2AC, SAC) share the SAC backbone, the ensemble, pink-noise exploration and eval seeds - ONLY the
 # rollout strategy differs.
 
 # EXPERIMENT
-# SEEDS and ALGORITHMS are overridable from the environment (set them in a notebook cell BEFORE
-# `from src.bootstrap import setup`, i.e. before config is first imported). Handy for a fast smoke
-# test without editing code: e.g. `os.environ["MACURA_SEEDS"] = "0"`.
+# TASK, SEEDS, ALGORITHMS and the step budget are overridable from the environment (set them in a
+# notebook cell BEFORE `from src.bootstrap import setup`, i.e. before config is first imported):
+#   MACURA_TASK=delivery, MACURA_SEEDS="1 2 3", MACURA_ALGOS="macura mbpo", MACURA_STEPS=2000 (smoke test).
 #   A Kaggle commit that runs past 12h is killed and saves NOTHING: at 8 updates/step, 4 algos take
-#   ~3.4h per seed, so run at most 2-3 seeds per commit and merge the logs locally afterwards.
+#   ~3.4h per seed, so run at most 2-3 seeds per commit and merge the logs locally (train.load_runs).
 def _env_list(name, default, cast):
     raw = os.environ.get(name, "")
     if not raw.strip():
@@ -21,11 +21,11 @@ def _env_list(name, default, cast):
     return [cast(x) for x in raw.replace(",", " ").split()]
 
 SEED                = 0
-SEEDS               = _env_list("MACURA_SEEDS", [0], int)   # CAGE PILOT (branch cage-env): 1 seed to see
-                                         # whether the cage task separates the methods before a full study.
+SEEDS               = _env_list("MACURA_SEEDS", [0], int)   # PILOT: 1 seed to see whether the task separates
+                                         # the methods before a full study (8-10 seeds for MACURA + MBPO).
 ALGORITHMS          = _env_list("MACURA_ALGOS", ["macura", "mbpo", "m2ac", "sac"],
                                 lambda x: x.strip().lower())
-TOTAL_ENV_STEPS     = 40000              # same as the pilot (the 40k ring baseline run with UTD 4 -> 8).
+TOTAL_ENV_STEPS     = int(os.environ.get("MACURA_STEPS", "") or 40000)   # same as the earlier pilots.
                                          # ~3.4h per seed for all 4 algos -> 2 seeds per commit ~= 7h.
 WARMUP_RANDOM_STEPS = 500
 EVAL_EVERY_STEPS    = 1000               # ~20 eval points over the run
@@ -144,8 +144,38 @@ ENV = {
     "start_height_max":  2.6,
     "start_offset":      1.0,    # spawn up to 1 m sideways from the pad (sometimes outside the cage
                                  # footprint -> the drone has to come in over the wall)
+    # DELIVERY TASK pieces - all OFF here; switched on together by the DELIVERY preset below.
+    "spawn_above_pad":   False,  # spawn high above the pad (start_height_*, start_offset) without a cage
+    "payload_max":       0.0,    # package weight (kg), new uniform draw every episode, IN the obs; 0 = off
+    "vrs_loss":          0.0,    # fraction of thrust lost in a fast vertical descent; 0 = off
+    "vrs_speed":         1.2,    # descent speed (m/s) where the loss starts ...
+    "vrs_full":          2.2,    # ... and where it is complete
+    "vrs_escape":        1.0,    # sideways speed (m/s) that flies out of it
+    "scenery":           False,  # windsock in the videos (visual only: no effect on physics or obs)
     "reward":            REWARD,
 }
+
+# DELIVERY TASK (opt-in: set MACURA_TASK=delivery before config is imported). A delivery drone starts
+# ~2.4 m above the pad with a package of random, KNOWN weight and must land softly. The reward already
+# pays every step spent settled on the pad, so arriving sooner is worth more (the "hurry" temptation).
+# Descending straight down faster than ~1.2-2.2 m/s loses up to 35% of the thrust (a simplified vortex
+# ring state), and a heavy package leaves less spare thrust to brake -> the safe speed depends on the
+# weight. Measured with the hand-written autopilot (20 eval scenarios): descending at <= 1 m/s lands
+# 100% at every weight; at 2 m/s it crashes 55% (empty) / 65% (0.1 kg) / 80% (0.2 kg). A 0.8-1.6 m/s
+# threshold was too low: wind gusts alone pushed a careful empty drone into it (30% crashes).
+# Meant for MACURA: slow-descent data never shows the lift loss, so a model trained on it may be
+# confidently WRONG about fast, heavy descents - to be checked offline before any Kaggle run.
+DELIVERY = {
+    "cage": False, "n_obstacles": 0, "spawn_above_pad": True,
+    "start_height_min": 2.2, "start_height_max": 2.6, "start_offset": 0.5,
+    "payload_max": 0.2,          # up to +42% of the 0.48 kg drone: thrust/weight 2.0 (empty) .. 1.41 (full)
+    "vrs_loss": 0.35, "vrs_speed": 1.2, "vrs_full": 2.2, "vrs_escape": 1.0,
+    "turb_radius": 1.0,
+    "scenery": True,             # windsock; videos also tint the drone red while it is losing thrust
+}
+TASK = os.environ.get("MACURA_TASK", "").strip().lower()
+if TASK == "delivery":
+    ENV.update(DELIVERY)
 
 # ENSEMBLE (probabilistic dynamics model, shared by all model-based algos)
 ENSEMBLE = {
@@ -174,8 +204,11 @@ SAC = {
                                     # grounds the critic in twice as much REAL data -> less model exploitation.
 }
 
-# checkpoint selection & final eval (best = highest periodic greedy-eval return)
-SELECTION = {"start_step": 1000, "eval_every": 1000, "final_eval_episodes": 30}
+# checkpoint selection & final eval (best = highest periodic greedy-eval return). The final eval of the
+# best checkpoint runs on FRESH scenarios (seeds 1000..1029), not on the selection scenarios (100..119):
+# re-testing on the scenarios a checkpoint was picked on overrates lucky, high-variance checkpoints.
+SELECTION = {"start_step": 1000, "eval_every": 1000, "final_eval_episodes": 30,
+             "final_eval_seed_base": 1000}
 
 # ROLLOUT strategies (the ONLY thing that differs across algorithms).
 # model_buffer_capacity is chosen so MACURA fills it (and thus reaches full adaptive UTD,
@@ -196,7 +229,10 @@ ROLLOUT = {
              "adaptive_gradient_steps": False, "fixed_gradient_steps": 8},  # matches SAC gradient_steps_max
     # M2AC: fixed length + mask least-trustworthy transitions. "ovr" = M2AC's own one-vs-rest
     # disagreement (paper-faithful); "gjs" = reuse MACURA's GJS (same-signal ablation).
-    "m2ac": {"t_max": 10, "mask_fraction": 0.5, "uncertainty_penalty": 1.0,
+    # uncertainty_penalty: with the corrected (non-negative KL) OvR the transitions M2AC keeps have u ~= 2
+    # in the normalised model space vs ~1.9 reward/step, so 1.0 would cancel the whole imagined reward;
+    # 0.1 makes it a mild ~10% pessimism. (The old 1.0 was set while the OvR was a negative "bonus".)
+    "m2ac": {"t_max": 10, "mask_fraction": 0.5, "uncertainty_penalty": 0.1,
              "uncertainty": "ovr", "fixed_gradient_steps": 8},  # matches SAC gradient_steps_max
     "sac": {},
 }

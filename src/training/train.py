@@ -25,6 +25,7 @@ Pure-function library. The notebook calls these.
 Public functions:
     train_one(algo_name, cfg, output_dir, seed)    -> run_dict (saves best ckpt only)
     train_algo(algo_name, cfg, output_dir, seeds)  -> [run_dict] over all seeds (reloads if logged)
+    load_runs(*output_dirs)                        -> [run_dict] merged from several Kaggle outputs
     evaluate(agent, env, eval_episodes)            -> metrics
     evaluate_best(cfg, output_dir, device, ...)    -> [{algo, seed, eval_*}]  (loads best)
 """
@@ -83,7 +84,8 @@ def evaluate(agent, env, eval_episodes: int, eval_seeds=None) -> dict:
     # crash-rate / ~±44 return sampling noise - which is what made the learning curve look wildly
     # unstable even when the policy was steady. Same base -> comparable across algos (fairness).
     base = int(eval_seeds[0]) if eval_seeds else 100
-    returns, lengths, failures, successes = [], [], [], []
+    returns, lengths, failures, successes, heavy = [], [], [], [], []
+    payload_max = float(getattr(env, "payload_max", 0.0))
     for i in range(eval_episodes):
         obs, _ = env.reset(seed=base + i)
         done = False
@@ -100,13 +102,19 @@ def evaluate(agent, env, eval_episodes: int, eval_seeds=None) -> dict:
         lengths.append(ep_len)
         failures.append(float(failed))
         successes.append(float(reached))
-    return {
+        heavy.append(payload_max > 0.0 and env.payload >= 0.5 * payload_max)
+    out = {
         "eval_return": float(np.mean(returns)),
         "eval_return_std": float(np.std(returns)),
         "eval_length": float(np.mean(lengths)),
         "eval_failure_rate": float(np.mean(failures)),   # crash rate
         "eval_success_rate": float(np.mean(successes)),  # reached-and-held rate
     }
+    if payload_max > 0.0:                                # delivery task: crash rate by package weight
+        f, h = np.array(failures), np.array(heavy, dtype=bool)
+        out["eval_failure_light"] = float(f[~h].mean()) if (~h).any() else float("nan")
+        out["eval_failure_heavy"] = float(f[h].mean()) if h.any() else float("nan")
+    return out
 
 
 # ── a single training run ─────────────────────────────────────────────────────
@@ -120,6 +128,8 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
     _seed_everything(seed)
 
     env, obs_dim, act_dim = env_mod.make_env(cfg["env"], seed=seed)
+    env.action_space.seed(seed)       # warm-up random actions: reproducible (was seeded from the OS -> every
+                                      # run started from different data, so a seed did not reproduce a run)
     eval_env, _, _ = env_mod.make_env(cfg["env"], seed=cfg["experiment"]["eval_seeds"][0])
     reward_fn = env_mod.known_reward_fn(cfg["env"])
     done_fn = env_mod.termination_fn(cfg["env"])
@@ -201,7 +211,8 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
                 log["base_uncertainty"].append((step, diag["base_uncertainty"]))
                 log["rollout_len_hist"] = diag["lengths"]        # latest round's truncation lengths
                 for k in ("unc_near", "unc_far", "trust_near", "trust_far",   # landing zone vs transit
-                          "untrusted_frac", "discarded_frac"):
+                          "unc_fast", "unc_slow", "trust_fast", "trust_slow",  # fast vs slow descent
+                          "untrusted_frac", "discarded_frac", "fast_frac"):
                     log[k].append((step, diag[k]))
             elif algo_name == "mbpo":
                 trans, diag = mbpo_mod.mbpo_rollout(
@@ -210,6 +221,7 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
                 num_updates = cfg["rollout"]["mbpo"]["fixed_gradient_steps"]
                 log["rollout_length"].append((step, diag["rollout_length"]))
                 log["untrusted_frac"].append((step, diag.get("untrusted_frac", float("nan"))))
+                log["fast_frac"].append((step, diag["fast_frac"]))
             else:  # m2ac
                 trans, diag = m2ac_mod.m2ac_rollout(
                     dynamics_model, agent, start, reward_fn, done_fn, cfg,
@@ -217,6 +229,7 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
                 num_updates = cfg["rollout"]["m2ac"]["fixed_gradient_steps"]
                 log["rollout_length"].append((step, cfg["rollout"]["m2ac"]["t_max"]))  # fixed horizon
                 log["untrusted_frac"].append((step, diag.get("untrusted_frac", float("nan"))))
+                log["fast_frac"].append((step, diag["fast_frac"]))
             _store_model_transitions(agent, trans)
             model_trained = True
 
@@ -240,6 +253,9 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
             log["eval_return_std"].append(m["eval_return_std"])
             log["eval_failure_rate"].append(m["eval_failure_rate"])
             log["eval_success_rate"].append(m["eval_success_rate"])
+            if "eval_failure_heavy" in m:                      # delivery task: crash by package weight
+                log["eval_failure_light"].append(m["eval_failure_light"])
+                log["eval_failure_heavy"].append(m["eval_failure_heavy"])
             improved = step >= start_step and m["eval_return"] > best_return
             if improved:                       # overwrite best checkpoint (policy + ensemble + meta)
                 best_return = m["eval_return"]
@@ -253,8 +269,9 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
         best_ckpt = _save_best(agent, dynamics_model, output_dir, run_name)
 
     # --- one larger final GREEDY eval on the reloaded best checkpoint → run summary ---
-    final_eval = _final_eval(agent, eval_env, best_ckpt, final_eval_episodes,
-                             cfg["experiment"]["eval_seeds"])
+    # on FRESH scenarios (final_eval_seed_base..), not the ones used to pick the best checkpoint:
+    # re-testing on the selection scenarios would overrate lucky, high-variance checkpoints.
+    final_eval = _final_eval(agent, eval_env, best_ckpt, final_eval_episodes, _final_seeds(cfg))
     meta = {"algo": algo_name, "seed": seed, "best_step": best_step,
             "best_return": float(best_return), "final_eval": final_eval}
     _save_meta(meta, output_dir, run_name)
@@ -291,6 +308,24 @@ def best_run(runs: list) -> dict:
     return max(runs, key=lambda r: r.get("best_return", -1e18))
 
 
+def load_runs(*output_dirs, algorithms=None) -> list:
+    """Merge the run logs of several (downloaded) Kaggle outputs, e.g. load_runs("out1/runs", "out2/runs")
+    when the seeds were split across commits. A (algo, seed) pair found twice is kept once (first dir
+    wins). Feed the result to the plots (IQM + bootstrap CIs over all seeds)."""
+    import glob
+    runs, seen = [], set()
+    for d in output_dirs:
+        for path in sorted(glob.glob(os.path.join(d, "logs", "*_seed*.json"))):
+            with open(path) as f:
+                r = json.load(f)
+            key = (r.get("algo"), r.get("seed"))
+            if key in seen or (algorithms and r.get("algo") not in algorithms):
+                continue
+            seen.add(key)
+            runs.append(r)
+    return runs
+
+
 # small internals
 def _empty_log():
     return {"steps": [], "eval_return": [], "eval_return_std": [],
@@ -304,7 +339,16 @@ def _empty_log():
             # WHY-diagnostic: share of the imagined data each method TRAINS on that is above MACURA's
             # trust threshold (MBPO/M2AC measured with the same rule; MACURA = 0 by construction),
             # and the share MACURA generated but threw away.
-            "untrusted_frac": [], "discarded_frac": []}
+            "untrusted_frac": [], "discarded_frac": [],
+            # delivery task: MACURA uncertainty/trust in FAST vs SLOW descents, the share of each method's
+            # imagined training data that is a fast descent, and eval crash rate by package weight
+            "unc_fast": [], "unc_slow": [], "trust_fast": [], "trust_slow": [], "fast_frac": [],
+            "eval_failure_light": [], "eval_failure_heavy": []}
+
+
+def _final_seeds(cfg):
+    """Base seed of the final-eval scenarios - separate from the selection scenarios (eval_seeds)."""
+    return [int(cfg.get("selection", {}).get("final_eval_seed_base", 1000))]
 
 
 def _final_eval(agent, eval_env, best_ckpt, eval_episodes, eval_seeds=None):
@@ -478,7 +522,6 @@ def evaluate_best(cfg: dict, output_dir: str, device: str = "cuda",
             if not os.path.exists(ck):
                 continue
             agent = SAC.load(ck, device=device)
-            out.append({"algo": algo, "seed": seed,
-                        **evaluate(agent, eval_env, n, cfg["experiment"]["eval_seeds"])})
+            out.append({"algo": algo, "seed": seed, **evaluate(agent, eval_env, n, _final_seeds(cfg))})
     eval_env.close()
     return out

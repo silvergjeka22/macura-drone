@@ -12,7 +12,7 @@ built to be MACURA's strongest honest case on the drone:
   * obstacles + a soft-landing envelope PUNISH that over-imagination with crashes.
 
 Pure-function library: this module only DEFINES things. Public entry points:
-  make_env(cfg, seed, render) -> (env, obs_dim(14 + 2*n_obstacles), act_dim(4))
+  make_env(cfg, seed, render) -> (env, obs_dim(14 + 2*n_obstacles [+1 payload]), act_dim(4))
   known_reward_fn(cfg) / termination_fn(cfg)   (analytic in (obs, action) - real == imagined)
 
 The wind and actuator noise live ONLY in the real env dynamics; the reward and termination
@@ -26,7 +26,8 @@ Observation (14 + 2*n_obstacles):
       qw, qx, qy, qz,                       # body orientation quaternion
       vx, vy, vz,                           # linear velocity
       wx, wy, wz,                           # angular velocity
-      o1_dx, o1_dy, o2_dx, o2_dy, ... ]     # each obstacle's xy position MINUS drone xy
+      o1_dx, o1_dy, o2_dx, o2_dy, ...,      # each obstacle's xy position MINUS drone xy
+      payload ]                             # DELIVERY task only: package mass / drone mass
 Action (4-dim): normalized thrust delta per rotor in [-1, 1] (0 = hover).
 """
 
@@ -128,6 +129,37 @@ def _cage_hit(obs, cage) -> np.ndarray:
     return (np.abs(dxy - radius) < margin) & (obs[:, _H] < height)
 
 
+_WINDSOCK_AT = (0.9, 0.3)        # windsock position relative to the pad (m), visual only
+
+
+def _add_windsock(root):
+    """Add a windsock (pole + striped sock) to the MJCF tree - VISUAL ONLY: two mocap bodies with
+    massless, non-colliding geoms. The videos point the sock along the gust (src/viz/scenery.py)."""
+    import xml.etree.ElementTree as ET
+    wb = root.find("worldbody")
+    pole = ET.SubElement(wb, "body", {"name": "windsock_pole", "mocap": "true", "pos": "0 0 0"})
+    ET.SubElement(pole, "geom", {"name": "windsock_pole_geom", "type": "cylinder", "size": "0.012 0.5",
+                                 "pos": "0 0 0.5", "mass": "0", "contype": "0", "conaffinity": "0",
+                                 "rgba": "0.75 0.75 0.78 1"})
+    sock = ET.SubElement(wb, "body", {"name": "windsock", "mocap": "true", "pos": "0 0 1"})
+    for i, (a, b, r, c) in enumerate(((0.0, 0.1, 0.040, "0.95 0.45 0.10 1"),
+                                      (0.1, 0.2, 0.034, "0.95 0.95 0.95 1"),
+                                      (0.2, 0.3, 0.028, "0.95 0.45 0.10 1"))):
+        ET.SubElement(sock, "geom", {"name": f"windsock_{i}", "type": "capsule", "size": f"{r}",
+                                     "fromto": f"{a} 0 0 {b} 0 0", "mass": "0", "contype": "0",
+                                     "conaffinity": "0", "rgba": c})
+
+
+def _lift_factor(descent, v_horiz, loss, v_on, v_full, v_escape) -> float:
+    """Thrust factor in a fast vertical descent (a simplified vortex-ring-state): 1 below `v_on` m/s of
+    descent, dropping smoothly to 1 - `loss` at `v_full`; flying sideways (`v_escape` m/s) clears it.
+    A deterministic function of the OBSERVED velocity, so the model can learn it - but only once the
+    drone has actually flown that fast (slow-descent data never shows it)."""
+    x = float(np.clip((descent - v_on) / max(v_full - v_on, 1e-6), 0.0, 1.0))
+    s = x * x * (3.0 - 2.0 * x)                                   # smoothstep 0..1
+    return 1.0 - loss * s * float(np.exp(-(v_horiz / max(v_escape, 1e-6)) ** 2))
+
+
 class DroneTargetEnv(gym.Env):
     """Quadrotor flying through wind + obstacles to land on a pad (Drone MJCF model)."""
 
@@ -214,11 +246,24 @@ class DroneTargetEnv(gym.Env):
         self.start_height = (float(cfg.get("start_height_min", 2.2)),
                              float(cfg.get("start_height_max", 2.6)))
         self.start_offset = float(cfg.get("start_offset", 1.0))   # max spawn distance from the pad (m)
+        # DELIVERY task (all off by default): spawn high above the pad, carry a package whose weight
+        # changes EVERY EPISODE and is in the observation, and lose thrust in a fast vertical descent.
+        # A heavy package leaves less spare thrust to brake, so the safe descent speed depends on it.
+        self.spawn_above = bool(cfg.get("spawn_above_pad", False)) or self.cage
+        self.payload_max = float(cfg.get("payload_max", 0.0))     # kg, uniform 0..max per episode; 0 = off
+        self.vrs_loss = float(cfg.get("vrs_loss", 0.0))           # max fraction of thrust lost; 0 = off
+        self.vrs_speed = float(cfg.get("vrs_speed", 0.8))         # descent speed where the loss starts (m/s)
+        self.vrs_full = float(cfg.get("vrs_full", 1.6))           # descent speed of the full loss (m/s)
+        self.vrs_escape = float(cfg.get("vrs_escape", 1.0))       # sideways speed that flies out of it (m/s)
+        self.payload = 0.0
+        self.thrust_eff = 1.0                                     # last step's lift factor (diagnostics/videos)
+        self.scenery = bool(cfg.get("scenery", False))            # windsock for the videos (visual only)
         self.rw = cfg["reward"]
         self.obs_scale = float(self.rw.get("obs_scale", cfg.get("obstacle_scale", 0.5)))
 
         scene = cfg.get("mjcf_scene") or _ASSET
-        if self.touchdown or self.cage:
+        spare_markers = self.n_obstacles < 4 and not self.cage     # column markers the task doesn't use
+        if self.touchdown or self.cage or self.payload_max > 0.0 or spare_markers or self.scenery:
             import xml.etree.ElementTree as ET
             root = ET.parse(scene).getroot()
             if self.touchdown:
@@ -251,25 +296,46 @@ class DroneTargetEnv(gym.Env):
                         "name": f"cage_hoop{i}", "type": "capsule", "size": "0.015",
                         "fromto": f"{x:.4f} {y:.4f} {hgt} {x2:.4f} {y2:.4f} {hgt}", "mass": "0",
                         "contype": "0", "conaffinity": "0", "rgba": "0.82 0.82 0.88 1"})
-            self.model = mujoco.MjModel.from_xml_string(ET.tostring(root, encoding="unicode"))
+            if spare_markers:
+                # drop the column markers this task doesn't place (they would float in the scene)
+                wb = root.find("worldbody")
+                for b in list(wb.findall("body")):
+                    name = b.get("name") or ""
+                    if name.startswith("obs") and int(name[3:]) >= self.n_obstacles:
+                        wb.remove(b)
+            if self.payload_max > 0.0:
+                # visual package under the drone (massless geom: the real mass is set on the body at
+                # every reset). Drawn at max size here; reset() shrinks it to the episode's weight.
+                core = next(b for b in root.iter("body") if b.get("name") == "core")
+                ET.SubElement(core, "geom", {
+                    "name": "package", "type": "box", "size": "0.04 0.04 0.024", "pos": "0 0 -0.054",
+                    "mass": "0", "contype": "0", "conaffinity": "0", "rgba": "0.72 0.52 0.30 1"})
+            if self.scenery:
+                _add_windsock(root)
+            self.mjcf_xml = ET.tostring(root, encoding="unicode")
+            self.model = mujoco.MjModel.from_xml_string(self.mjcf_xml)
         else:
+            with open(scene) as f:
+                self.mjcf_xml = f.read()
             self.model = mujoco.MjModel.from_xml_path(scene)
         self.data = mujoco.MjData(self.model)
         self.n_act = self.model.nu
 
         self._core_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "core")
         g = float(-self.model.opt.gravity[2])
-        self._hover = float(self.model.body_subtreemass[self._core_id]) * g / self.n_act
+        self._hover = float(self.model.body_subtreemass[self._core_id]) * g / self.n_act   # EMPTY drone
         self._ctrl_hi = float(self.model.actuator_ctrlrange[0][1])
+        self._mass0 = float(self.model.body_mass[self._core_id])
+        self._pkg = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "package")
 
         # mocap ids for the visual pad + obstacle markers (rendering only; guarded)
         self._mocap = {}
-        for name in ["pad", "cage"] + [f"obs{i}" for i in range(self.n_obstacles)]:
+        for name in ["pad", "cage", "windsock_pole", "windsock"] + [f"obs{i}" for i in range(self.n_obstacles)]:
             bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name)
             if bid >= 0 and self.model.body_mocapid[bid] >= 0:
                 self._mocap[name] = int(self.model.body_mocapid[bid])
 
-        obs_dim = 14 + 2 * self.n_obstacles
+        obs_dim = 14 + 2 * self.n_obstacles + (1 if self.payload_max > 0.0 else 0)
         self.observation_space = spaces.Box(-np.inf, np.inf, shape=(obs_dim,), dtype=np.float32)
         self.action_space = spaces.Box(-1.0, 1.0, shape=(self.n_act,), dtype=np.float32)
 
@@ -300,6 +366,8 @@ class DroneTargetEnv(gym.Env):
                 v[0], v[1], v[2], v[3], v[4], v[5]]
         for o in self._obstacles:
             base += [o[0] - pos[0], o[1] - pos[1]]          # obstacle xy relative to the drone
+        if self.payload_max > 0.0:
+            base.append(self.payload / self._mass0)         # package weight, visible to the agent
         return np.array(base, dtype=np.float32)
 
     def _place_obstacles(self):
@@ -329,6 +397,16 @@ class DroneTargetEnv(gym.Env):
     def reset(self, *, seed=None, options=None):
         if seed is not None:
             self._rng = np.random.default_rng(seed)
+        if self.payload_max > 0.0:                   # new package every episode (options can force one)
+            self.payload = (float(options["payload"]) if options and "payload" in options
+                            else float(self._rng.uniform(0.0, self.payload_max)))
+            self.model.body_mass[self._core_id] = self._mass0 + self.payload
+            mujoco.mj_setConst(self.model, self.data)          # refresh the derived mass constants
+            if self._pkg >= 0:                                  # visual size follows the weight
+                s = 0.015 + 0.025 * self.payload / self.payload_max
+                self.model.geom_size[self._pkg] = [s, s, 0.6 * s]
+                self.model.geom_pos[self._pkg] = [0.0, 0.0, -0.03 - 0.6 * s]
+        self.thrust_eff = 1.0
         mujoco.mj_resetData(self.model, self.data)
         self._step_count = 0
         self._wind = np.zeros(3)
@@ -358,7 +436,7 @@ class DroneTargetEnv(gym.Env):
             if np.linalg.norm(pad_xy) >= self.pad_min_dist:
                 break
         self._target = np.array([pad_xy[0], pad_xy[1], self.pad_z])
-        if self.cage:                          # spawn HIGH, above the cage, within start_offset of the pad
+        if self.spawn_above:                   # spawn HIGH above the pad (cage/delivery), within start_offset
             ang = self._rng.uniform(0.0, 2.0 * np.pi)
             rad = self._rng.uniform(0.0, self.start_offset)
             self.data.qpos[0:2] = self._target[:2] + rad * np.array([np.cos(ang), np.sin(ang)])
@@ -374,10 +452,16 @@ class DroneTargetEnv(gym.Env):
             if self.touchdown:                # solid platform spanning floor .. pad_height
                 self.data.mocap_pos[self._mocap["pad"]] = [self._target[0], self._target[1],
                                                            self.pad_height / 2.0]
+            elif self.spawn_above:            # cage/delivery: pad drawn ON the floor under the landing point
+                self.data.mocap_pos[self._mocap["pad"]] = [self._target[0], self._target[1], 0.0]
             else:
                 self.data.mocap_pos[self._mocap["pad"]] = self._target
         if "cage" in self._mocap:
             self.data.mocap_pos[self._mocap["cage"]] = [self._target[0], self._target[1], 0.0]
+        if "windsock_pole" in self._mocap:
+            x, y = self._target[0] + _WINDSOCK_AT[0], self._target[1] + _WINDSOCK_AT[1]
+            self.data.mocap_pos[self._mocap["windsock_pole"]] = [x, y, 0.0]
+            self.data.mocap_pos[self._mocap["windsock"]] = [x, y, 1.0]
         for i in range(self.n_obstacles):
             key = f"obs{i}"
             if key in self._mocap:
@@ -420,6 +504,11 @@ class DroneTargetEnv(gym.Env):
             thrust = thrust * (1.0 + self._rng.normal(0.0, self.act_noise, size=self.n_act))
         if self.ge_gain > 0.0:                                # ground effect: extra lift near the floor
             thrust = thrust * (1.0 + self.ge_gain * np.exp(-max(pos[2], 0.0) / max(self.ge_scale, 1e-6)))
+        if self.vrs_loss > 0.0:                               # lift loss in a fast vertical descent
+            v = self.data.qvel[0:3]
+            self.thrust_eff = _lift_factor(-float(v[2]), float(np.hypot(v[0], v[1])), self.vrs_loss,
+                                           self.vrs_speed, self.vrs_full, self.vrs_escape)
+            thrust = thrust * self.thrust_eff
         self.data.ctrl[:] = np.clip(thrust, 0.0, self._ctrl_hi)
 
         # wind = calm OU gusts everywhere + choppy OU turbulence weighted by the landing zone
@@ -461,7 +550,8 @@ class DroneTargetEnv(gym.Env):
 
         terminated = crashed
         truncated = self._step_count >= self.max_episode_steps
-        info = {"failure": bool(crashed), "dist": dist, "up_z": up_z, "reached": landed}
+        info = {"failure": bool(crashed), "dist": dist, "up_z": up_z, "reached": landed,
+                "thrust_eff": self.thrust_eff, "payload": self.payload}
         return obs, reward, terminated, truncated, info
 
     def _nearest_obstacle(self, obs) -> float:

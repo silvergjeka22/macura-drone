@@ -140,6 +140,11 @@ def train_ensemble(ens: dict, data: dict, cfg: dict):
     xn = ens["normalizer"](x)
     ens["target_normalizer"].fit(y)                 # normalize targets (scale-balanced GJS)
     yn = ens["target_normalizer"](y)
+    # STATIC obs dims (never change within an episode, e.g. the delivery task's package weight) have no
+    # dynamics to predict: they are held fixed in rollouts and left out of the uncertainty, otherwise a
+    # zero-variance target turns tiny mean wiggles into a huge, meaningless GJS. None in the other tasks.
+    dyn = y.std(0) > 0.0
+    ens["dynamic"] = None if bool(dyn.all()) else dyn
 
     n, E = xn.shape[0], len(model.members)
     bs = min(cfg["batch_size"], n)
@@ -181,6 +186,9 @@ def predict(ens: dict, obs: np.ndarray, act: np.ndarray):
     delta_n = mean + std * torch.randn_like(std)    # sample in normalized target space
     tn = ens["target_normalizer"]
     next_obs = obs_t + (tn.mean + tn.std * delta_n)  # un-normalize the delta
+    dyn = ens.get("dynamic")
+    if dyn is not None:                             # static dims stay exactly as they are
+        next_obs[:, ~dyn] = obs_t[:, ~dyn]
     return next_obs.cpu().numpy()
 
 
@@ -205,6 +213,9 @@ def member_gaussians(ens: dict, obs: np.ndarray, act: np.ndarray,
             tn = ens["target_normalizer"]
             means = tn.mean + tn.std * means
             logvars = logvars + 2.0 * torch.log(tn.std)
+        dyn = ens.get("dynamic")
+        if dyn is not None:                         # uncertainty only over dims that actually evolve
+            means, logvars = means[..., dyn], logvars[..., dyn]
     return means.cpu().numpy(), np.exp(logvars.cpu().numpy())
 
 
@@ -219,6 +230,7 @@ def save_ensemble(ens: dict, path: str):
             "norm_std": norm.std.detach().cpu(),
             "tnorm_mean": tnorm.mean.detach().cpu(),
             "tnorm_std": tnorm.std.detach().cpu(),
+            "dynamic": None if ens.get("dynamic") is None else ens["dynamic"].detach().cpu(),
         },
         path,
     )
@@ -234,6 +246,8 @@ def load_ensemble(ens: dict, path: str):
     if "tnorm_mean" in ckpt:                        # older checkpoints: identity target norm
         ens["target_normalizer"].mean = ckpt["tnorm_mean"].to(ens["device"])
         ens["target_normalizer"].std = ckpt["tnorm_std"].to(ens["device"])
+    if ckpt.get("dynamic") is not None:
+        ens["dynamic"] = ckpt["dynamic"].to(ens["device"])
     return ens
 
 

@@ -7,7 +7,7 @@ penalty proportional to uncertainty.
 
 Same SAC backbone + ensemble as MACURA/MBPO. The per-transition uncertainty is
 M2AC's own ONE-VS-REST (OvR) disagreement (`ovr_uncertainty` — Pan et al. 2020):
-each ensemble member's prediction scored by the NLL under every OTHER member. Set
+the KL divergence of each member's prediction from the (moment-matched) rest. Set
 `rollout.m2ac.uncertainty = "gjs"` to instead reuse MACURA's GJS signal (a
 controlled "masking vs truncation with the SAME uncertainty" ablation).
 
@@ -19,32 +19,32 @@ from __future__ import annotations
 import numpy as np
 
 from src.models import ensemble as ens
-from src.algorithms.macura import compute_gjs, trust_threshold
+from src.algorithms.macura import compute_gjs, trust_threshold, fast_share, fast_threshold
 
 
 def ovr_uncertainty(means: np.ndarray, variances: np.ndarray) -> np.ndarray:
     """M2AC one-vs-rest (OvR) disagreement (Pan et al., 2020).
 
-    means, variances: (num_members, batch, obs_dim). For every ordered member pair
-    (i, j), i != j, take the Gaussian NLL of member i's mean prediction under member
-    j's predictive Gaussian, and average over all pairs -> (batch,). It is large when
-    a member's prediction is unlikely under the "rest", i.e. the ensemble disagrees
-    relative to its own confidence. (The constant 0.5*D*log(2*pi) offset is dropped:
-    it does not affect the mask ranking or a proportional penalty.)
+    means, variances: (num_members, batch, obs_dim). For each member i, the "rest" (all other
+    members) is summarised by one moment-matched Gaussian, and the uncertainty is
+    KL( N_i || N_rest ), averaged over i -> (batch,). A KL divergence is never negative: it is 0
+    when the members agree and grows as member i's prediction becomes unlikely under the rest.
+
+    (Before 2026-09-23 this was a pairwise NLL that kept the log-variance term: in the normalised
+    delta space that term is strongly negative (~-30), so M2AC's "penalty" r - u was really a ~+30
+    BONUS per imagined step - not M2AC.)
     """
     eps = 1e-12
     E = means.shape[0]
-    batch = means.shape[1]
     var = np.maximum(variances, eps)
-    total = np.zeros(batch)
-    pairs = 0
+    total = np.zeros(means.shape[1])
     for i in range(E):
-        for j in range(E):
-            if i == j:
-                continue
-            total += 0.5 * np.sum(np.log(var[j]) + (means[i] - means[j]) ** 2 / var[j], axis=-1)
-            pairs += 1
-    return total / max(pairs, 1)
+        rest = [j for j in range(E) if j != i]
+        mu_r = means[rest].mean(axis=0)
+        var_r = np.maximum((var[rest] + means[rest] ** 2).mean(axis=0) - mu_r ** 2, eps)
+        total += 0.5 * np.sum(np.log(var_r / var[i]) + (var[i] + (means[i] - mu_r) ** 2) / var_r - 1.0,
+                              axis=-1)
+    return total / E
 
 
 def m2ac_rollout(dynamics_model, agent, start_obs: np.ndarray,
@@ -103,7 +103,8 @@ def m2ac_rollout(dynamics_model, agent, start_obs: np.ndarray,
         obs_all[keep_idx], act_all[keep_idx], rew_all[keep_idx],
         nxt_all[keep_idx], done_all[keep_idx],
     )]
-    diag = {"kept_fraction": n_keep / len(u_all)}
+    diag = {"kept_fraction": n_keep / len(u_all),
+            "fast_frac": fast_share(transitions, fast_threshold(cfg))}
     if diag_state is not None:
         g_all = np.concatenate([r[6] for r in raw])
         diag["untrusted_frac"] = float(np.mean(g_all[keep_idx] >= kappa))

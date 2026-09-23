@@ -17,7 +17,7 @@ from __future__ import annotations
 import numpy as np
 
 from src.models import ensemble as ens
-from src.algorithms.macura import compute_gjs, trust_threshold   # diagnostic only
+from src.algorithms.macura import compute_gjs, trust_threshold, fast_share, fast_threshold  # diagnostics
 
 
 def rollout_length(env_step: int, schedule) -> int:
@@ -73,7 +73,7 @@ def mbpo_rollout(dynamics_model, agent, start_obs: np.ndarray,
         alive = alive & (~done)
         obs = next_obs
 
-    diag = {"rollout_length": horizon}
+    diag = {"rollout_length": horizon, "fast_frac": fast_share(transitions, fast_threshold(cfg))}
     if diag_state is not None:
         diag["untrusted_frac"] = n_untrusted / n_stored if n_stored else float("nan")
     return transitions, diag

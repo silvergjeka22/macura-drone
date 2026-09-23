@@ -49,6 +49,10 @@ def record_env_video(env, save_path, seconds=8, fps=30, policy="random", seed=0,
     if policy == "autopilot":                          # hand-coded controller, NOT a learned policy
         from src.envs.autopilot import Autopilot
         pilot = Autopilot(env)
+    deco = None
+    if getattr(env, "scenery", False):                 # delivery scenery: windsock + red-when-losing-thrust
+        from src.viz import scenery
+        deco = scenery.scenery_ids(m)
     for _ in range(int(seconds * fps)):
         if pilot is not None:
             act = pilot.act()
@@ -59,6 +63,8 @@ def record_env_video(env, save_path, seconds=8, fps=30, policy="random", seed=0,
         else:
             act = policy(obs)
         obs, _, terminated, truncated, _ = env.step(act)
+        if deco is not None:
+            scenery.decorate(m, d, deco, env._wind, env.thrust_eff)
         cam.lookat[:] = d.xpos[1]                 # follow the main body's world position (any env)
         r.update_scene(d, camera=cam)
         frames.append(r.render())
@@ -252,12 +258,22 @@ def plot_uncertainty(macura_runs, save_path=None):
     return fig
 
 
-def plot_trust_by_zone(macura_runs, save_path=None):
+def plot_trust_by_zone(macura_runs, save_path=None, split="zone"):
     """Where does MACURA stop trusting its model? Left: mean model uncertainty (GJS) of imagined states
-    near the pad (inside `turb_radius`, i.e. the ring + gap) vs in transit. Right: fraction of imagined
-    steps MACURA kept (trusted) in each region. Lower trust near the pad = MACURA is cutting exactly the
-    imagined landings a fixed-horizon method (MBPO) would still train on."""
+    in two regions; right: fraction of imagined steps MACURA kept (trusted) in each.
+    split="zone":    near the pad (inside `turb_radius`) vs in transit (ring / cage tasks);
+    split="descent": FAST vs SLOW descent (delivery task: the lift loss starts at `vrs_speed`).
+    Lower trust in the risky region = MACURA is cutting exactly the imagined steps a fixed-horizon method
+    (MBPO) would still train on."""
     run_list = macura_runs if isinstance(macura_runs, list) else [macura_runs]
+    if split == "descent":
+        pairs = (("unc_fast", "unc_slow"), ("trust_fast", "trust_slow"))
+        names = ("fast descent (lift loss)", "slow descent")
+        title = "MACURA: uncertainty and trust, fast vs slow descent"
+    else:
+        pairs = (("unc_near", "unc_far"), ("trust_near", "trust_far"))
+        names = ("near the pad", "transit")
+        title = "MACURA: uncertainty and trust, near the pad vs in transit"
 
     def _nan_series(key):
         series = [np.asarray(r[key], dtype=float) for r in run_list if r.get(key)]
@@ -272,20 +288,17 @@ def plot_trust_by_zone(macura_runs, save_path=None):
             return steps, np.nanmean(vals, axis=0)
 
     fig, ax = plt.subplots(1, 2, figsize=(13, 4.6))
-    panels = ((ax[0], ("unc_near", "unc_far"), "model uncertainty (GJS)",
-               "How unsure the model is"),
-              (ax[1], ("trust_near", "trust_far"), "fraction of imagined steps trusted",
-               "Where MACURA trusts its model"))
-    for a, (kn, kf), ylab, title in panels:
-        for key, color, lab in ((kn, "#d62728", "near the pad (ring + gap)"),
-                                (kf, "#1f77b4", "transit")):
+    panels = ((ax[0], pairs[0], "model uncertainty (GJS)", "How unsure the model is"),
+              (ax[1], pairs[1], "fraction of imagined steps trusted", "Where MACURA trusts its model"))
+    for a, (kn, kf), ylab, sub in panels:
+        for key, color, lab in ((kn, "#d62728", names[0]), (kf, "#1f77b4", names[1])):
             steps, m = _nan_series(key)
             if steps is not None:
                 a.plot(steps, m, color=color, lw=2, label=lab)
-        a.set_xlabel("real environment steps"); a.set_ylabel(ylab); a.set_title(title)
+        a.set_xlabel("real environment steps"); a.set_ylabel(ylab); a.set_title(sub)
         a.grid(alpha=0.3); a.legend()
     ax[1].set_ylim(-0.02, 1.02)
-    fig.suptitle("MACURA: uncertainty and trust, near the pad vs in transit", fontsize=13)
+    fig.suptitle(title, fontsize=13)
     fig.tight_layout(rect=(0, 0, 1, 0.94))
     _maybe_save(fig, save_path)
     return fig
@@ -347,6 +360,49 @@ def plot_untrusted_data(runs, save_path=None):
     fig.suptitle("How much untrustworthy imagined data each method learns from "
                  "(above MACURA's trust threshold)", fontsize=12)
     fig.tight_layout(rect=(0, 0, 1, 0.94))
+    _maybe_save(fig, save_path)
+    return fig
+
+
+def plot_fast_data(runs, save_path=None):
+    """Delivery task, the second WHY plot: share of the imagined data each model-based method TRAINS on
+    that is a FAST descent - the region where the lift loss makes the model wrong. A fixed-horizon method
+    (MBPO) keeps training on imagined fast descents; MACURA stops imagining where its members disagree."""
+    import warnings
+    fig, ax = plt.subplots(figsize=(7.5, 4.8))
+    for algo, run_list in _group_by_algo(runs).items():
+        series = [np.asarray(r["fast_frac"], dtype=float) for r in run_list if r.get("fast_frac")]
+        if not series:
+            continue
+        n = min(len(s) for s in series)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            m = np.nanmean(np.stack([s[:n, 1] for s in series]), axis=0)
+        ax.plot(series[0][:n, 0], 100 * m, color=_color(algo), lw=2, label=algo.upper())
+    ax.set_xlabel("real environment steps"); ax.set_ylabel("% of imagined training data")
+    ax.set_title("Imagined FAST descents each method trains on"); ax.grid(alpha=0.3); ax.legend()
+    _maybe_save(fig, save_path)
+    return fig
+
+
+def plot_crash_by_payload(runs, save_path=None):
+    """Delivery task: crash rate of each method's best checkpoint (final eval, fresh scenarios) with a
+    LIGHT vs a HEAVY package (split at half the max weight). Mean over seeds, +/- std when >1 seed.
+    Where the model is wrong (fast + heavy) is where over-trusting it should cost the most."""
+    by = _group_by_algo(runs)
+    order = [a for a in ["macura", "mbpo", "m2ac", "sac"] if a in by]
+    fig, ax = plt.subplots(figsize=(7.5, 4.6))
+    xs = np.arange(len(order))
+    for off, key, lab, hatch in ((-0.18, "eval_failure_light", "light package", ""),
+                                 (0.18, "eval_failure_heavy", "heavy package", "//")):
+        vals = [[r["final_eval"].get(key, np.nan) for r in by[a] if r.get("final_eval")] for a in order]
+        m = [np.nanmean(v) if v else np.nan for v in vals]
+        s = [np.nanstd(v) if len(v) > 1 else 0.0 for v in vals]
+        ax.bar(xs + off, m, 0.34, yerr=s, capsize=4, color=[_color(a) for a in order], hatch=hatch,
+               edgecolor="white", label=lab)
+    ax.set_xticks(xs); ax.set_xticklabels([a.upper() for a in order]); ax.set_ylim(0, 1.05)
+    ax.set_ylabel("crash rate (final eval)"); ax.set_title("Crashes with a light vs a heavy package")
+    ax.legend(); ax.grid(alpha=0.3, axis="y")
     _maybe_save(fig, save_path)
     return fig
 
@@ -436,7 +492,7 @@ def plot_overview(runs, save_path=None):
     ax.set_xlabel("real environment steps"); ax.set_ylabel("imagined rollout length")
     ax.set_title("How far each method trusts the model"); ax.grid(alpha=0.3); ax.legend(fontsize=8)
 
-    fig.suptitle("MACURA vs MBPO vs M2AC vs SAC -- drone ring landing", fontsize=14)
+    fig.suptitle("MACURA vs MBPO vs M2AC vs SAC -- drone landing", fontsize=14)
     fig.tight_layout(rect=(0, 0, 1, 0.98))
     _maybe_save(fig, save_path)
     return fig
@@ -569,7 +625,7 @@ def record_policy_video(ckpt_path, cfg, save_path, seconds=60, seed=999, label=N
     strongest runs) - the scientific claim still comes from the aggregate plots, not the video."""
     import tempfile
     try:
-        eps = _policy_episodes(ckpt_path, cfg["env"], int(n_candidates), seed, device)
+        eps, mjcf_xml = _policy_episodes(ckpt_path, cfg["env"], int(n_candidates), seed, device)
     except Exception as e:
         print("policy rollout failed:", e)
         return None
@@ -579,7 +635,7 @@ def record_policy_video(ckpt_path, cfg, save_path, seconds=60, seed=999, label=N
     # rank best-first: landed > not-crashed > higher return > longer (steadier)
     eps.sort(key=lambda e: (e["reached"], not e["crashed"], e["ret"], e["len"]), reverse=True)
     target = int(seconds * fps)
-    qpos, mocap, labels = [], [], []
+    qpos, mocap, pkg, labels = [], [], [], []
     shown = 0
     n_land = sum(e["reached"] for e in eps)
     for e in eps:
@@ -589,19 +645,23 @@ def record_policy_video(ckpt_path, cfg, save_path, seconds=60, seed=999, label=N
         outcome = "LANDED ✓" if e["reached"] else ("crash ✗" if e["crashed"] else "hover")
         tag = f"{(label + ' | ') if label else ''}clip {shown}: {outcome}  (return {e['ret']:.0f})"
         for k in range(e["len"]):
-            qpos.append(e["qpos"][k]); mocap.append(e["mocap"][k]); labels.append(tag)
+            qpos.append(e["qpos"][k]); mocap.append(e["mocap"][k]); pkg.append(e["pkg"])
+            labels.append(tag)
     print(f"  {label or 'policy'}: {n_land}/{len(eps)} episodes landed; showing best {shown} "
           f"({len(qpos)} frames ~ {len(qpos)/fps:.0f}s)")
     frames_file = tempfile.mktemp(suffix=".npz")
-    np.savez(frames_file, qpos=np.array(qpos), mocap=np.array(mocap),
+    np.savez(frames_file, qpos=np.array(qpos), mocap=np.array(mocap), pkg=np.array(pkg),
              labels=np.array(labels, dtype=object))
-    return _render_trajectory_subprocess(frames_file, save_path, int(fps), label or "")
+    asset = tempfile.mktemp(suffix=".xml")          # render the SAME scene the env built (cage, package...)
+    with open(asset, "w") as f:
+        f.write(mjcf_xml)
+    return _render_trajectory_subprocess(frames_file, save_path, int(fps), label or "", asset=asset)
 
 
 def _policy_episodes(ckpt_path, env_cfg, n_episodes, seed, device):
-    """Run the trained policy (deterministic) for `n_episodes` FULL episodes; return a list of
-    per-episode dicts {qpos, mocap, ret, len, reached, crashed, fps}. No graphics here, so SB3 and
-    MuJoCo coexist safely. Each episode uses a distinct seed for variety."""
+    """Run the trained policy (deterministic) for `n_episodes` FULL episodes; return (a list of
+    per-episode dicts {qpos, mocap, pkg, ret, len, reached, crashed, fps}, the env's MJCF xml). No
+    graphics here, so SB3 and MuJoCo coexist safely. Each episode uses a distinct seed for variety."""
     from stable_baselines3 import SAC
     from src.envs import drone_env
     env, _, _ = drone_env.make_env(env_cfg, seed=seed, render=False)
@@ -621,10 +681,12 @@ def _policy_episodes(ckpt_path, env_cfg, n_episodes, seed, device):
             reached = reached or info.get("reached", False)
             crashed = crashed or info.get("failure", False)
             done = term or trunc
-        eps.append({"qpos": np.array(qpos), "mocap": np.array(mocap), "ret": ret,
+        pkg = (np.r_[env.model.geom_size[env._pkg], env.model.geom_pos[env._pkg]]
+               if env._pkg >= 0 else np.zeros(6))            # package box size + offset (delivery task)
+        eps.append({"qpos": np.array(qpos), "mocap": np.array(mocap), "pkg": pkg, "ret": ret,
                     "len": len(qpos), "reached": reached, "crashed": crashed, "fps": fps})
     env.close()
-    return eps
+    return eps, env.mjcf_xml
 
 
 # child script: renders a saved pose trajectory. Imports ONLY mujoco (never torch/SB3), so
@@ -636,9 +698,11 @@ import numpy as np, mujoco, imageio
 d = np.load("%(frames)s", allow_pickle=True)
 qpos, mocap = d["qpos"], d["mocap"]
 labels = d["labels"] if "labels" in d.files else None
+pkg = d["pkg"] if "pkg" in d.files else None
 fallback = "%(label)s"
 m = mujoco.MjModel.from_xml_path("%(asset)s")
 data = mujoco.MjData(m)
+pkg_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, "package")
 r = mujoco.Renderer(m, height=480, width=640)
 cam = mujoco.MjvCamera(); cam.type = mujoco.mjtCamera.mjCAMERA_FREE
 cam.distance, cam.elevation, cam.azimuth = 5.2, -22.0, 90.0
@@ -653,6 +717,8 @@ for i in range(len(qpos)):
     data.qpos[:] = qpos[i]
     if mocap.shape[1] > 0:
         data.mocap_pos[:] = mocap[i]
+    if pkg is not None and pkg_id >= 0:
+        m.geom_size[pkg_id] = pkg[i][:3]; m.geom_pos[pkg_id] = pkg[i][3:]
     mujoco.mj_forward(m, data)
     tgt = data.xpos[1]
     lookat = tgt.copy() if lookat is None else 0.90 * lookat + 0.10 * tgt   # smooth follow
@@ -672,13 +738,14 @@ print("OK")
 '''
 
 
-def _render_trajectory_subprocess(frames_file, save_path, fps, label, backend=None):
+def _render_trajectory_subprocess(frames_file, save_path, fps, label, backend=None, asset=None):
     """Render a saved pose trajectory to mp4 in a mujoco-only subprocess (osmesa on a headless
-    box, glfw locally). Returns save_path, or None if it could not render."""
+    box, glfw locally). `asset` = the MJCF the env actually built (defaults to the bundled drone.xml).
+    Returns save_path, or None if it could not render."""
     import subprocess
     import sys
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    asset = os.path.join(root, "src", "envs", "assets", "drone.xml")
+    asset = asset or os.path.join(root, "src", "envs", "assets", "drone.xml")
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
     backend = backend or ("osmesa" if os.path.isdir("/kaggle") else "glfw")
     child = _RENDER_CHILD % dict(backend=backend, frames=frames_file, asset=asset,
@@ -693,6 +760,175 @@ def _render_trajectory_subprocess(frames_file, save_path, fps, label, backend=No
     except Exception as e:
         print("policy-video render error:", e)
         return None
+
+
+# ── race video: several pilots on the SAME scenarios, side by side, with a scoreboard ─────────────
+def record_race_video(cfg, pilots, save_path, seeds=(100, 101, 102, 103), device="cpu", text=None,
+                      fps=25):
+    """Fly each pilot on the SAME scenarios (same reset seed -> same package, spawn and wind gusts) and
+    render them side by side with a running scoreboard - e.g. MACURA vs MBPO. `pilots` maps a label to
+    an SB3 checkpoint .zip, or to "autopilot:<descent m/s>" for the hand-written controller (NOT a
+    learned policy). Rollouts run here without graphics; the video is drawn in a mujoco-only subprocess
+    (safe next to torch on a headless box). Delivery scenery: windsock follows the gusts, the drone turns
+    red while it loses thrust, the trail is green (full thrust) -> red. `text` overrides the captions.
+    Returns save_path, or None."""
+    import pickle
+    import subprocess
+    import sys
+    import tempfile
+    words = {"package": "package {p:.2f} kg", "status": "descent {v:.1f} m/s   thrust {e:.0f}%",
+             "score": "delivered {d}/{n}   crashes {c}",
+             "landed": "LANDED", "crash": "CRASH", "timeout": "TIME UP"}
+    words.update(text or {})
+    runs, xml = {}, None
+    for label, pilot in pilots.items():
+        try:
+            runs[label], xml = _race_rollouts(cfg["env"], pilot, seeds, device)
+        except Exception as e:
+            print(f"race rollout failed for {label}:", e)
+            return None
+    data_file, asset = tempfile.mktemp(suffix=".pkl"), tempfile.mktemp(suffix=".xml")
+    with open(data_file, "wb") as f:
+        pickle.dump({"runs": runs, "labels": list(pilots), "words": words, "fps": int(fps)}, f)
+    with open(asset, "w") as f:
+        f.write(xml)
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+    backend = "osmesa" if os.path.isdir("/kaggle") else "glfw"
+    child = _RACE_CHILD % dict(backend=backend, root=root, data=data_file, asset=asset, out=save_path)
+    try:
+        res = subprocess.run([sys.executable, "-c", child], capture_output=True, text=True, timeout=900)
+        if res.returncode == 0 and os.path.exists(save_path):
+            for label in pilots:
+                o = [e["outcome"] for e in runs[label]]
+                print(f"  {label}: landed {o.count('landed')}/{len(o)}, crashed {o.count('crash')}")
+            return save_path
+        print("race video render failed:", (res.stderr or "")[-600:])
+    except Exception as e:
+        print("race video render error:", e)
+    return None
+
+
+def _race_rollouts(env_cfg, pilot, seeds, device):
+    """One pilot over the given scenarios, no graphics. Records what the video needs per frame (pose,
+    markers, gust, lift factor, vertical speed) and each episode's package + outcome. Episodes stop at a
+    crash, 0.8 s after landing, or at the time limit. Returns (episodes, the env's MJCF xml)."""
+    from src.envs import drone_env
+    from src.envs.autopilot import Autopilot
+    env, _, _ = drone_env.make_env(env_cfg, seed=0, render=False)
+    agent, descent = None, 0.55
+    if str(pilot).startswith("autopilot"):
+        descent = float(str(pilot).split(":")[1]) if ":" in str(pilot) else descent
+    else:
+        from stable_baselines3 import SAC
+        agent = SAC.load(pilot, device=device)
+    eps = []
+    for s in seeds:
+        obs, _ = env.reset(seed=int(s))
+        auto = Autopilot(env, descent=descent) if agent is None else None
+        fr = {"qpos": [], "mocap": [], "wind": [], "eff": [], "vz": []}
+        outcome, stop = "timeout", None
+        for t in range(env.max_episode_steps):
+            act = (auto.act() if agent is None
+                   else agent.predict(np.asarray(obs, np.float32), deterministic=True)[0])
+            obs, _, term, trunc, info = env.step(act)
+            fr["qpos"].append(np.array(env.data.qpos)); fr["mocap"].append(np.array(env.data.mocap_pos))
+            fr["wind"].append(np.array(env._wind)); fr["eff"].append(float(env.thrust_eff))
+            fr["vz"].append(float(obs[10]))
+            if info["reached"] and stop is None:
+                outcome, stop = "landed", t + 40
+            if term:
+                outcome = "crash"
+                break
+            if trunc or (stop is not None and t >= stop):
+                break
+        pkg = (np.r_[env.model.geom_size[env._pkg], env.model.geom_pos[env._pkg]]
+               if env._pkg >= 0 else None)
+        eps.append({**{k: np.array(v) for k, v in fr.items()}, "pkg": pkg, "outcome": outcome,
+                    "payload": float(env.payload)})
+    xml = env.mjcf_xml
+    env.close()
+    return eps, xml
+
+
+# child script for the race video: imports ONLY mujoco/numpy/imageio/PIL + src.viz.scenery (no torch/SB3)
+_RACE_CHILD = '''
+import os, sys, pickle
+os.environ["MUJOCO_GL"] = "%(backend)s"
+sys.path.insert(0, "%(root)s")
+import numpy as np, mujoco, imageio
+from PIL import Image, ImageDraw, ImageFont
+from src.viz import scenery
+d = pickle.load(open("%(data)s", "rb"))
+m = mujoco.MjModel.from_xml_path("%(asset)s"); data = mujoco.MjData(m)
+W, H, BAR = 480, 360, 40
+r = mujoco.Renderer(m, height=H, width=W)
+ids = scenery.scenery_ids(m)
+pkg_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, "package")
+def font(size):
+    for p in ("/System/Library/Fonts/Supplemental/Arial.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+              "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"):
+        if os.path.exists(p):
+            return ImageFont.truetype(p, size)
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
+big, small = font(19), font(15)
+labels, runs, words = d["labels"], d["runs"], d["words"]
+COL = {"landed": (90, 220, 120), "crash": (255, 80, 60), "timeout": (230, 200, 90)}
+score = {k: {"d": 0, "c": 0, "n": 0} for k in labels}
+w = imageio.get_writer("%(out)s", fps=d["fps"], macro_block_size=16)
+for sc in range(len(runs[labels[0]])):
+    eps = {k: runs[k][sc] for k in labels}
+    T = max(len(e["qpos"]) for e in eps.values())
+    cams, looks, trails, done = {}, {}, {k: [] for k in labels}, {k: False for k in labels}
+    for k in labels:
+        cams[k] = mujoco.MjvCamera(); cams[k].type = mujoco.mjtCamera.mjCAMERA_FREE
+        cams[k].distance, cams[k].elevation, cams[k].azimuth = 2.4, -14.0, 90.0
+        looks[k] = None
+    for n_i, i in enumerate(list(range(0, T, 2)) + [T - 1] * int(d["fps"] * 1.2)):
+        tiles = []
+        for k in labels:
+            ep = eps[k]; L = len(ep["qpos"]); j = min(i, L - 1)
+            if i < L and (not trails[k] or trails[k][-1][2] != i):
+                trails[k].append((ep["qpos"][i][0:3].copy(), scenery.trail_color(ep["eff"][i]), i))
+            if j == L - 1 and not done[k]:
+                done[k] = True; s = score[k]; s["n"] += 1
+                s["d"] += ep["outcome"] == "landed"; s["c"] += ep["outcome"] == "crash"
+            data.qpos[:] = ep["qpos"][j]; data.mocap_pos[:] = ep["mocap"][j]
+            if pkg_id >= 0 and ep["pkg"] is not None:
+                m.geom_size[pkg_id] = ep["pkg"][:3]; m.geom_pos[pkg_id] = ep["pkg"][3:]
+            scenery.decorate(m, data, ids, ep["wind"][j], ep["eff"][j])
+            mujoco.mj_forward(m, data)
+            tgt = data.qpos[0:3].copy(); tgt[2] = max(tgt[2] * 0.8, 0.45)
+            looks[k] = tgt if looks[k] is None else 0.9 * looks[k] + 0.1 * tgt
+            cams[k].lookat[:] = looks[k]
+            r.update_scene(data, camera=cams[k])
+            scenery.add_trail(r.scene, [p for p, _, _ in trails[k]], [c for _, c, _ in trails[k]])
+            im = Image.fromarray(r.render()); dr = ImageDraw.Draw(im)
+            dr.rectangle([0, 0, W, 50], fill=(0, 0, 0))
+            dr.text((8, 3), k + "   " + words["package"].format(p=ep["payload"]), font=big, fill=(255, 255, 255))
+            eff = ep["eff"][j]
+            dr.text((8, 28), words["status"].format(v=max(-ep["vz"][j], 0.0), e=100 * eff), font=small,
+                    fill=(255, 255, 255) if eff > 0.97 else (255, 120, 80))
+            if j == L - 1:
+                txt = words[ep["outcome"]]
+                dr.rectangle([W // 2 - 90, H - 52, W // 2 + 90, H - 12], fill=(0, 0, 0))
+                dr.text((W // 2 - 80, H - 46), txt, font=big, fill=COL[ep["outcome"]])
+            tiles.append(np.asarray(im))
+        canvas = np.concatenate(tiles, axis=1)
+        bar = Image.new("RGB", (canvas.shape[1], BAR), (22, 22, 28)); db = ImageDraw.Draw(bar)
+        for n_k, k in enumerate(labels):
+            s = score[k]
+            db.text((n_k * W + 10, 9), words["score"].format(d=s["d"], n=s["n"], c=s["c"]), font=big,
+                    fill=(255, 255, 255))
+        for n_k in range(1, len(labels)):
+            canvas[:, n_k * W - 1:n_k * W + 1] = 255
+        w.append_data(np.concatenate([canvas, np.asarray(bar)], axis=0))
+w.close()
+print("OK")
+'''
 
 
 def _pad16(frame):
@@ -798,7 +1034,7 @@ def plot_env_layout(cfg, seeds=(0, 1, 2, 3), save_path=None):
             ax.add_patch(mpatches.Circle(pad, cr - cm, color="white", zorder=1))
             ax.add_patch(mpatches.Circle(pad, cr, fill=False, color="#555555", lw=2, zorder=2))
         ax.add_patch(mpatches.Circle(start, 0.13, color="#1f77b4", zorder=3))
-        ax.annotate(f"start ({env.data.qpos[2]:.1f} m high)" if getattr(env, "cage", False) else "start",
+        ax.annotate(f"start ({env.data.qpos[2]:.1f} m high)" if getattr(env, "spawn_above", False) else "start",
                     start, color="#1f77b4", fontsize=8, ha="center", va="top",
                     xytext=(start[0], start[1] - 0.3), textcoords="data")
         tr = float(ec.get("turb_radius", 0.0))
@@ -815,20 +1051,61 @@ def plot_env_layout(cfg, seeds=(0, 1, 2, 3), save_path=None):
             ax.add_patch(mpatches.Circle(o, orad, color="#d62728", alpha=0.55, zorder=2))
         ax.plot([start[0], pad[0]], [start[1], pad[1]], "k--", lw=0.9, alpha=0.5, zorder=0)  # approach
         ax.set_aspect("equal"); ax.grid(alpha=0.3)
-        ax.set_title(f"reset seed {sd}", fontsize=10)
-        if getattr(env, "cage", False):                      # zoom on the cage
+        title = f"reset seed {sd}"
+        if getattr(env, "payload_max", 0.0) > 0.0:
+            title += f"  |  package {env.payload:.2f} kg"
+        ax.set_title(title, fontsize=10)
+        if getattr(env, "spawn_above", False):               # zoom on the pad (cage / delivery)
             ax.set_xlim(pad[0] - 1.6, pad[0] + 1.6); ax.set_ylim(pad[1] - 1.6, pad[1] + 1.6)
         else:
             ax.set_xlim(-2.7, 2.7); ax.set_ylim(-2.7, 2.7)
     cage_mode = getattr(env, "cage", False)
+    delivery = getattr(env, "payload_max", 0.0) > 0.0
     env.close()
     if cage_mode:
         fig.suptitle("Cage task (top-down): the drone spawns HIGH (blue), comes in over the cage wall "
                      "(grey = crash band) and lands on the pad (green) in the middle", fontsize=12)
+    elif delivery:
+        fig.suptitle("Delivery task (top-down): the drone spawns HIGH near the pad (blue) with a package "
+                     "of random weight and must come down to the pad (green) without falling", fontsize=12)
     else:
         fig.suptitle("Ring task (top-down): calm transit, then thread the gap into the hard-to-predict "
                      "landing zone (orange) and land on the pad", fontsize=12)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
+    _maybe_save(fig, save_path)
+    return fig
+
+
+def plot_lift_loss(cfg, save_path=None):
+    """Delivery task, the danger in two panels (exact env physics, drone mass read from the model).
+    Left: thrust factor vs descent speed (straight down, and while also flying sideways, which escapes it).
+    Right: the best braking the drone can do while descending straight down at that speed, for an empty
+    drone and for packages - below 0 it cannot brake at all and keeps falling faster."""
+    from src.envs import drone_env
+    ec = cfg["env"]
+    env, _, _ = drone_env.make_env(ec, seed=0, render=False)
+    loss, v_on, v_full, v_esc = env.vrs_loss, env.vrs_speed, env.vrs_full, env.vrs_escape
+    m0, hover = env._mass0, env._hover
+    top = env.n_act * min(hover * (1.0 + env.thrust_gain), env._ctrl_hi)   # full-throttle thrust (N)
+    env.close()
+    g = 9.81
+    v = np.linspace(0.0, 3.0, 200)
+    fig, ax = plt.subplots(1, 2, figsize=(13, 4.6))
+    for vh, ls, lab in ((0.0, "-", "straight down"), (v_esc, "--", f"also {v_esc:.1f} m/s sideways")):
+        eff = [drone_env._lift_factor(x, vh, loss, v_on, v_full, v_esc) for x in v]
+        ax[0].plot(v, 100 * np.array(eff), ls, color="#d62728", lw=2, label=lab)
+    ax[0].axvspan(v_on, v_full, color="#ff7f0e", alpha=0.12, label="lift-loss zone")
+    ax[0].set_xlabel("descent speed (m/s)"); ax[0].set_ylabel("thrust available (%)")
+    ax[0].set_title("Descending fast straight down loses thrust"); ax[0].legend(); ax[0].grid(alpha=0.3)
+    for p, col in ((0.0, "#2ca02c"), (0.1, "#ff7f0e"), (0.2, "#d62728")):
+        m = m0 + p
+        eff = np.array([drone_env._lift_factor(x, 0.0, loss, v_on, v_full, v_esc) for x in v])
+        ax[1].plot(v, (top * eff - m * g) / m, color=col, lw=2, label=f"package {p:.1f} kg")
+    ax[1].axhline(0.0, color="k", lw=0.8)
+    ax[1].set_xlabel("descent speed (m/s)"); ax[1].set_ylabel("max braking (m/s²)")
+    ax[1].set_title("A heavy package leaves less thrust to brake"); ax[1].legend(); ax[1].grid(alpha=0.3)
+    fig.suptitle("Delivery task: the faster and heavier, the harder to stop", fontsize=13)
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
     _maybe_save(fig, save_path)
     return fig
 
