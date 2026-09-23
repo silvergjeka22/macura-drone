@@ -3,20 +3,17 @@ import os
 # Single source of truth for every quantity. Nothing is hard-coded in the other .py
 # files; each receives the relevant sub-dict (ENV, ENSEMBLE, SAC, ROLLOUT...).
 #
-# TASK: a quadrotor learns to RECOVER from a tumbling start, fly to a target, and hold a
-# stable hover. The high-angular-rate recovery + fast approach are aggressive - exactly
-# where a learned model is uncertain, so a fixed-horizon rollout (MBPO) over-imagines and
-# MACURA's uncertainty-adaptive truncation has a real job. The four algorithms
-# (MACURA, MBPO, M2AC, SAC) share the SAC backbone, the ensemble, pink-noise exploration
-# and eval seeds - ONLY the rollout strategy differs.
+# TASK: a quadrotor in wind flies from its start, threads the gap of a ring of no-fly columns
+# and lands softly on the pad in the middle. The four algorithms (MACURA, MBPO, M2AC, SAC)
+# share the SAC backbone, the ensemble, pink-noise exploration and eval seeds - ONLY the
+# rollout strategy differs.
 
 # EXPERIMENT
 # SEEDS and ALGORITHMS are overridable from the environment (set them in a notebook cell BEFORE
 # `from src.bootstrap import setup`, i.e. before config is first imported). Handy for a fast smoke
 # test without editing code: e.g. `os.environ["MACURA_SEEDS"] = "0"`.
-#   default (no env):  4 algos x 5 seeds x 25k steps ~= 9-10h  -> fits ONE Kaggle 12h commit,
-#                      all plots + videos in a single run (a commit that runs past 12h is killed
-#                      and saves NOTHING, so do not enlarge this without splitting across commits).
+#   A Kaggle commit that runs past 12h is killed and saves NOTHING: at 8 updates/step, 4 algos take
+#   ~3.4h per seed, so run at most 2-3 seeds per commit and merge the logs locally afterwards.
 def _env_list(name, default, cast):
     raw = os.environ.get(name, "")
     if not raw.strip():
@@ -24,14 +21,13 @@ def _env_list(name, default, cast):
     return [cast(x) for x in raw.replace(",", " ").split()]
 
 SEED                = 0
-SEEDS               = _env_list("MACURA_SEEDS", [0], int)   # PILOT: 1 seed to check the mechanism fast.
-                                         # A single seed is a look, not proof - for the full study set this to
-                                         # [0,1,2,3,4] (or MACURA_SEEDS="0 1 2 3 4") and read the IQM/crash CIs.
+SEEDS               = _env_list("MACURA_SEEDS", [1, 2], int)   # FULL STUDY (8 updates/step), split in
+                                         # Kaggle commits: seed 0 = the pilot run (identical settings, keep its
+                                         # output), commit 1 = [1, 2], commit 2 = [3, 4]. Merge all logs locally.
 ALGORITHMS          = _env_list("MACURA_ALGOS", ["macura", "mbpo", "m2ac", "sac"],
                                 lambda x: x.strip().lower())
-TOTAL_ENV_STEPS     = 40000              # PILOT = the 40k ring baseline run with ONE change: UTD 4 -> 8.
-                                         # 1 seed x 4 algos ~= 2.5-3h (one Kaggle commit). Full study later:
-                                         # 5 seeds ~= 13-15h (two commits, per-seed resume).
+TOTAL_ENV_STEPS     = 40000              # same as the pilot (the 40k ring baseline run with UTD 4 -> 8).
+                                         # ~3.4h per seed for all 4 algos -> 2 seeds per commit ~= 7h.
 WARMUP_RANDOM_STEPS = 500
 EVAL_EVERY_STEPS    = 1000               # ~20 eval points over the run
 EVAL_EPISODES       = 20                 # 20 FIXED-seed episodes/eval -> per-point crash noise ~sqrt(p(1-p)/20)
@@ -124,6 +120,14 @@ ENV = {
     "soft_speed":        0.8,    # land softly below this speed (achievable under moderate wind)
     "impact_height":     0.06,   # below this height...
     "hard_speed":        1.5,    # ...moving faster than this = a hard crash (forgives light touchdowns)
+    # TOUCHDOWN option (OFF): the pad becomes a solid raised platform and success means actually
+    # RESTING on it. Screened offline 2026-09-23 and REJECTED: contact makes the ensemble 19-26x more
+    # WRONG at landing, but the members AGREE MORE there (GJS landing/transit 0.33x equal data, 0.76x
+    # sparse; 0.92x / 1.38x without the platform) - MACURA would not detect it, both methods would suffer.
+    "touchdown":         False,
+    "pad_height":        0.15,   # platform top above the floor (m)
+    "pad_radius":        0.35,   # platform radius (m) - same as the visual pad
+    "touch_speed":       0.3,    # "resting on the pad" below this speed (m/s)
     "reward":            REWARD,
 }
 

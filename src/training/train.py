@@ -160,6 +160,7 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
     num_updates = g_max if model_based else baseline_g
 
     kappa_state: dict = {}
+    trust_diag_state: dict = {}   # MACURA's trust rule applied to MBPO/M2AC rollouts (measurement only)
     log = _empty_log()
     best_return = -np.inf
     best_step = None
@@ -199,18 +200,23 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
                 log["rollout_length"].append((step, diag["mean_rollout_length"]))
                 log["base_uncertainty"].append((step, diag["base_uncertainty"]))
                 log["rollout_len_hist"] = diag["lengths"]        # latest round's truncation lengths
-                for k in ("unc_near", "unc_far", "trust_near", "trust_far"):   # landing zone vs transit
+                for k in ("unc_near", "unc_far", "trust_near", "trust_far",   # landing zone vs transit
+                          "untrusted_frac", "discarded_frac"):
                     log[k].append((step, diag[k]))
             elif algo_name == "mbpo":
                 trans, diag = mbpo_mod.mbpo_rollout(
-                    dynamics_model, agent, start, reward_fn, done_fn, step, cfg)
+                    dynamics_model, agent, start, reward_fn, done_fn, step, cfg,
+                    diag_state=trust_diag_state)
                 num_updates = cfg["rollout"]["mbpo"]["fixed_gradient_steps"]
                 log["rollout_length"].append((step, diag["rollout_length"]))
+                log["untrusted_frac"].append((step, diag.get("untrusted_frac", float("nan"))))
             else:  # m2ac
                 trans, diag = m2ac_mod.m2ac_rollout(
-                    dynamics_model, agent, start, reward_fn, done_fn, cfg)
+                    dynamics_model, agent, start, reward_fn, done_fn, cfg,
+                    diag_state=trust_diag_state)
                 num_updates = cfg["rollout"]["m2ac"]["fixed_gradient_steps"]
                 log["rollout_length"].append((step, cfg["rollout"]["m2ac"]["t_max"]))  # fixed horizon
+                log["untrusted_frac"].append((step, diag.get("untrusted_frac", float("nan"))))
             _store_model_transitions(agent, trans)
             model_trained = True
 
@@ -294,7 +300,11 @@ def _empty_log():
             # training, and the last round's per-rollout truncation lengths (distribution plot).
             "base_uncertainty": [], "rollout_len_hist": [],
             # MACURA landing zone vs transit: mean model uncertainty + fraction of imagined steps trusted
-            "unc_near": [], "unc_far": [], "trust_near": [], "trust_far": []}
+            "unc_near": [], "unc_far": [], "trust_near": [], "trust_far": [],
+            # WHY-diagnostic: share of the imagined data each method TRAINS on that is above MACURA's
+            # trust threshold (MBPO/M2AC measured with the same rule; MACURA = 0 by construction),
+            # and the share MACURA generated but threw away.
+            "untrusted_frac": [], "discarded_frac": []}
 
 
 def _final_eval(agent, eval_env, best_ckpt, eval_episodes, eval_seeds=None):

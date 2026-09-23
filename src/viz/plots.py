@@ -285,6 +285,66 @@ def plot_trust_by_zone(macura_runs, save_path=None):
     return fig
 
 
+def plot_untrusted_data(runs, save_path=None):
+    """The WHY plot. Left: share of the imagined data each model-based method actually TRAINS on
+    that is above MACURA's trust threshold (the models disagree about it). MBPO and M2AC are
+    measured with MACURA's exact rule; MACURA is 0 by construction (dashed = the share it generated
+    but threw away). Right: MBPO's evaluation return next to its untrusted share, to see whether
+    its drops follow the untrustworthy data. Mean over the seeds that have the diagnostic."""
+    import warnings
+    by = _group_by_algo(runs)
+
+    def _series(run_list, key):
+        series = [np.asarray(r[key], dtype=float) for r in run_list if r.get(key)]
+        if not series:
+            return None, None
+        n = min(len(s) for s in series)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            return series[0][:n, 0], np.nanmean(np.stack([s[:n, 1] for s in series]), axis=0)
+
+    fig, ax = plt.subplots(1, 2, figsize=(14, 4.8))
+    any_data = False
+    for algo in ("mbpo", "m2ac", "macura"):
+        if algo not in by:
+            continue
+        st, m = _series(by[algo], "untrusted_frac")
+        if st is not None:
+            any_data = True
+            ax[0].plot(st, 100 * m, color=_color(algo), lw=2, label=f"{algo.upper()}: trains on it")
+    if "macura" in by:
+        st, m = _series(by["macura"], "discarded_frac")
+        if st is not None:
+            ax[0].plot(st, 100 * m, color=_color("macura"), lw=1.5, ls="--",
+                       label="MACURA: generated but threw away")
+    if not any_data:
+        ax[0].text(0.5, 0.5, "no runs with this diagnostic", ha="center", va="center",
+                   transform=ax[0].transAxes)
+    ax[0].set_xlabel("real environment steps"); ax[0].set_ylabel("% of imagined data")
+    ax[0].set_title("Imagined data the models disagree about")
+    ax[0].set_ylim(-2, 102); ax[0].grid(alpha=0.3); ax[0].legend(fontsize=8)
+
+    if "mbpo" in by:
+        mb = [r for r in by["mbpo"] if r.get("untrusted_frac")]
+        if mb:
+            steps, mean, _ = _mean_std_curve(mb, "eval_return")
+            ax[1].plot(steps, mean, color=_color("mbpo"), lw=2, label="MBPO return")
+            ax[1].set_ylabel("evaluation return", color=_color("mbpo"))
+            st, m = _series(mb, "untrusted_frac")
+            ax2 = ax[1].twinx()
+            ax2.plot(st, 100 * m, color="k", lw=1.2, alpha=0.6, label="MBPO untrusted data (%)")
+            ax2.set_ylabel("% untrusted imagined data")
+            ax2.set_ylim(-2, 102)
+    ax[1].set_xlabel("real environment steps")
+    ax[1].set_title("MBPO: return vs untrusted training data")
+    ax[1].grid(alpha=0.3)
+    fig.suptitle("How much untrustworthy imagined data each method learns from "
+                 "(above MACURA's trust threshold)", fontsize=12)
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    _maybe_save(fig, save_path)
+    return fig
+
+
 def plot_rollout_distribution(macura_run, save_path=None):
     """Histogram of MACURA's per-rollout truncation lengths in the latest rollout round:
     a fixed-horizon method would be a single spike at t_max; MACURA spreads across lengths

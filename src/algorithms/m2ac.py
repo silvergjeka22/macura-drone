@@ -19,7 +19,7 @@ from __future__ import annotations
 import numpy as np
 
 from src.models import ensemble as ens
-from src.algorithms.macura import compute_gjs
+from src.algorithms.macura import compute_gjs, trust_threshold
 
 
 def ovr_uncertainty(means: np.ndarray, variances: np.ndarray) -> np.ndarray:
@@ -48,8 +48,12 @@ def ovr_uncertainty(means: np.ndarray, variances: np.ndarray) -> np.ndarray:
 
 
 def m2ac_rollout(dynamics_model, agent, start_obs: np.ndarray,
-                 reward_fn, done_fn, cfg: dict):
-    """Fixed-horizon rollouts; keep the most-trustworthy transitions only."""
+                 reward_fn, done_fn, cfg: dict, diag_state: dict = None):
+    """Fixed-horizon rollouts; keep the most-trustworthy transitions only.
+
+    `diag_state` (optional, measurement only): if given, also score every imagined step with
+    MACURA's GJS uncertainty and trust threshold, and report the share of the data M2AC finally
+    trains on (after its masking) that MACURA would have thrown away. Never changes what it keeps."""
     mcfg = cfg["rollout"]["m2ac"]
     t_max = int(mcfg["t_max"])
     mask_fraction = float(mcfg["mask_fraction"])      # fraction KEPT
@@ -60,20 +64,24 @@ def m2ac_rollout(dynamics_model, agent, start_obs: np.ndarray,
 
     obs = np.array(start_obs, dtype=np.float32)
     alive = np.ones(obs.shape[0], dtype=bool)
-    raw = []  # (obs, act, rew, next_obs, done, uncertainty)
+    raw = []  # (obs, act, rew, next_obs, done, uncertainty, gjs-for-diagnostic)
+    kappa = np.inf
 
-    for _ in range(t_max):
+    for t in range(t_max):
         if not alive.any():
             break
         act = select_actions(agent, obs, evaluate=False)   # batched (vectorized)
         means, variances = ens.member_gaussians(dynamics_model, obs, act)
         u = ovr_uncertainty(means, variances) if unc_kind == "ovr" else compute_gjs(means, variances)
+        g = compute_gjs(means, variances) if diag_state is not None else u   # measurement only
+        if diag_state is not None and t == 0:
+            kappa = trust_threshold(diag_state, g, cfg)
         next_obs = ens.predict(dynamics_model, obs, act)
         # score the state the action LANDS in -> r(s',a), identical to the real env, minus the uncertainty penalty
         rew = reward_fn(next_obs, act) - penalty * u
         done = done_fn(next_obs)
         a = alive.copy()
-        raw.append((obs[a], act[a], rew[a], next_obs[a], done[a], u[a]))
+        raw.append((obs[a], act[a], rew[a], next_obs[a], done[a], u[a], g[a]))
         alive = alive & (~done)
         obs = next_obs
 
@@ -95,6 +103,10 @@ def m2ac_rollout(dynamics_model, agent, start_obs: np.ndarray,
         obs_all[keep_idx], act_all[keep_idx], rew_all[keep_idx],
         nxt_all[keep_idx], done_all[keep_idx],
     )]
-    return transitions, {"kept_fraction": n_keep / len(u_all)}
+    diag = {"kept_fraction": n_keep / len(u_all)}
+    if diag_state is not None:
+        g_all = np.concatenate([r[6] for r in raw])
+        diag["untrusted_frac"] = float(np.mean(g_all[keep_idx] >= kappa))
+    return transitions, diag
 
 

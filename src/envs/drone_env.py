@@ -54,6 +54,7 @@ _LV = slice(8, 11)
 _VZ = 10
 _AV = slice(11, 14)
 _OBS0 = 14                       # obstacle-relative xy entries start here
+_CORE_HALF_H = 0.02              # drone core box half-height: resting core height = surface + this
 
 
 # ── the dense fly-to-pad-and-land reward (vectorized; real and imagined use THIS) ──────
@@ -162,10 +163,35 @@ class DroneTargetEnv(gym.Env):
         self.soft_speed = float(cfg.get("soft_speed", 0.5))      # land softly below this speed
         self.impact_height = float(cfg.get("impact_height", 0.06))
         self.hard_speed = float(cfg.get("hard_speed", 1.0))      # hitting the ground faster than this = crash
+        # TOUCHDOWN (off by default): the pad becomes a SOLID raised platform the drone must actually
+        # settle on. Contact is an abrupt change in the physics (impact, bounce, friction, edges) that
+        # smooth ensemble members fit DIFFERENTLY, in a region rarely visited early - a candidate for
+        # real model DISAGREEMENT right where the landing is decided.
+        self.touchdown = bool(cfg.get("touchdown", False))
+        self.pad_height = float(cfg.get("pad_height", 0.15))     # platform top above the floor (m)
+        self.pad_radius = float(cfg.get("pad_radius", 0.35))     # platform radius (m)
+        self.touch_speed = float(cfg.get("touch_speed", 0.3))    # "resting" below this speed (m/s)
+        if self.touchdown:                                        # target = drone resting ON the platform
+            self.pad_z = self.pad_height + _CORE_HALF_H
         self.rw = cfg["reward"]
         self.obs_scale = float(self.rw.get("obs_scale", cfg.get("obstacle_scale", 0.5)))
 
-        self.model = mujoco.MjModel.from_xml_path(cfg.get("mjcf_scene") or _ASSET)
+        scene = cfg.get("mjcf_scene") or _ASSET
+        if self.touchdown:
+            # Make the pad a SOLID platform in the XML *before* compiling, so MuJoCo derives every
+            # collision structure (bounding volumes, body contype/affinity) for it. (Editing geom
+            # fields after compile does NOT enable the collision - the drone fell through.)
+            import xml.etree.ElementTree as ET
+            root = ET.parse(scene).getroot()
+            for g in root.iter("geom"):
+                if g.get("name") == "pad_geom":
+                    g.set("size", f"{self.pad_radius} {self.pad_height / 2.0}")
+                    g.set("contype", "1")               # drone geoms have contype 1 ->
+                    g.set("conaffinity", "1")           # they now collide with the pad
+                    g.set("rgba", "0.10 0.80 0.35 1")
+            self.model = mujoco.MjModel.from_xml_string(ET.tostring(root, encoding="unicode"))
+        else:
+            self.model = mujoco.MjModel.from_xml_path(scene)
         self.data = mujoco.MjData(self.model)
         self.n_act = self.model.nu
 
@@ -278,7 +304,11 @@ class DroneTargetEnv(gym.Env):
     def _sync_markers(self):
         """Move the visual pad + obstacle markers (rendering only; no effect on physics)."""
         if "pad" in self._mocap:
-            self.data.mocap_pos[self._mocap["pad"]] = self._target
+            if self.touchdown:                # solid platform spanning floor .. pad_height
+                self.data.mocap_pos[self._mocap["pad"]] = [self._target[0], self._target[1],
+                                                           self.pad_height / 2.0]
+            else:
+                self.data.mocap_pos[self._mocap["pad"]] = self._target
         for i in range(self.n_obstacles):
             key = f"obs{i}"
             if key in self._mocap:
@@ -352,7 +382,12 @@ class DroneTargetEnv(gym.Env):
         hit_obs = self._nearest_obstacle(obs) < self.obs_radius
         hard = height < self.impact_height and abs(float(obs[_VZ])) > self.hard_speed
         crashed = bool(up_z < self.fail_tilt or hit_obs or hard or dist > self.max_dist)
-        landed = bool(dist < self.land_radius and speed < self.soft_speed and up_z > 0.9)
+        if self.touchdown:                    # success = actually RESTING on the platform
+            on_pad = (float(np.linalg.norm(obs[_REL][:2])) < self.pad_radius
+                      and -0.02 < height - self.pad_z < 0.04)
+            landed = bool(on_pad and speed < self.touch_speed and up_z > 0.9)
+        else:
+            landed = bool(dist < self.land_radius and speed < self.soft_speed and up_z > 0.9)
 
         terminated = crashed
         truncated = self._step_count >= self.max_episode_steps
