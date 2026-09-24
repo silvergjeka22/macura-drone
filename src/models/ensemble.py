@@ -121,14 +121,77 @@ def build_ensemble(cfg: dict, obs_dim: int, act_dim: int, device: str = "cuda"):
         "target_normalizer": _Normalizer(obs_dim, device),
         "device": device,
         "cfg": cfg,
+        "elites": None,        # indices of the members used for rollouts/uncertainty (None = all)
     }
 
 
-def train_ensemble(ens: dict, data: dict, cfg: dict):
-    """Train every member for `train_epochs_per_round` epochs on (s,a)->Δs.
+def _train_epoch(model, optim, xn, yn, bs, device):
+    """One pass over (xn, yn): every member on its own bootstrap resample. Returns the last batch loss."""
+    n, E = xn.shape[0], len(model.members)
+    last_nll = 0.0
+    boot = [torch.randint(0, n, (n,), device=device) for _ in range(E)]   # per-member bootstrap indices
+    perm = torch.randperm(n, device=device)
+    for start in range(0, n, bs):
+        idx = perm[start:start + bs]
+        optim.zero_grad()
+        loss = 0.0
+        for e in range(E):
+            bi = boot[e][idx]
+            mean_e, logvar_e = _forward_member(model, xn[bi], e)
+            inv_var = torch.exp(-logvar_e)
+            nll = 0.5 * ((mean_e - yn[bi]) ** 2 * inv_var + logvar_e).sum(-1).mean()
+            loss = loss + nll
+        loss = loss / E
+        loss.backward()
+        optim.step()
+        last_nll = float(loss.detach())
+    return last_nll
 
-    Each member sees a bootstrap resample of the data (epistemic disagreement).
-    Returns {'nll': mean training NLL}.
+
+def _train_with_holdout(ens, xn, yn, cfg):
+    """Paper-style model training (MBPO / M2AC / MACURA via mbrl-lib): hold out a validation split, train
+    with EARLY STOPPING (each member keeps its best weights on the held-out MSE; stop when no member has
+    improved by 1% for `patience` epochs), then keep the `num_elites` best members as the ELITES that
+    rollouts and the uncertainty use."""
+    import copy
+    model, optim, device = ens["model"], ens["optimizer"], ens["device"]
+    n, E = xn.shape[0], len(model.members)
+    n_val = max(1, min(int(cfg.get("holdout_max", 5000)), int(n * float(cfg["holdout_ratio"]))))
+    perm = torch.randperm(n, device=device)
+    xv, yv, xt, yt = xn[perm[:n_val]], yn[perm[:n_val]], xn[perm[n_val:]], yn[perm[n_val:]]
+    bs = min(cfg["batch_size"], xt.shape[0])
+
+    def val_mse():
+        with torch.no_grad():
+            return torch.stack([((_forward_member(model, xv, e)[0] - yv) ** 2).mean() for e in range(E)])
+
+    best = val_mse()
+    best_state = [copy.deepcopy(m.state_dict()) for m in model.members]
+    stale, epochs, last_nll = 0, 0, 0.0
+    for _ in range(int(cfg.get("max_epochs", cfg["train_epochs_per_round"]))):
+        last_nll = _train_epoch(model, optim, xt, yt, bs, device)
+        epochs += 1
+        cur = val_mse()
+        improved = cur < best * 0.99
+        for e in torch.nonzero(improved).flatten().tolist():
+            best[e] = cur[e]
+            best_state[e] = copy.deepcopy(model.members[e].state_dict())
+        stale = 0 if bool(improved.any()) else stale + 1
+        if stale >= int(cfg.get("patience", 3)):
+            break
+    for e, state in enumerate(best_state):
+        model.members[e].load_state_dict(state)
+    k = int(cfg.get("num_elites") or E)
+    ens["elites"] = None if k >= E else torch.argsort(best)[:k]
+    return {"nll": last_nll, "val_mse": float(best.mean()), "epochs": epochs}
+
+
+def train_ensemble(ens: dict, data: dict, cfg: dict):
+    """Train the members on (s,a)->Δs, each on a bootstrap resample of the data (epistemic disagreement).
+
+    Default: `train_epochs_per_round` epochs on all data. With `holdout_ratio` > 0 (the paper setup):
+    validation split + early stopping + elite selection (see `_train_with_holdout`).
+    Returns {'nll': last training NLL, ...}.
     """
     model, optim, device = ens["model"], ens["optimizer"], ens["device"]
     obs = torch.as_tensor(data["obs"], dtype=torch.float32, device=device)
@@ -146,38 +209,27 @@ def train_ensemble(ens: dict, data: dict, cfg: dict):
     dyn = y.std(0) > 0.0
     ens["dynamic"] = None if bool(dyn.all()) else dyn
 
-    n, E = xn.shape[0], len(model.members)
-    bs = min(cfg["batch_size"], n)
+    if float(cfg.get("holdout_ratio", 0.0)) > 0.0:          # paper setup: early stopping + elites
+        return _train_with_holdout(ens, xn, yn, cfg)
+    bs = min(cfg["batch_size"], xn.shape[0])
     last_nll = 0.0
     for _ in range(cfg["train_epochs_per_round"]):
-        # per-member bootstrap indices
-        boot = [torch.randint(0, n, (n,), device=device) for _ in range(E)]
-        perm = torch.randperm(n, device=device)
-        for start in range(0, n, bs):
-            idx = perm[start:start + bs]
-            optim.zero_grad()
-            loss = 0.0
-            for e in range(E):
-                bi = boot[e][idx]
-                mean_e, logvar_e = _forward_member(model, xn[bi], e)
-                inv_var = torch.exp(-logvar_e)
-                nll = 0.5 * ((mean_e - yn[bi]) ** 2 * inv_var + logvar_e).sum(-1).mean()
-                loss = loss + nll
-            loss = loss / E
-            loss.backward()
-            optim.step()
-            last_nll = float(loss.detach())
+        last_nll = _train_epoch(model, optim, xn, yn, bs, device)
     return {"nll": last_nll}
 
 
-def predict(ens: dict, obs: np.ndarray, act: np.ndarray):
-    """Sample next_obs from a random member per row. Returns numpy (B, obs_dim)."""
+def predict(ens: dict, obs: np.ndarray, act: np.ndarray, return_pick: bool = False):
+    """Sample next_obs from a random (elite) member per row. Returns numpy (B, obs_dim), plus the index
+    of the member each row used (into the elite list) when `return_pick` (M2AC needs it)."""
     model, device = ens["model"], ens["device"]
     obs_t = torch.as_tensor(np.atleast_2d(obs), dtype=torch.float32, device=device)
     act_t = torch.as_tensor(np.atleast_2d(act), dtype=torch.float32, device=device)
     x = ens["normalizer"](torch.cat([obs_t, act_t], dim=-1))
     with torch.no_grad():
         means, logvars = model(x)                   # (E, B, D)
+        el = ens.get("elites")
+        if el is not None:                          # paper setup: only the elite members
+            means, logvars = means[el], logvars[el]
     E, B, _ = means.shape
     pick = torch.randint(0, E, (B,), device=device)
     rows = torch.arange(B, device=device)           # index on the model's device (CUDA-safe)
@@ -189,6 +241,8 @@ def predict(ens: dict, obs: np.ndarray, act: np.ndarray):
     dyn = ens.get("dynamic")
     if dyn is not None:                             # static dims stay exactly as they are
         next_obs[:, ~dyn] = obs_t[:, ~dyn]
+    if return_pick:
+        return next_obs.cpu().numpy(), pick.cpu().numpy()
     return next_obs.cpu().numpy()
 
 
@@ -209,6 +263,9 @@ def member_gaussians(ens: dict, obs: np.ndarray, act: np.ndarray,
     x = ens["normalizer"](torch.cat([obs_t, act_t], dim=-1))
     with torch.no_grad():
         means, logvars = model(x)
+        el = ens.get("elites")
+        if el is not None:                          # paper setup: only the elite members
+            means, logvars = means[el], logvars[el]
         if denormalize:
             tn = ens["target_normalizer"]
             means = tn.mean + tn.std * means
@@ -231,6 +288,7 @@ def save_ensemble(ens: dict, path: str):
             "tnorm_mean": tnorm.mean.detach().cpu(),
             "tnorm_std": tnorm.std.detach().cpu(),
             "dynamic": None if ens.get("dynamic") is None else ens["dynamic"].detach().cpu(),
+            "elites": None if ens.get("elites") is None else ens["elites"].detach().cpu(),
         },
         path,
     )
@@ -248,6 +306,8 @@ def load_ensemble(ens: dict, path: str):
         ens["target_normalizer"].std = ckpt["tnorm_std"].to(ens["device"])
     if ckpt.get("dynamic") is not None:
         ens["dynamic"] = ckpt["dynamic"].to(ens["device"])
+    if ckpt.get("elites") is not None:
+        ens["elites"] = ckpt["elites"].to(ens["device"])
     return ens
 
 

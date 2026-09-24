@@ -151,6 +151,10 @@ ENV = {
     "vrs_speed":         1.2,    # descent speed (m/s) where the loss starts ...
     "vrs_full":          2.2,    # ... and where it is complete
     "vrs_escape":        1.0,    # sideways speed (m/s) that flies out of it
+    "vrs_powered":       False,  # delivery2: loss only when UPRIGHT + sinking along the rotor axis + THRUSTING
+    "vrs_upright":       0.85,   # ... body-z world component where "upright" starts (~32 deg tilt)
+    "vrs_thrust":        0.7,    # ... commanded thrust / hover thrust where "thrusting" starts
+    "start_offset_min":  0.0,    # min spawn distance from the pad (m)
     "scenery":           False,  # windsock in the videos (visual only: no effect on physics or obs)
     "reward":            REWARD,
 }
@@ -173,9 +177,32 @@ DELIVERY = {
     "turb_radius": 1.0,
     "scenery": True,             # windsock; videos also tint the drone red while it is losing thrust
 }
+# DELIVERY2 (opt-in: MACURA_TASK=delivery2) - built after the delivery pilot (2026-09-24), where the lift
+# loss was NOT new to the models: early crashing / free-falling flights already sank fast, so the ensemble
+# disagreed only 1.5x there and MACURA (filter too loose) was the one that learned to dive and crash.
+#   * POWERED lift loss: only when the drone is upright, sinking along its rotor axis AND pushing thrust
+#     (the real vortex ring state). Tumbling or free-falling drones never trigger it, so the danger first
+#     shows up when a competent policy starts to hurry and brake - still new to the model at that point.
+#   * Longer, higher approach: start 3-4 m up and 1-2 m to the side. Diving straight is fast but walks into
+#     the lift loss; descending diagonally is safe (sideways speed escapes it) - a real strategy choice.
+#   * Package weight stays visible; physics stays deterministic (random noise makes the members AGREE).
+#   * HIGHER start, 5-6 m (was 3-4 m, changed 2026-09-24 BEFORE any delivery2 run): more room to build
+#     speed makes hurrying pay more and the cliff steeper. Autopilot, 40 scenarios (seeds 5000-5039):
+#                    3-4 m, 500 steps              5-6 m, 700 steps
+#       0.55 m/s     lands 100%, return  869       lands 100%, return  993   (careful; p90 lands step 529)
+#       1.0  m/s     lands  97%, return 1091       lands  97%, return 1438   (best: +26% -> +45% vs careful)
+#       1.5  m/s     crash  55%, return  576       crash  70%, return  554
+#       2.0  m/s     crash  65%, return  452       crash  88%, return  241   (dive)
+DELIVERY2 = dict(DELIVERY, **{
+    "vrs_powered": True, "vrs_upright": 0.85, "vrs_thrust": 0.7,
+    "start_height_min": 5.0, "start_height_max": 6.0, "start_offset_min": 1.0, "start_offset": 2.0,
+    "max_episode_steps": 700,    # 14 s: a careful 0.55 m/s descent from 6 m still lands with time to settle
+})
 TASK = os.environ.get("MACURA_TASK", "").strip().lower()
 if TASK == "delivery":
     ENV.update(DELIVERY)
+elif TASK == "delivery2":
+    ENV.update(DELIVERY2)
 
 # ENSEMBLE (probabilistic dynamics model, shared by all model-based algos)
 ENSEMBLE = {
@@ -239,6 +266,45 @@ ROLLOUT = {
 
 # EXPLORATION (kept CONSISTENT across algos to avoid the exploration confound)
 EXPLORATION = {"type": "pink_noise", "scale": 0.3}
+
+# PAPER PROTOCOL (applied with MACURA_TASK=delivery2): the MACURA paper's setup (App. D.1, Tables 4-6) and
+# M2AC exactly as its own paper runs it (Pan et al. 2020, Alg. 2 + Sec. 5.1). The delivery pilot differed
+# from the paper in ways that mostly hurt MACURA: ~1000x less imagined data (each imagined transition was
+# reused ~460x), a 5-member ensemble without validation, and MACURA's filter effectively off.
+#   * ensemble: 7 PNNs, validation split + early stopping, 5 elites for rollouts/uncertainty (mbrl-lib)
+#   * imagined data: 100 rollouts per real step (25,000 every 250 steps; the paper uses ~400/step - a
+#     quarter of it keeps a run inside Kaggle's 12 h while bringing the reuse down to paper level)
+#   * SAC batches: 95% imagined / 5% real (paper), UTD 8 for MBPO/M2AC, Gmax 16 = 2x for MACURA (paper:
+#     Eq. 22 uses about half of Gmax, so the actual update counts end up comparable)
+#   * MACURA xi = 1, the paper's recommended starting point (App. D.2). The pilot's offline calibration
+#     (0.12-0.15) does NOT transfer: its threshold was inflated by uncertainty spikes (running mean 12.6).
+#     Measured with this protocol's 7/5-elite ensemble: xi 0.15 -> rollouts 0.1/10 (filter shuts MACURA
+#     down), 0.5 -> ~2, 1.0 -> ~5, 1.5 -> ~6. The in-run running mean can still shift this, so xi is
+#     TUNED (below). Diagnostic target: mean rollout 4-7 and low trust in fast dives. MACURA_XI overrides.
+#   * M2AC: per-step masking w_h = (H-h)/(2(H+1)), one-vs-rest KL of the member that predicted, alpha=1e-3,
+#     non-stop rollouts (its paper's defaults).
+#   * exploration as in the MACURA paper: MACURA pink noise, MBPO/M2AC deterministic, SAC its own sampling.
+#     This is a known confound (paper Fig. 5/11) and must be REPORTED; MACURA_EXPLORATION=equal gives
+#     every algorithm the same pink noise instead.
+# Tuning (fair: the same budget for MBPO): MACURA_XI in {0.5, 1, 2}, MBPO_HORIZON in {5, 10}; choose each
+# method's value by its AVERAGE training-time eval return (selection scenarios 100-119), then report the
+# full study on the fresh final-eval scenarios (1000+) only.
+# (max_epochs 10 per model round - instead of open-ended early stopping - keeps a 4-algorithm seed < 12 h.)
+if TASK == "delivery2":
+    ENSEMBLE.update({"num_members": 7, "num_elites": 5, "holdout_ratio": 0.2, "holdout_max": 5000,
+                     "max_epochs": 10, "patience": 3})
+    ROLLOUT.update({"freq_steps": 250, "num_rollouts": 25000, "model_buffer_capacity": 1_000_000})
+    ROLLOUT["macura"] = dict(ROLLOUT["macura"], xi=float(os.environ.get("MACURA_XI", "") or 1.0),
+                             gradient_steps_max=16)
+    _h = int(os.environ.get("MBPO_HORIZON", "") or 10)
+    ROLLOUT["mbpo"] = dict(ROLLOUT["mbpo"], rollout_schedule=[1, _h, 500, 3000])
+    ROLLOUT["m2ac"] = {"mode": "paper", "t_max": 10, "uncertainty_penalty": 1e-3, "uncertainty": "ovr",
+                       "fixed_gradient_steps": 8}
+    SAC["real_ratio"] = 0.05
+    if os.environ.get("MACURA_EXPLORATION", "paper").strip().lower() != "equal":
+        EXPLORATION["per_algo"] = {"macura": "pink_noise", "mbpo": "deterministic",
+                                   "m2ac": "deterministic", "sac": "stochastic"}
+ENV["task"] = TASK
 
 # assembled config the training functions consume
 CFG = {

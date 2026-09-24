@@ -430,10 +430,12 @@ def plot_rollout_distribution(macura_run, save_path=None):
 
 def plot_summary_table(runs, save_path=None):
     """A compact results table (one row per algorithm, mean +/- std over seeds):
-    best return, final return, final success (reached-and-held) rate, final crash rate."""
+    best return, final return, final success (reached-and-held) rate, final crash rate, the average
+    return over training (how fast it learned) and the real crashes while learning."""
     order = ["macura", "mbpo", "m2ac", "sac"]
     by = _group_by_algo(runs)
-    col_labels = ["algorithm", "best return", "final return", "success", "crash"]
+    col_labels = ["algorithm", "best return", "final return", "success", "crash",
+                  "avg return\n(training)", "real crashes\n(training)"]
     rows, colors = [], []
 
     def ms(vals):
@@ -446,17 +448,21 @@ def plot_summary_table(runs, save_path=None):
         final = [r["eval_return"][-1] for r in rl if r["eval_return"]]
         succ = [r["eval_success_rate"][-1] for r in rl if r.get("eval_success_rate")]
         crash = [r["eval_failure_rate"][-1] for r in rl if r.get("eval_failure_rate")]
+        avg = [float(np.mean(r["eval_return"])) for r in rl if r["eval_return"]]
+        broken = [r["train_crashes_total"] for r in rl if r.get("train_crashes_total") is not None]
         rows.append([algo.upper(), ms(best), ms(final),
                      f"{np.mean(succ):.2f}" if succ else "-",
-                     f"{np.mean(crash):.2f}" if crash else "-"])
+                     f"{np.mean(crash):.2f}" if crash else "-",
+                     ms(avg), ms(broken)])
         colors.append(_color(algo))
 
-    fig, ax = plt.subplots(figsize=(8, 0.6 + 0.5 * len(rows)))
+    fig, ax = plt.subplots(figsize=(12, 0.6 + 0.5 * len(rows)))
     ax.axis("off")
     tbl = ax.table(cellText=rows, colLabels=col_labels, cellLoc="center", loc="center")
     tbl.auto_set_font_size(False); tbl.set_fontsize(11); tbl.scale(1, 1.5)
-    for j in range(len(col_labels)):                       # header row bold
+    for j in range(len(col_labels)):                       # header row bold (two-line labels fit)
         tbl[0, j].set_text_props(weight="bold")
+        tbl[0, j].set_height(tbl[0, j].get_height() * 1.8)
     for i, c in enumerate(colors, start=1):                # tint the algorithm cell
         if c:
             tbl[i, 0].set_facecolor(c); tbl[i, 0].set_text_props(color="white", weight="bold")
@@ -566,6 +572,28 @@ def plot_crash_rate_ci(runs, save_path=None):
     ax.set_xlabel("real environment steps"); ax.set_ylabel("crash rate")
     ax.set_title("Crash rate - mean +/- 95% bootstrap CI"); ax.legend(); ax.grid(alpha=0.3)
     ax.set_ylim(-0.02, 1.02)
+    _maybe_save(fig, save_path)
+    return fig
+
+
+def plot_training_crashes(runs, save_path=None):
+    """REAL drones broken WHILE learning: cumulative crashes of the training flights (not the tests),
+    mean over seeds + 95% bootstrap CI. A method that believes a wrong model (e.g. "diving pays") pays
+    for it here with real crashes. Needs runs logged after 2026-09-24 (`train_crashes`); older runs are
+    skipped."""
+    fig, ax = plt.subplots(figsize=(7.5, 5))
+    for algo, run_list in _group_by_algo(runs).items():
+        run_list = [r for r in run_list if r.get("train_crashes")]
+        if not run_list:
+            continue
+        steps, mat = _stack(run_list, "train_crashes")
+        c, lo, hi = _agg_curve(mat.astype(float), "mean")
+        ax.plot(steps, c, label=algo.upper(), color=_color(algo))
+        ax.fill_between(steps, lo, hi, alpha=0.18, color=_color(algo))
+    ax.set_xlabel("real environment steps"); ax.set_ylabel("real crashes so far (cumulative)")
+    ax.set_title("Drones broken while learning - mean +/- 95% bootstrap CI"); ax.grid(alpha=0.3)
+    if ax.get_legend_handles_labels()[0]:
+        ax.legend()
     _maybe_save(fig, save_path)
     return fig
 
@@ -1085,22 +1113,33 @@ def plot_lift_loss(cfg, save_path=None):
     ec = cfg["env"]
     env, _, _ = drone_env.make_env(ec, seed=0, render=False)
     loss, v_on, v_full, v_esc = env.vrs_loss, env.vrs_speed, env.vrs_full, env.vrs_escape
+    powered, up_on, thr_on = env.vrs_powered, env.vrs_upright, env.vrs_thrust
     m0, hover = env._mass0, env._hover
     top = env.n_act * min(hover * (1.0 + env.thrust_gain), env._ctrl_hi)   # full-throttle thrust (N)
+    full = 1.0 + env.thrust_gain                                           # full-throttle thrust / hover
     env.close()
     g = 9.81
+
+    def eff(desc, vh=0.0, ratio=full):            # upright drone sinking at `desc` m/s, `vh` m/s sideways
+        if powered:
+            return drone_env._powered_lift_factor([vh, 0.0, -desc], [1.0, 0.0, 0.0, 0.0], ratio, loss,
+                                                  v_on, v_full, v_esc, up_on, thr_on)
+        return drone_env._lift_factor(desc, vh, loss, v_on, v_full, v_esc)
+
     v = np.linspace(0.0, 3.0, 200)
     fig, ax = plt.subplots(1, 2, figsize=(13, 4.6))
-    for vh, ls, lab in ((0.0, "-", "straight down"), (v_esc, "--", f"also {v_esc:.1f} m/s sideways")):
-        eff = [drone_env._lift_factor(x, vh, loss, v_on, v_full, v_esc) for x in v]
-        ax[0].plot(v, 100 * np.array(eff), ls, color="#d62728", lw=2, label=lab)
+    cases = [(0.0, full, "-", "straight down, rotors pushing"), (v_esc, full, "--", f"also {v_esc:.1f} m/s sideways")]
+    if powered:
+        cases.append((0.0, 0.0, ":", "straight down, motors off (free fall)"))
+    for vh, ratio, ls, lab in cases:
+        ax[0].plot(v, [100 * eff(x, vh, ratio) for x in v], ls, color="#d62728", lw=2, label=lab)
     ax[0].axvspan(v_on, v_full, color="#ff7f0e", alpha=0.12, label="lift-loss zone")
     ax[0].set_xlabel("descent speed (m/s)"); ax[0].set_ylabel("thrust available (%)")
-    ax[0].set_title("Descending fast straight down loses thrust"); ax[0].legend(); ax[0].grid(alpha=0.3)
+    ax[0].set_title("Descending fast straight down loses thrust" + (" (only while pushing)" if powered else ""))
+    ax[0].legend(fontsize=8); ax[0].grid(alpha=0.3)
     for p, col in ((0.0, "#2ca02c"), (0.1, "#ff7f0e"), (0.2, "#d62728")):
         m = m0 + p
-        eff = np.array([drone_env._lift_factor(x, 0.0, loss, v_on, v_full, v_esc) for x in v])
-        ax[1].plot(v, (top * eff - m * g) / m, color=col, lw=2, label=f"package {p:.1f} kg")
+        ax[1].plot(v, (top * np.array([eff(x) for x in v]) - m * g) / m, color=col, lw=2, label=f"package {p:.1f} kg")
     ax[1].axhline(0.0, color="k", lw=0.8)
     ax[1].set_xlabel("descent speed (m/s)"); ax[1].set_ylabel("max braking (m/s²)")
     ax[1].set_title("A heavy package leaves less thrust to brake"); ax[1].legend(); ax[1].grid(alpha=0.3)

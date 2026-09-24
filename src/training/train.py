@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import os
 import json
+import time
 import numpy as np
 
 from src.envs import drone_env as env_mod
@@ -72,7 +73,9 @@ class _RealBuffer:
         return {"obs": self.obs[:s], "act": self.act[:s], "next_obs": self.next_obs[:s]}
 
     def sample_obs(self, n):
-        idx = np.random.randint(0, self.size, size=min(n, self.size))
+        """n rollout start states, WITH replacement (as MBPO/M2AC/MACURA sample them), so a large rollout
+        batch (paper protocol: 25,000) is not cut down to the number of real transitions early on."""
+        idx = np.random.randint(0, self.size, size=n)
         return self.obs[idx]
 
 
@@ -85,14 +88,18 @@ def evaluate(agent, env, eval_episodes: int, eval_seeds=None) -> dict:
     # unstable even when the policy was steady. Same base -> comparable across algos (fairness).
     base = int(eval_seeds[0]) if eval_seeds else 100
     returns, lengths, failures, successes, heavy = [], [], [], [], []
+    max_sink, lift_steps = [], 0                        # measurement only (read from the sim state)
     payload_max = float(getattr(env, "payload_max", 0.0))
+    raw = getattr(env, "unwrapped", env)
     for i in range(eval_episodes):
         obs, _ = env.reset(seed=base + i)
         done = False
-        ep_ret, ep_len, failed, reached = 0.0, 0, False, False
+        ep_ret, ep_len, failed, reached, ep_sink = 0.0, 0, False, False, 0.0
         while not done:
             act = sac_mod.select_action(agent, obs, evaluate=True)
             obs, rew, terminated, truncated, info = env.step(act)
+            ep_sink = max(ep_sink, -float(raw.data.qvel[2]))
+            lift_steps += float(getattr(raw, "thrust_eff", 1.0)) < 0.99
             ep_ret += rew
             ep_len += 1
             failed = failed or info.get("failure", False)     # crashed
@@ -103,12 +110,15 @@ def evaluate(agent, env, eval_episodes: int, eval_seeds=None) -> dict:
         failures.append(float(failed))
         successes.append(float(reached))
         heavy.append(payload_max > 0.0 and env.payload >= 0.5 * payload_max)
+        max_sink.append(ep_sink)
     out = {
         "eval_return": float(np.mean(returns)),
         "eval_return_std": float(np.std(returns)),
         "eval_length": float(np.mean(lengths)),
         "eval_failure_rate": float(np.mean(failures)),   # crash rate
         "eval_success_rate": float(np.mean(successes)),  # reached-and-held rate
+        "eval_max_sink": float(np.median(max_sink)),     # fastest descent (m/s), median over episodes
+        "eval_liftloss": float(lift_steps / max(1, sum(lengths))),   # share of steps losing lift
     }
     if payload_max > 0.0:                                # delivery task: crash rate by package weight
         f, h = np.array(failures), np.array(heavy, dtype=bool)
@@ -176,8 +186,15 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
     best_step = None
     best_ckpt = None
     model_trained = False
-    noise = _make_noise(cfg["exploration"], act_dim,
-                        cfg["env"]["max_episode_steps"], seed)
+    expl_cfg = algo_exploration(cfg["exploration"], algo_name)
+    noise = _make_noise(expl_cfg, act_dim, cfg["env"]["max_episode_steps"], seed)
+    # MACURA's own UTD ceiling (paper: Gmax = 2 x MBPO's G, since Eq. 22 uses about half of it)
+    g_max_macura = int(cfg["rollout"]["macura"].get("gradient_steps_max", g_max))
+    # REAL drones flown / broken while learning (measurement only: counts episodes that already happen)
+    train_episodes, train_crashes = 0, 0
+    # status lines (measurement only): the last model round's diagnostics + where the time goes
+    last_diag, tm = None, {"fit": 0.0, "imagine": 0.0, "sac": 0.0}
+    t_run = t_eval = time.perf_counter()
 
     obs, _ = env.reset(seed=seed)
     for step in range(total_steps):
@@ -189,6 +206,8 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
         sac_mod.add_to_buffer(real_rb if model_based else agent.replay_buffer,
                               obs, act, next_obs, rew, terminated)
         if terminated or truncated:
+            train_episodes += 1
+            train_crashes += bool(info.get("failure", False))
             obs = env.reset()[0]
             noise.reset()                       # fresh pink sequence per episode
         else:
@@ -197,14 +216,20 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
             continue
 
         # --- model-based: retrain ensemble + generate fresh rollouts ---
-        if model_based and step % rollout_freq == 0 and real_buffer.size >= max(num_rollouts, batch):
+        # (needs one batch of real data; start states are sampled with replacement, so a large rollout batch
+        # does not have to wait for that many real steps - it used to, which would have delayed the paper
+        # protocol's first model round to step 25,000)
+        if model_based and step % rollout_freq == 0 and real_buffer.size >= batch:
+            t0 = time.perf_counter()
             ens.train_ensemble(dynamics_model, real_buffer.all(), cfg["ensemble"])
+            t1 = time.perf_counter()
+            tm["fit"] += t1 - t0
             start = real_buffer.sample_obs(num_rollouts)
             if algo_name == "macura":
                 trans, diag = macura_mod.macura_rollout(
                     dynamics_model, agent, start, reward_fn, done_fn, kappa_state, cfg)
                 num_updates = macura_mod.gradient_steps(
-                    agent.replay_buffer.size(), buf_cap, g_max,
+                    agent.replay_buffer.size(), buf_cap, g_max_macura,
                     cfg["rollout"]["macura"]["adaptive_gradient_steps"])
                 log["kappa"].append((step, diag["kappa"]))
                 log["rollout_length"].append((step, diag["mean_rollout_length"]))
@@ -232,8 +257,11 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
                 log["fast_frac"].append((step, diag["fast_frac"]))
             _store_model_transitions(agent, trans)
             model_trained = True
+            last_diag = diag
+            tm["imagine"] += time.perf_counter() - t1
 
         # --- SAC updates ---
+        t_sac = time.perf_counter()
         if not model_based:
             # model-free baseline: one buffer, 100% real
             if agent.replay_buffer.size() >= batch:
@@ -243,6 +271,7 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
             # path runs for MACURA/MBPO/M2AC; only `num_updates` (UTD) and which rollout produced
             # the model data differ. The SAC math is untouched.
             sac_mod.sac_update_mixed(agent, real_rb, model_rb, num_updates, batch, real_ratio, mix_rng)
+        tm["sac"] += time.perf_counter() - t_sac
 
         # --- periodic GREEDY evaluation on FIXED shared seeds → headline curve + selection ---
         if step % eval_every == 0:
@@ -256,6 +285,10 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
             if "eval_failure_heavy" in m:                      # delivery task: crash by package weight
                 log["eval_failure_light"].append(m["eval_failure_light"])
                 log["eval_failure_heavy"].append(m["eval_failure_heavy"])
+            log["train_crashes"].append(train_crashes)         # cumulative, real training flights
+            log["train_episodes"].append(train_episodes)
+            log["eval_max_sink"].append(m["eval_max_sink"])
+            log["eval_liftloss"].append(m["eval_liftloss"])
             improved = step >= start_step and m["eval_return"] > best_return
             if improved:                       # overwrite best checkpoint (policy + ensemble + meta)
                 best_return = m["eval_return"]
@@ -263,7 +296,11 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
                 best_ckpt = _save_best(agent, dynamics_model, output_dir, run_name)
             print(f"[{algo_name} seed{seed}] step {step:>6}  return {m['eval_return']:7.1f}"
                   f"  reach {m['eval_success_rate']:.2f}  crash {m['eval_failure_rate']:.2f}"
+                  f"  broken {train_crashes}/{train_episodes}"
                   f"{'  <- best' if improved else ''}")
+            now = time.perf_counter()
+            _print_status(algo_name, cfg, last_diag, m, tm, now - t_eval, now - t_run, step, total_steps, eval_every)
+            t_eval, tm = now, {k: 0.0 for k in tm}
 
     if best_ckpt is None:                       # never improved (e.g. no eval / before start_step)
         best_ckpt = _save_best(agent, dynamics_model, output_dir, run_name)
@@ -272,16 +309,20 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
     # on FRESH scenarios (final_eval_seed_base..), not the ones used to pick the best checkpoint:
     # re-testing on the selection scenarios would overrate lucky, high-variance checkpoints.
     final_eval = _final_eval(agent, eval_env, best_ckpt, final_eval_episodes, _final_seeds(cfg))
+    setup = {"exploration": expl_cfg["type"], "task": cfg["env"].get("task", ""),     # what this run used
+             "xi": cfg["rollout"]["macura"]["xi"], "mbpo_horizon": cfg["rollout"]["mbpo"]["rollout_schedule"][1]}
     meta = {"algo": algo_name, "seed": seed, "best_step": best_step,
-            "best_return": float(best_return), "final_eval": final_eval}
+            "best_return": float(best_return), "final_eval": final_eval, "setup": setup,
+            "train_crashes_total": train_crashes, "train_episodes_total": train_episodes}
     _save_meta(meta, output_dir, run_name)
     print(f"[{algo_name} seed{seed}] FINAL  return {final_eval['eval_return']:.1f}"
           f"±{final_eval['eval_return_std']:.1f}  crash {final_eval['eval_failure_rate']:.2f}"
-          f"  (best @ step {best_step})")
+          f"  (best @ step {best_step})  real crashes while learning {train_crashes}/{train_episodes}")
 
     run = {"algo": algo_name, "seed": seed, "checkpoint": best_ckpt,
            "best_return": float(best_return), "best_step": best_step,
-           "final_eval": final_eval, **log}
+           "final_eval": final_eval, "setup": setup,
+           "train_crashes_total": train_crashes, "train_episodes_total": train_episodes, **log}
     _save_run(run, output_dir, run_name)
     env.close()
     eval_env.close()
@@ -343,7 +384,43 @@ def _empty_log():
             # delivery task: MACURA uncertainty/trust in FAST vs SLOW descents, the share of each method's
             # imagined training data that is a fast descent, and eval crash rate by package weight
             "unc_fast": [], "unc_slow": [], "trust_fast": [], "trust_slow": [], "fast_frac": [],
-            "eval_failure_light": [], "eval_failure_heavy": []}
+            "eval_failure_light": [], "eval_failure_heavy": [],
+            # real training flights so far and how many of them crashed, at each eval point (cumulative):
+            # the drones each method breaks WHILE learning - believing a wrong model costs real crashes
+            "train_crashes": [], "train_episodes": [],
+            # the greedy policy in the evals: fastest descent (median m/s) and share of steps losing lift
+            "eval_max_sink": [], "eval_liftloss": []}
+
+
+def _pct(x):
+    return "-" if x is None or not np.isfinite(x) else f"{100 * x:.0f}%"
+
+
+def _print_status(algo, cfg, d, m, tm, dt, elapsed, step, total_steps, every):
+    """Two short lines under each eval line (measurement only): is the mechanism doing what it should,
+    how does the policy fly, and where does the time go. `d` = the latest model round's diagnostics.
+      MACURA: imagined trip length (of t_max) and how much it trusts FAST vs SLOW descents (want: short
+              trips / low trust near fast descents, high trust elsewhere).
+      MBPO / M2AC: share of the imagined data they train on that MACURA's rule would reject, and the
+              share of it that is a fast descent (the lured-into-diving signal)."""
+    if d is not None:
+        if algo == "macura":
+            tmax = cfg["rollout"]["macura"]["t_max"]
+            line = (f"trip {d['mean_rollout_length']:.1f}/{tmax} steps | trusts fast descents "
+                    f"{_pct(d.get('trust_fast'))} vs slow {_pct(d.get('trust_slow'))}")
+        elif algo == "mbpo":
+            line = (f"trip {d['rollout_length']}/{d['rollout_length']} steps (fixed) | data MACURA would "
+                    f"reject {_pct(d.get('untrusted_frac'))}")
+        else:
+            line = (f"keeps {_pct(d.get('kept_fraction'))} of imagined steps | data MACURA would reject "
+                    f"{_pct(d.get('untrusted_frac'))}")
+        print(f"    model: {line} | fast-descent share of its imagined data {_pct(d.get('fast_frac'))}")
+    rate = dt / max(1, every)
+    eta = (total_steps - step) * rate / 3600
+    print(f"    policy: fastest descent {m['eval_max_sink']:.1f} m/s | losing lift {_pct(m['eval_liftloss'])}"
+          f" of the time || time: {dt:.0f} s since last eval (model fit {tm['fit']:.0f} s, imagine "
+          f"{tm['imagine']:.0f} s, SAC {tm['sac']:.0f} s) | run so far {elapsed / 60:.0f} min, ~{eta:.1f} h left",
+          flush=True)
 
 
 def _final_seeds(cfg):
@@ -414,18 +491,35 @@ class _NoNoise:
         return 0.0
 
 
+class _Stochastic(_NoNoise):
+    """Standard SAC exploration: sample from the policy's own squashed Gaussian (no added noise)."""
+    stochastic = True
+
+
+def algo_exploration(expl_cfg, algo_name):
+    """The exploration scheme `algo_name` uses. Default: the same `type` for every algorithm. The paper
+    protocol sets `per_algo` (MACURA pink noise, MBPO/M2AC deterministic, SAC stochastic), which is what
+    the MACURA paper ran (Sec. 7.3 / App. D.3) - a known confound that must be reported with the results."""
+    t = (expl_cfg.get("per_algo") or {}).get(algo_name, expl_cfg.get("type", "white_noise"))
+    return {**expl_cfg, "type": t}
+
+
 def _make_noise(expl_cfg, act_dim, horizon, seed):
     t = expl_cfg.get("type", "white_noise")
     s = float(expl_cfg.get("scale", 0.1))
     if t == "deterministic":
         return _NoNoise()
+    if t == "stochastic":
+        return _Stochastic()
     if t == "pink_noise":
         return _PinkNoise(act_dim, horizon, s, seed)
     return _WhiteNoise(act_dim, s, seed)
 
 
 def _explore(agent, obs, noise_proc):
-    """Deterministic policy mean + exploration noise (same scheme for all algos)."""
+    """Policy mean + exploration noise, or a sample from the SAC policy for `stochastic`."""
+    if getattr(noise_proc, "stochastic", False):
+        return sac_mod.select_action(agent, obs, evaluate=False)
     act = sac_mod.select_action(agent, obs, evaluate=True)
     return np.clip(act + noise_proc.sample(), -1.0, 1.0)
 

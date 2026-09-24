@@ -160,6 +160,30 @@ def _lift_factor(descent, v_horiz, loss, v_on, v_full, v_escape) -> float:
     return 1.0 - loss * s * float(np.exp(-(v_horiz / max(v_escape, 1e-6)) ** 2))
 
 
+def _smooth01(x) -> float:
+    x = float(np.clip(x, 0.0, 1.0))
+    return x * x * (3.0 - 2.0 * x)
+
+
+def _powered_lift_factor(vel, quat, thrust_ratio, loss, v_on, v_full, v_escape, up_on, thrust_on) -> float:
+    """POWERED vortex-ring state (delivery2): the thrust loss needs all three, like the real thing -
+      * the drone is UPRIGHT (body-z world component above ~up_on),
+      * it sinks fast ALONG ITS ROTOR AXIS (axial descent v_on -> v_full m/s),
+      * its rotors are PUSHING (total thrust >= ~thrust_on x the empty drone's hover thrust).
+    Flying across the rotor axis (v_escape m/s) clears it. A tumbling or free-falling drone (early crashes)
+    never triggers it, so the danger first appears when a competent policy starts to hurry - it is still
+    NEW to the model then. Deterministic in (observed pose + velocity, agent action)."""
+    w, x, y, z = (float(q) for q in quat)
+    zb = np.array([2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y)])   # body z in world
+    v = np.asarray(vel, dtype=float)
+    axial = float(v @ zb)                                    # < 0 = sinking along the rotor axis
+    across = float(np.linalg.norm(v - axial * zb))
+    s_desc = _smooth01((-axial - v_on) / max(v_full - v_on, 1e-6))
+    s_up = _smooth01((zb[2] - up_on) / 0.10)                 # fully on ~0.1 above up_on
+    s_pow = _smooth01((thrust_ratio - thrust_on) / 0.3)      # fully on 0.3 above thrust_on
+    return 1.0 - loss * s_desc * s_up * s_pow * float(np.exp(-(across / max(v_escape, 1e-6)) ** 2))
+
+
 class DroneTargetEnv(gym.Env):
     """Quadrotor flying through wind + obstacles to land on a pad (Drone MJCF model)."""
 
@@ -255,6 +279,10 @@ class DroneTargetEnv(gym.Env):
         self.vrs_speed = float(cfg.get("vrs_speed", 0.8))         # descent speed where the loss starts (m/s)
         self.vrs_full = float(cfg.get("vrs_full", 1.6))           # descent speed of the full loss (m/s)
         self.vrs_escape = float(cfg.get("vrs_escape", 1.0))       # sideways speed that flies out of it (m/s)
+        self.vrs_powered = bool(cfg.get("vrs_powered", False))    # delivery2: upright + axial + thrusting only
+        self.vrs_upright = float(cfg.get("vrs_upright", 0.85))    # body-z world component where it starts
+        self.vrs_thrust = float(cfg.get("vrs_thrust", 0.7))       # thrust / empty-hover thrust where it starts
+        self.start_offset_min = float(cfg.get("start_offset_min", 0.0))   # min spawn distance from the pad (m)
         self.payload = 0.0
         self.thrust_eff = 1.0                                     # last step's lift factor (diagnostics/videos)
         self.scenery = bool(cfg.get("scenery", False))            # windsock for the videos (visual only)
@@ -438,7 +466,7 @@ class DroneTargetEnv(gym.Env):
         self._target = np.array([pad_xy[0], pad_xy[1], self.pad_z])
         if self.spawn_above:                   # spawn HIGH above the pad (cage/delivery), within start_offset
             ang = self._rng.uniform(0.0, 2.0 * np.pi)
-            rad = self._rng.uniform(0.0, self.start_offset)
+            rad = self._rng.uniform(self.start_offset_min, self.start_offset)
             self.data.qpos[0:2] = self._target[:2] + rad * np.array([np.cos(ang), np.sin(ang)])
             self.data.qpos[2] = self._rng.uniform(*self.start_height)
         self._obstacles = self._place_obstacles()
@@ -506,8 +534,14 @@ class DroneTargetEnv(gym.Env):
             thrust = thrust * (1.0 + self.ge_gain * np.exp(-max(pos[2], 0.0) / max(self.ge_scale, 1e-6)))
         if self.vrs_loss > 0.0:                               # lift loss in a fast vertical descent
             v = self.data.qvel[0:3]
-            self.thrust_eff = _lift_factor(-float(v[2]), float(np.hypot(v[0], v[1])), self.vrs_loss,
-                                           self.vrs_speed, self.vrs_full, self.vrs_escape)
+            if self.vrs_powered:                              # delivery2: only in a powered, upright descent
+                ratio = float(np.mean(1.0 + action * self.thrust_gain))   # agent's commanded thrust / hover
+                self.thrust_eff = _powered_lift_factor(v, self.data.qpos[3:7], ratio, self.vrs_loss,
+                                                       self.vrs_speed, self.vrs_full, self.vrs_escape,
+                                                       self.vrs_upright, self.vrs_thrust)
+            else:
+                self.thrust_eff = _lift_factor(-float(v[2]), float(np.hypot(v[0], v[1])), self.vrs_loss,
+                                               self.vrs_speed, self.vrs_full, self.vrs_escape)
             thrust = thrust * self.thrust_eff
         self.data.ctrl[:] = np.clip(thrust, 0.0, self._ctrl_hi)
 
