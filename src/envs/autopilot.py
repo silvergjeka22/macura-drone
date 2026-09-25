@@ -104,8 +104,18 @@ class Autopilot:
         return a
 
     def _attitude(self, a, Rm, w) -> np.ndarray:
-        """Desired acceleration -> collective thrust + attitude torques -> per-rotor action."""
+        """Desired acceleration -> collective thrust + attitude torques -> per-rotor action. With the env's on-board
+        stabiliser (ctrl_mode "attitude" / "althold") it hands the SAME desired acceleration to the env's action interface
+        instead, i.e. it flies through exactly the interface the learning agents use."""
         env = self.env
+        mode = getattr(env, "ctrl_mode", "rotor")
+        if mode == "attitude":
+            return np.clip([a[0] / env.att_acc_h, a[1] / env.att_acc_h, a[2] / self.g - 1.0, 0.0],
+                           -1.0, 1.0).astype(np.float32)
+        if mode == "althold":                              # climb-rate command that gives the same vertical accel
+            vz_cmd = float(env.data.qvel[2]) + (a[2] - self.g) / env.alt_kz
+            return np.clip([a[0] / env.att_acc_h, a[1] / env.att_acc_h, vz_cmd / env.alt_vz_max, 0.0],
+                           -1.0, 1.0).astype(np.float32)
         zb = Rm[:, 2]
         thrust = self.mass * float(np.dot(a, zb))
         z_des = a / (np.linalg.norm(a) + 1e-9)

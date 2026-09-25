@@ -221,6 +221,13 @@ def _smooth01(x) -> float:
     return x * x * (3.0 - 2.0 * x)
 
 
+def _quat_to_mat(quat) -> np.ndarray:
+    w, x, y, z = (float(q) for q in quat)
+    return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+                     [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+                     [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)]])
+
+
 def _powered_lift_factor(vel, quat, thrust_ratio, loss, v_on, v_full, v_escape, up_on, thrust_on) -> float:
     """POWERED vortex-ring state (delivery2): the thrust loss needs all three, like the real thing -
       * the drone is UPRIGHT (body-z world component above ~up_on),
@@ -354,10 +361,30 @@ class DroneTargetEnv(gym.Env):
         self.race_pillars = [tuple(float(v) for v in p) for p in cfg.get("race_pillars", [])]
         self.race_progress = 0.0                                  # course metres flown this episode
         self._race_k = 0
+        # RACING-LINE SENSOR (off by default): 6 extra obs dims = the vector from the drone to the nearest point of
+        # the racing line + the racing direction `race_obs_ahead` m further along it (a racing drone sees the next
+        # gate). A pure function of the position (already in the obs): it adds no information about the physics.
+        self.race_obs_course = bool(cfg.get("race_obs_course", False)) and self.race
+        self._race_ahead = (int(round(float(cfg.get("race_obs_ahead", 0.5)) / self.course["params"]["spacing"]))
+                            if self.race_obs_course else 0)
         # VISIBLE mean wind (off by default): a steady push of random direction and strength every episode,
         # IN the observation (unlike the hidden gusts) - new combinations for the model, not noise.
         self.wind_mean_max = float(cfg.get("wind_mean_max", 0.0))  # N
         self._wind_mean = np.zeros(3)
+        # ACTION INTERFACE: "rotor" (default) = the agent sets each rotor's thrust directly (0 = hover of the EMPTY
+        # drone). "attitude" = an on-board attitude stabiliser, like a real flight controller: the agent commands
+        # [sideways acceleration x, y (m/s^2 via the tilt, world frame), vertical acceleration (0 = hover of the
+        # CURRENT mass, package included), yaw rate] and the stabiliser turns that into rotor thrusts. The rotors,
+        # their limits and all the physics (lift loss, wind, noise) are unchanged - only who holds the drone level.
+        # "althold" = the same stabiliser in ALTITUDE-HOLD mode (the usual flight mode of consumer drones): the third
+        # action is a CLIMB RATE (m/s, 0 = hold the height) instead of a vertical acceleration, so random stick
+        # inputs average out and a beginner does not build up a fast sink by accident - only a deliberate
+        # command does. The height loop is the autopilot's (vertical accel = kz x climb-rate error).
+        self.ctrl_mode = str(cfg.get("ctrl_mode", "rotor")).lower()
+        self.att_max_tilt = np.radians(float(cfg.get("att_max_tilt_deg", 40.0)))   # tilt limit (rad)
+        self.att_yaw_rate = float(cfg.get("att_yaw_rate", 2.0))                     # rad/s at |action| = 1
+        self.alt_vz_max = float(cfg.get("alt_vz_max", 3.0))                         # climb/sink rate at |az| = 1
+        self.alt_kz = float(cfg.get("alt_kz", 3.0))                                 # height loop gain (1/s)
         self.rw = cfg["reward"]
         self.obs_scale = float(self.rw.get("obs_scale", cfg.get("obstacle_scale", 0.5)))
 
@@ -429,6 +456,10 @@ class DroneTargetEnv(gym.Env):
         self._ctrl_hi = float(self.model.actuator_ctrlrange[0][1])
         self._mass0 = float(self.model.body_mass[self._core_id])
         self._pkg = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "package")
+        if self.ctrl_mode in ("attitude", "althold"):
+            self._init_attitude_controller()
+        elif self.ctrl_mode != "rotor":
+            raise ValueError(f"unknown ctrl_mode {self.ctrl_mode!r} (use 'rotor', 'attitude' or 'althold')")
 
         # mocap ids for the visual pad + obstacle markers (rendering only; guarded)
         self._mocap = {}
@@ -438,7 +469,7 @@ class DroneTargetEnv(gym.Env):
                 self._mocap[name] = int(self.model.body_mocapid[bid])
 
         obs_dim = (14 + 2 * self.n_obstacles + (1 if self.payload_max > 0.0 else 0)
-                   + (2 if self.wind_mean_max > 0.0 else 0))
+                   + (2 if self.wind_mean_max > 0.0 else 0) + (6 if self.race_obs_course else 0))
         self.observation_space = spaces.Box(-np.inf, np.inf, shape=(obs_dim,), dtype=np.float32)
         self.action_space = spaces.Box(-1.0, 1.0, shape=(self.n_act,), dtype=np.float32)
 
@@ -473,6 +504,11 @@ class DroneTargetEnv(gym.Env):
             base.append(self.payload / self._mass0)         # package weight, visible to the agent
         if self.wind_mean_max > 0.0:
             base += [self._wind_mean[0], self._wind_mean[1]]   # the episode's steady wind (N), visible
+        if self.race_obs_course:                               # racing-line sensor (see __init__)
+            from src.envs.race_course import project
+            k = int(project(self.course, pos)[0][0])
+            c = self.course
+            base += list(c["points"][k] - pos) + list(c["tangent"][(k + self._race_ahead) % len(c["points"])])
         return np.array(base, dtype=np.float32)
 
     def _place_obstacles(self):
@@ -608,16 +644,73 @@ class DroneTargetEnv(gym.Env):
         d = float(np.linalg.norm(self._target[:2] - np.asarray(pos_xy)[:2]))
         return float(1.0 / (1.0 + np.exp((d - self.turb_radius) / max(self.turb_ramp, 1e-6))))
 
+    def _init_attitude_controller(self):
+        """The on-board stabiliser of ctrl_mode "attitude" / "althold" (the hand-written autopilot's cascaded PD):
+        mixing matrix from the actual rotor sites / yaw gears, attitude gains from the body inertia."""
+        m = self.model
+        xy = np.array([m.site_pos[m.actuator_trnid[i, 0]][:2] for i in range(m.nu)])
+        cyaw = np.array([float(m.actuator_gear[i, 5]) for i in range(m.nu)])
+        self._att_minv = np.linalg.inv(np.vstack([np.ones(m.nu), xy[:, 1], -xy[:, 0], cyaw]))
+        inertia = np.asarray(m.body_inertia[self._core_id], dtype=np.float64)
+        wn, zeta = float(self.cfg.get("att_wn", 12.0)), float(self.cfg.get("att_zeta", 0.8))
+        self._att_kp, self._att_kd = inertia * wn ** 2, inertia * 2.0 * zeta * wn
+        self._att_kyaw = float(self.cfg.get("att_yaw_gain", 0.004))     # yaw torque per rad/s of yaw-rate error
+        self._g = float(-m.opt.gravity[2])
+        self.att_acc_h = self._g * float(np.tan(self.att_max_tilt))     # sideways m/s^2 at |action| = 1
+
+    def attitude_to_rotors(self, action) -> np.ndarray:
+        """ctrl_mode "attitude"/"althold": action [ax, ay, az, yaw rate] in [-1, 1] -> rotor command in [-1, 1] (the
+        same units as ctrl_mode="rotor": thrust = empty-drone hover x (1 + command)). Deterministic in the current
+        pose, angular velocity and package weight (all in the obs) and the action; no randomness.
+          * wanted thrust acceleration = (ax, ay) x g tan(max tilt) sideways + g (1 + az) up: action 0 = level hover
+            for the CURRENT mass; az = -1 cuts the thrust (free fall); az = +1 asks for 2 g (the rotors top out
+            at 2x the EMPTY drone's weight, so a heavy package leaves less to brake with - as before);
+            "althold": az = kz (climb-rate command - vertical speed) / g instead, clipped to +-1 (0 = hold height);
+          * the tilt is capped at `att_max_tilt_deg` from vertical: the drone never flips on its own;
+          * attitude PD -> torques; mixing with attitude priority (the collective gives way when a rotor
+            saturates, so the drone stays level even at full or zero throttle)."""
+        a = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)
+        mass = float(self.model.body_subtreemass[self._core_id])        # includes the package
+        if self.ctrl_mode == "althold":        # az = climb-rate command: vertical accel = kz (vz_cmd - vz), +-1 g
+            az = float(np.clip(self.alt_kz * (a[2] * self.alt_vz_max - float(self.data.qvel[2])) / self._g,
+                               -1.0, 1.0))
+        else:
+            az = float(a[2])
+        acc = np.array([a[0] * self.att_acc_h, a[1] * self.att_acc_h, self._g * (1.0 + az)])
+        h, h_max = float(np.hypot(acc[0], acc[1])), float(np.tan(self.att_max_tilt)) * max(acc[2], 0.0)
+        if h > h_max:
+            acc[:2] *= h_max / h
+        rot = _quat_to_mat(self.data.qpos[3:7])
+        zb, w = rot[:, 2], np.asarray(self.data.qvel[3:6], dtype=np.float64)
+        thrust = mass * max(float(acc @ zb), 0.0)
+        n = float(np.linalg.norm(acc))
+        z_des = acc / n if n > 1e-9 else np.array([0.0, 0.0, 1.0])
+        tau = self._att_kp * (rot.T @ np.cross(zb, z_des)) - self._att_kd * w
+        tau[2] = self._att_kyaw * (a[3] * self.att_yaw_rate - w[2])
+        f_col = self._att_minv[:, 0] * thrust
+        f_tau = self._att_minv[:, 1:] @ tau
+        lo = max(self._hover * (1.0 - self.thrust_gain), 0.0)
+        hi = min(self._hover * (1.0 + self.thrust_gain), self._ctrl_hi)
+        span = float(f_tau.max() - f_tau.min())
+        if span > hi - lo:                                          # torques alone exceed the rotor range
+            f_tau = f_tau * (hi - lo) / span
+        f = f_col + f_tau
+        f = f + max(0.0, lo - float(f.min()))                       # attitude first: move the collective
+        f = f - max(0.0, float(f.max()) - hi)
+        return np.clip((f / self._hover - 1.0) / self.thrust_gain, -1.0, 1.0)
+
     def step(self, action: np.ndarray):
         action = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)   # the AGENT's action
         pos = np.array(self.data.qpos[0:3])
         s = self.zone_weight(pos[:2])                         # how deep in the landing zone
+        # rotor command: the agent's action itself, or the on-board stabiliser's output ("attitude" / "althold")
+        rotor = self.attitude_to_rotors(action) if self.ctrl_mode != "rotor" else action
 
         # hidden additive action noise (unobserved -> process noise; paper App. D.4)
-        applied = action
+        applied = rotor
         sigma = self.action_noise + s * (self.action_noise_zone - self.action_noise)
         if sigma > 0.0:
-            applied = np.clip(action + self._rng.normal(0.0, sigma, size=self.n_act), -1.0, 1.0)
+            applied = np.clip(rotor + self._rng.normal(0.0, sigma, size=self.n_act), -1.0, 1.0)
         thrust = self._hover * (1.0 + applied * self.thrust_gain)
         if self.act_noise > 0.0:                              # per-rotor actuator (process) noise
             thrust = thrust * (1.0 + self._rng.normal(0.0, self.act_noise, size=self.n_act))
@@ -626,7 +719,7 @@ class DroneTargetEnv(gym.Env):
         if self.vrs_loss > 0.0:                               # lift loss in a fast vertical descent
             v = self.data.qvel[0:3]
             if self.vrs_powered:                              # delivery2: only in a powered, upright descent
-                ratio = float(np.mean(1.0 + action * self.thrust_gain))   # agent's commanded thrust / hover
+                ratio = float(np.mean(1.0 + rotor * self.thrust_gain))    # commanded rotor thrust / hover
                 self.thrust_eff = _powered_lift_factor(v, self.data.qpos[3:7], ratio, self.vrs_loss,
                                                        self.vrs_speed, self.vrs_full, self.vrs_escape,
                                                        self.vrs_upright, self.vrs_thrust)

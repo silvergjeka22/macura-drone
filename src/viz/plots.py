@@ -653,13 +653,14 @@ def plot_steps_to_threshold(runs, threshold=None, frac=0.6, save_path=None):
 
 # ── policy video ──────────────────────────────────────────────────────────────
 def record_policy_video(ckpt_path, cfg, save_path, seconds=60, seed=999, label=None,
-                        device="cpu", n_candidates=60):
+                        device="cpu", n_candidates=60, frame_step=1):
     """Save a ~`seconds` mp4 of a trained policy's BEST episodes, safe on a headless GPU box.
 
     Step 1 (here, no graphics): roll the deterministic policy over `n_candidates` full episodes,
     scoring each. Step 2: rank them (successful LANDINGS first, then no-crash, then higher return,
     then longer) and stitch the best ones back-to-back until the clip is ~`seconds` long, with a
-    per-episode caption burned in. Step 3: render in a mujoco-only subprocess. Returns save_path
+    per-episode caption burned in. Step 3: render in a mujoco-only subprocess (every `frame_step`-th
+    control step, still in real time: fewer frames = a faster render). Returns save_path
     or None. Showing the best episodes is honest for a DEMO (it is a highlight reel, clearly the
     strongest runs) - the scientific claim still comes from the aggregate plots, not the video."""
     import tempfile
@@ -670,7 +671,8 @@ def record_policy_video(ckpt_path, cfg, save_path, seconds=60, seed=999, label=N
         return None
     if not eps:
         return None
-    fps = eps[0]["fps"]
+    frame_step = max(1, int(frame_step))
+    fps = eps[0]["fps"] / frame_step
     # rank best-first: landed > not-crashed > higher return > longer (steadier)
     eps.sort(key=lambda e: (e["reached"], not e["crashed"], e["ret"], e["len"]), reverse=True)
     target = int(seconds * fps)
@@ -685,7 +687,7 @@ def record_policy_video(ckpt_path, cfg, save_path, seconds=60, seed=999, label=N
         outcome = (("FULL LAP ✓" if race else "LANDED ✓") if e["reached"]
                    else ("crash ✗" if e["crashed"] else ("flying" if race else "hover")))
         tag = f"{(label + ' | ') if label else ''}clip {shown}: {outcome}  (return {e['ret']:.0f})"
-        for k in range(e["len"]):
+        for k in range(0, e["len"], frame_step):
             qpos.append(e["qpos"][k]); mocap.append(e["mocap"][k]); pkg.append(e["pkg"])
             labels.append(tag)
     what = "flew a full lap" if cfg["env"].get("race", False) else "landed"
@@ -697,7 +699,7 @@ def record_policy_video(ckpt_path, cfg, save_path, seconds=60, seed=999, label=N
     asset = tempfile.mktemp(suffix=".xml")          # render the SAME scene the env built (cage, package...)
     with open(asset, "w") as f:
         f.write(mjcf_xml)
-    return _render_trajectory_subprocess(frames_file, save_path, int(fps), label or "", asset=asset)
+    return _render_trajectory_subprocess(frames_file, save_path, int(round(fps)), label or "", asset=asset)
 
 
 def _policy_episodes(ckpt_path, env_cfg, n_episodes, seed, device):
@@ -806,7 +808,7 @@ def _render_trajectory_subprocess(frames_file, save_path, fps, label, backend=No
 
 # ── race video: several pilots on the SAME scenarios, side by side, with a scoreboard ─────────────
 def record_race_video(cfg, pilots, save_path, seeds=(100, 101, 102, 103), device="cpu", text=None,
-                      fps=25, camera=None, size=None):
+                      fps=25, camera=None, size=None, frame_step=2):
     """Fly each pilot on the SAME scenarios (same reset seed -> same package, spawn and wind gusts) and
     render them side by side with a running scoreboard - e.g. MACURA vs MBPO. `pilots` maps a label to
     an SB3 checkpoint .zip, or to "autopilot:<descent m/s>[:<race speed m/s>]" for the hand-written controller
@@ -814,6 +816,7 @@ def record_race_video(cfg, pilots, save_path, seeds=(100, 101, 102, 103), device
     (`camera` = {lookat, distance, elevation, azimuth} and `size` = (w, h) per panel override it). Rollouts run here without graphics; the video is drawn in a mujoco-only subprocess
     (safe next to torch on a headless box). Delivery scenery: windsock follows the gusts, the drone turns
     red while it loses thrust, the trail is green (full thrust) -> red. `text` overrides the captions.
+    `frame_step`: draw every n-th control step (with fps = 50 / frame_step the clip plays in real time).
     Returns save_path, or None."""
     import pickle
     import subprocess
@@ -839,7 +842,7 @@ def record_race_video(cfg, pilots, save_path, seeds=(100, 101, 102, 103), device
     data_file, asset = tempfile.mktemp(suffix=".pkl"), tempfile.mktemp(suffix=".xml")
     with open(data_file, "wb") as f:
         pickle.dump({"runs": runs, "labels": list(pilots), "words": words, "fps": int(fps),
-                     "camera": camera, "size": tuple(size or (480, 360))}, f)
+                     "camera": camera, "size": tuple(size or (480, 360)), "step": int(frame_step)}, f)
     with open(asset, "w") as f:
         f.write(xml)
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -954,7 +957,7 @@ for sc in range(len(runs[labels[0]])):
             cams[k].distance, cams[k].elevation, cams[k].azimuth = CAM["distance"], CAM["elevation"], CAM["azimuth"]
             cams[k].lookat[:] = CAM["lookat"]
         looks[k] = None
-    for n_i, i in enumerate(list(range(0, T, 2)) + [T - 1] * int(d["fps"] * 1.2)):
+    for n_i, i in enumerate(list(range(0, T, d.get("step", 2))) + [T - 1] * int(d["fps"] * 1.2)):
         tiles = []
         for k in labels:
             ep = eps[k]; L = len(ep["qpos"]); j = min(i, L - 1)

@@ -243,6 +243,40 @@ RACE_REWARD = {"w_prog": 1.0,       # per step: speed ALONG the course (m/s), co
 #   fast 3 m/s (chute 1.1)       0.93  0.00   209 / 209 / 209   <- the best way to fly it
 #   dive 3 m/s (chute 2.0)       ~     0.40   213 / 199 / 186
 #   dive 3 m/s (chute 3.0)       0.63  0.83   204 / 174 / 144
+# RACE2 (opt-in: MACURA_TASK=race2, decided 2026-09-25 BEFORE its first Kaggle run; the same for all four algorithms;
+# MACURA_TASK=race stays bit-identical to the version the 10k test ran on). The same course, physics, reward,
+# wind, package and crash cost as RACE. Built because in the RACE 10k-step test NOBODY learned to race (laps ~0, 55-100%
+# crashes): with raw per-rotor thrust, a beginner flips within 0.3 s (random actions) and a drone that holds
+# hover thrust crashes within 1.1 s, so every early flight is a -500 crash and the agents never reach the chute.
+#   * ctrl_mode "althold": an on-board stabiliser in ALTITUDE-HOLD mode, the usual flight mode of consumer drones
+#     (src/envs/drone_env.py, attitude_to_rotors). The agent commands [sideways acceleration x, y (via the tilt,
+#     capped at 40 deg), CLIMB RATE (+-3 m/s, 0 = hold the height), yaw rate]; action 0 = level hover for the CURRENT
+#     mass. Same rotors, same limits (a heavy package still leaves less thrust to brake), same lift-loss physics.
+#     Why a climb rate and not a vertical acceleration (ctrl_mode "attitude", also measured): random vertical
+#     accelerations integrate into fast sinks, so beginners already lost lift in 9% of random steps and the model
+#     learned the lift loss before any policy tried the chute (advisor test below: disagreement only 1.2-1.3x there).
+#     With a climb-rate stick, random inputs average out (0.3% of random steps, 0% with pink noise).
+#   * race_max_off 2.5 m (was 1.5): even a perfectly level hover drifts off the course in the hidden gusts
+#     (0.4 N) within ~3 s; the wider limit lets beginners fly longer (zero action 3.1 -> 4.3 s, random 2.5 -> 3.1 s).
+#     The reward still charges every metre outside the 0.35 m tube, so hugging the racing line keeps paying.
+#   * race_obs_course: a racing-line sensor, +6 obs dims (vector to the nearest point of the racing line + the
+#     racing direction 0.5 m ahead - a racing drone sees the next gate). A pure function of the position already
+#     in the obs: it adds no information about the physics, it only saves the policy from memorising the course.
+# Offline checks (hand-written autopilot, NOT learned, 30 scenarios, seeds 5000-5029; discounted = gamma 0.99):
+#                                  laps  crash   raw    discounted, crash cost 0 / 100 / 250 / 500
+#   careful 1.5 m/s (chute 0.8)    0.52  0.03    635    118 / 117 / 116 / 114
+#   fast 3 m/s (chute 1.1)         0.93  0.00   1180    209 / 209 / 209 / 209   <- the best way to fly it
+#   dive 3 m/s (chute 2.0)         0.90  0.27    977    216 / 214 / 209 / 202
+#   dive 3 m/s (chute 3.0)         0.69  0.70    446    199 / 189 / 174 / 150
+#   hover (action 0)              -0.02  0.97   -601     -21 / -40 / -67 / -114  (drifts off the course in the gusts)
+#   -> crash cost stays 500: at 250 a moderate chute dive (2 m/s) already pays as much as flying it safely.
+# Advisor test (7-member ensemble trained on random + pink-noise beginners and slow careful flights, then scored on
+# new flights; ratio vs held-out slow flights; GJS = MACURA's disagreement, error = elite-mean prediction error):
+#   chute dive, states losing lift: disagreement 6.1x (median) / 5.3x (mean), error 1.5x / 5.3x
+#   fast racing (> 2.2 m/s):        disagreement 1.2x / 1.0x,                 error 0.8x / 0.9x
+#   -> the model is confidently wrong ONLY in the chute (the stabiliser makes fast flat flight easy to predict).
+RACE2 = dict(RACE, **{"ctrl_mode": "althold", "att_max_tilt_deg": 40.0, "alt_vz_max": 3.0, "alt_kz": 3.0,
+                      "race_max_off": 2.5, "race_obs_course": True, "race_obs_ahead": 0.5})
 TASK = os.environ.get("MACURA_TASK", "").strip().lower()
 if TASK == "delivery":
     ENV.update(DELIVERY)
@@ -254,6 +288,11 @@ elif TASK == "race":
     ENV["reward"] = dict(REWARD, **RACE_REWARD)
     if not os.environ.get("MACURA_STEPS", "").strip():
         TOTAL_ENV_STEPS = 50000                            # race pilot: 50k steps (~8 h for 4 algorithms)
+elif TASK == "race2":
+    ENV.update(RACE2)
+    ENV["reward"] = dict(REWARD, **RACE_REWARD)            # the RACE reward, unchanged
+    if not os.environ.get("MACURA_STEPS", "").strip():
+        TOTAL_ENV_STEPS = 50000
 
 # ENSEMBLE (probabilistic dynamics model, shared by all model-based algos)
 ENSEMBLE = {
@@ -341,7 +380,7 @@ EXPLORATION = {"type": "pink_noise", "scale": 0.3}
 # method's value by its AVERAGE training-time eval return (selection scenarios 100-119), then report the
 # full study on the fresh final-eval scenarios (1000+) only.
 # (max_epochs 10 per model round - instead of open-ended early stopping - keeps a 4-algorithm seed < 12 h.)
-if TASK in ("delivery2", "race"):
+if TASK in ("delivery2", "race", "race2"):
     ENSEMBLE.update({"num_members": 7, "num_elites": 5, "holdout_ratio": 0.2, "holdout_max": 5000,
                      "max_epochs": 10, "patience": 3})
     ROLLOUT.update({"freq_steps": 250, "num_rollouts": 25000, "model_buffer_capacity": 1_000_000})
