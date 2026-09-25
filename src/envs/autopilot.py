@@ -7,6 +7,7 @@ Cascaded PD, the classic quadrotor recipe:
     position error -> desired acceleration (+ gravity) -> thrust along the body z-axis and the
     desired body tilt -> attitude PD -> torques -> per-rotor thrusts (X-quad mixing) -> env action.
 Cage task: it stays above the cage until it is over the opening, then descends slowly.
+Race task: it follows the racing line at `speed` m/s, and sinks at most `descent` m/s in the chute.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ def _rotmat(quat) -> np.ndarray:
 
 class Autopilot:
     def __init__(self, env, kp=4.0, kd=3.2, ki=2.0, kz=3.0, kz_pos=1.2, max_acc=4.0, descent=0.55,
-                 att_wn=12.0, att_zeta=0.8, yaw_kd=0.004, clearance=0.35, hover_above=0.6):
+                 att_wn=12.0, att_zeta=0.8, yaw_kd=0.004, clearance=0.35, hover_above=0.6, speed=2.0):
         m = env.model
         self.env = env
         self.mass = float(m.body_subtreemass[env._core_id])
@@ -45,6 +46,7 @@ class Autopilot:
         self._i = np.zeros(2)                                # integral of the xy error (wind trim)
         self.max_acc, self.descent, self.yaw_kd = max_acc, descent, yaw_kd
         self.clearance, self.hover_above = clearance, hover_above
+        self.speed = speed                                   # race: cruise speed along the course (m/s)
 
     def act(self) -> np.ndarray:
         env, d = self.env, self.env.data
@@ -53,6 +55,8 @@ class Autopilot:
             self.mass = float(env.model.body_subtreemass[env._core_id])   # knows the package weight
         p, v, w = np.array(d.qpos[0:3]), np.array(d.qvel[0:3]), np.array(d.qvel[3:6])
         Rm = _rotmat(d.qpos[3:7])
+        if getattr(env, "race", False):
+            return self._attitude(self._race_accel(p, v), Rm, w)
         tgt = env._target
         dxy = tgt[:2] - p[:2]
         r = float(np.linalg.norm(dxy))
@@ -78,6 +82,30 @@ class Autopilot:
         a[:2] = np.clip(self.kp * dxy - self.kd * v[:2] + self.ki * self._i, -self.max_acc, self.max_acc)
         a[2] = self.kz * (vz_des - v[2]) + self.g
 
+        return self._attitude(a, Rm, w)
+
+    def _race_accel(self, p, v) -> np.ndarray:
+        """Race: fly along the course tangent (taken 0.5 m ahead, to turn in time) at `speed`, capped so the
+        sink speed in the chute stays <= `descent`, pulled back onto the racing line; the steady wind is
+        visible, so it is cancelled by feed-forward."""
+        from src.envs.race_course import project
+        c = self.env.course
+        k = int(project(c, p)[0][0])
+        n = len(c["points"])
+        t = c["tangent"][(k + int(round(0.5 / c["params"]["spacing"]))) % n]
+        along = self.speed
+        if t[2] < -0.3:                                    # steep descent: limit the sink speed
+            along = min(along, self.descent / max(-t[2], 1e-3))
+        v_cmd = along * t + 2.0 * (c["points"][k] - p)
+        a = 3.0 * (v_cmd - v)
+        a[:2] = np.clip(a[:2], -8.0, 8.0)
+        a[2] = float(np.clip(a[2], -6.0, 8.0)) + self.g
+        a -= np.asarray(getattr(self.env, "_wind_mean", np.zeros(3))) / self.mass
+        return a
+
+    def _attitude(self, a, Rm, w) -> np.ndarray:
+        """Desired acceleration -> collective thrust + attitude torques -> per-rotor action."""
+        env = self.env
         zb = Rm[:, 2]
         thrust = self.mass * float(np.dot(a, zb))
         z_des = a / (np.linalg.norm(a) + 1e-9)

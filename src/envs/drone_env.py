@@ -111,6 +111,62 @@ def _drone_reward(obs, act, rw, n_obs, obs_radius, obs_scale, cage=None) -> np.n
     return r_pos + r_level + r_settle - r_spin - r_vel - r_ctrl - r_obs - r_cage
 
 
+def _race_reward(obs, act, rw, course) -> np.ndarray:
+    """RACE task reward (vectorized, real == imagined): speed ALONG the course, counted only while near it,
+    minus distance outside the course tube, plus the small upright / spin / effort terms. There is no finish
+    line: every metre of course flown pays, so flying faster always pays more (like "run as fast as you can")."""
+    from src.envs.race_course import project
+    obs = np.atleast_2d(np.asarray(obs, dtype=np.float64))
+    act = np.atleast_2d(np.asarray(act, dtype=np.float64))
+    k, d = project(course, -obs[:, _REL])                         # the course centre is the world origin
+    prog = np.sum(obs[:, _LV] * course["tangent"][k], axis=-1)    # m/s along the racing direction
+    off = np.maximum(d - float(rw.get("race_tube", 0.35)), 0.0)   # outside the tube (m)
+    near = np.exp(-(off / max(float(rw.get("race_tube_soft", 0.35)), 1e-6)) ** 2)
+    up_z = 1.0 - 2.0 * (obs[:, _QX] ** 2 + obs[:, _QY] ** 2)
+    spin = np.linalg.norm(obs[:, _AV], axis=-1)
+    return (float(rw.get("w_prog", 1.0)) * prog * near - float(rw.get("w_track", 1.0)) * off
+            + float(rw["w_level"]) * up_z - float(rw["w_spin"]) * spin
+            - float(rw["w_ctrl"]) * np.sum(act ** 2, axis=-1))
+
+
+def _add_race_course(root, course):
+    """RACE task visuals (no physics): a ring at each gate P1..P4 and dots along the racing line (red dots =
+    the chute). Plain world geoms with contype/conaffinity 0 - the course is enforced analytically."""
+    import xml.etree.ElementTree as ET
+    wb = root.find("worldbody")
+    for gi, (c, t) in enumerate(course["gates"]):
+        t = t / (np.linalg.norm(t) + 1e-9)
+        e1 = np.cross(t, [0.0, 0.0, 1.0])
+        e1 = e1 / (np.linalg.norm(e1) + 1e-9) if np.linalg.norm(e1) > 1e-6 else np.array([1.0, 0.0, 0.0])
+        e2 = np.cross(t, e1)
+        ring = [c + 0.45 * (np.cos(a) * e1 + np.sin(a) * e2) for a in np.linspace(0, 2 * np.pi, 17)]
+        for i in range(16):
+            a, b = ring[i], ring[i + 1]
+            ET.SubElement(wb, "geom", {
+                "name": f"gate{gi}_{i}", "type": "capsule", "size": "0.025",
+                "fromto": f"{a[0]:.4f} {a[1]:.4f} {a[2]:.4f} {b[0]:.4f} {b[1]:.4f} {b[2]:.4f}",
+                "contype": "0", "conaffinity": "0", "rgba": "1.0 0.55 0.10 1" if i % 2 else "0.95 0.95 0.95 1"})
+    pts, chute = course["points"], course["chute"]
+    for i in range(0, len(pts), 5):
+        ET.SubElement(wb, "geom", {
+            "name": f"course{i}", "type": "sphere", "size": "0.035",
+            "pos": f"{pts[i][0]:.4f} {pts[i][1]:.4f} {pts[i][2]:.4f}", "contype": "0", "conaffinity": "0",
+            "rgba": "0.95 0.25 0.15 1" if chute[i] else "0.80 0.90 1.0 0.9"})
+    top, bot = pts[np.flatnonzero(chute)[0]], pts[np.flatnonzero(chute)[-1]]
+    ET.SubElement(wb, "geom", {                       # the chute: a see-through red column
+        "name": "chute", "type": "cylinder", "size": "0.35",
+        "fromto": f"{top[0]:.4f} {top[1]:.4f} {top[2]:.4f} {bot[0]:.4f} {bot[1]:.4f} {bot[2]:.4f}",
+        "contype": "0", "conaffinity": "0", "rgba": "0.95 0.20 0.10 0.18"})
+    for g in root.iter("geom"):                       # solid pillars
+        if (g.get("name") or "").startswith("obs"):
+            g.set("rgba", "0.80 0.30 0.20 1")
+    vis = root.find("visual")                         # brighter scene for the wide race camera
+    if vis is None:
+        vis = ET.SubElement(root, "visual")
+    ET.SubElement(vis, "headlight", {"ambient": "0.35 0.35 0.38", "diffuse": "0.55 0.55 0.55",
+                                     "specular": "0.1 0.1 0.1"})
+
+
 def _cage_params(cfg: dict):
     """(radius, height, margin) of the cage wall, or None when the cage task is off. Shared by the
     env and by known_reward_fn / termination_fn, so real and imagined use identical numbers."""
@@ -286,12 +342,28 @@ class DroneTargetEnv(gym.Env):
         self.payload = 0.0
         self.thrust_eff = 1.0                                     # last step's lift factor (diagnostics/videos)
         self.scenery = bool(cfg.get("scenery", False))            # windsock for the videos (visual only)
+        # RACE task (off by default): race laps around a fixed 3-D course (src/envs/race_course.py) with a
+        # steep chute; a visible mean wind per episode; crash = ground, flip, pillar, or leaving the course.
+        self.race = bool(cfg.get("race", False))
+        self.course = None
+        if self.race:
+            from src.envs.race_course import build_course
+            self.course = build_course(cfg)
+        self.race_max_off = float(cfg.get("race_max_off", 1.5))  # farther than this from the course = out
+        self.race_floor = float(cfg.get("race_floor", 0.12))     # below this height = hit the ground
+        self.race_pillars = [tuple(float(v) for v in p) for p in cfg.get("race_pillars", [])]
+        self.race_progress = 0.0                                  # course metres flown this episode
+        self._race_k = 0
+        # VISIBLE mean wind (off by default): a steady push of random direction and strength every episode,
+        # IN the observation (unlike the hidden gusts) - new combinations for the model, not noise.
+        self.wind_mean_max = float(cfg.get("wind_mean_max", 0.0))  # N
+        self._wind_mean = np.zeros(3)
         self.rw = cfg["reward"]
         self.obs_scale = float(self.rw.get("obs_scale", cfg.get("obstacle_scale", 0.5)))
 
         scene = cfg.get("mjcf_scene") or _ASSET
         spare_markers = self.n_obstacles < 4 and not self.cage     # column markers the task doesn't use
-        if self.touchdown or self.cage or self.payload_max > 0.0 or spare_markers or self.scenery:
+        if self.touchdown or self.cage or self.payload_max > 0.0 or spare_markers or self.scenery or self.race:
             import xml.etree.ElementTree as ET
             root = ET.parse(scene).getroot()
             if self.touchdown:
@@ -340,6 +412,8 @@ class DroneTargetEnv(gym.Env):
                     "mass": "0", "contype": "0", "conaffinity": "0", "rgba": "0.72 0.52 0.30 1"})
             if self.scenery:
                 _add_windsock(root)
+            if self.race:
+                _add_race_course(root, self.course)
             self.mjcf_xml = ET.tostring(root, encoding="unicode")
             self.model = mujoco.MjModel.from_xml_string(self.mjcf_xml)
         else:
@@ -363,7 +437,8 @@ class DroneTargetEnv(gym.Env):
             if bid >= 0 and self.model.body_mocapid[bid] >= 0:
                 self._mocap[name] = int(self.model.body_mocapid[bid])
 
-        obs_dim = 14 + 2 * self.n_obstacles + (1 if self.payload_max > 0.0 else 0)
+        obs_dim = (14 + 2 * self.n_obstacles + (1 if self.payload_max > 0.0 else 0)
+                   + (2 if self.wind_mean_max > 0.0 else 0))
         self.observation_space = spaces.Box(-np.inf, np.inf, shape=(obs_dim,), dtype=np.float32)
         self.action_space = spaces.Box(-1.0, 1.0, shape=(self.n_act,), dtype=np.float32)
 
@@ -396,6 +471,8 @@ class DroneTargetEnv(gym.Env):
             base += [o[0] - pos[0], o[1] - pos[1]]          # obstacle xy relative to the drone
         if self.payload_max > 0.0:
             base.append(self.payload / self._mass0)         # package weight, visible to the agent
+        if self.wind_mean_max > 0.0:
+            base += [self._wind_mean[0], self._wind_mean[1]]   # the episode's steady wind (N), visible
         return np.array(base, dtype=np.float32)
 
     def _place_obstacles(self):
@@ -407,6 +484,8 @@ class DroneTargetEnv(gym.Env):
         uncertainty-triggered truncation avoids the bad data. The columns are evenly spaced around
         the arc OUTSIDE the entry gap, so the pad is enclosed on every side except the opening the
         drone comes in through."""
+        if self.race:                                  # fixed pillars inside two corners of the course
+            return np.array(self.race_pillars, dtype=float).reshape(self.n_obstacles, 2)
         pad = self._target[:2]
         # the gap faces the start (origin), i.e. the direction from the pad back toward the start
         gap_dir = -pad
@@ -469,6 +548,16 @@ class DroneTargetEnv(gym.Env):
             rad = self._rng.uniform(self.start_offset_min, self.start_offset)
             self.data.qpos[0:2] = self._target[:2] + rad * np.array([np.cos(ang), np.sin(ang)])
             self.data.qpos[2] = self._rng.uniform(*self.start_height)
+        if self.race:                          # start ON the course at a random point, course centre = origin
+            self._target = np.zeros(3)
+            j = int(self._rng.integers(len(self.course["points"])))
+            self.data.qpos[0:3] = (self.course["points"][j]
+                                   + self._rng.uniform(-self.init_noise, self.init_noise, size=3))
+            self._race_k, self.race_progress = j, 0.0
+        if self.wind_mean_max > 0.0:           # this episode's steady wind: random direction and strength
+            ang = self._rng.uniform(0.0, 2.0 * np.pi)
+            mag = self._rng.uniform(0.0, self.wind_mean_max)
+            self._wind_mean = np.array([mag * np.cos(ang), mag * np.sin(ang), 0.0])
         self._obstacles = self._place_obstacles()
         self._sync_markers()
         mujoco.mj_forward(self.model, self.data)
@@ -476,7 +565,9 @@ class DroneTargetEnv(gym.Env):
 
     def _sync_markers(self):
         """Move the visual pad + obstacle markers (rendering only; no effect on physics)."""
-        if "pad" in self._mocap:
+        if "pad" in self._mocap and self.race:        # no landing pad in the race
+            self.data.mocap_pos[self._mocap["pad"]] = [0.0, 0.0, -5.0]
+        elif "pad" in self._mocap:
             if self.touchdown:                # solid platform spanning floor .. pad_height
                 self.data.mocap_pos[self._mocap["pad"]] = [self._target[0], self._target[1],
                                                            self.pad_height / 2.0]
@@ -555,6 +646,8 @@ class DroneTargetEnv(gym.Env):
                           np.sqrt(1.0 - self.turb_corr ** 2) *
                           self._rng.normal(0.0, self.turb_force, size=3))
         force = self._wind + s * self._turb
+        if self.wind_mean_max > 0.0:
+            force = force + self._wind_mean
         if self.wake_gamma > 0.0 or self.pad_downwash > 0.0:   # deterministic column wake + pad downwash
             force = force + self.air_drag * self.air_velocity(pos)
         self.data.xfrc_applied[self._core_id, 0:3] = force
@@ -564,8 +657,11 @@ class DroneTargetEnv(gym.Env):
         self._step_count += 1
 
         obs = self._get_obs()
-        reward = float(_drone_reward(obs, action, self.rw, self.n_obstacles,
-                                     self.obs_radius, self.obs_scale, cage=self._cage)[0])
+        if self.race:
+            reward = float(_race_reward(obs, action, self.rw, self.course)[0])
+        else:
+            reward = float(_drone_reward(obs, action, self.rw, self.n_obstacles,
+                                         self.obs_radius, self.obs_scale, cage=self._cage)[0])
 
         dist = float(np.linalg.norm(obs[_REL]))
         up_z = 1.0 - 2.0 * (float(obs[_QX]) ** 2 + float(obs[_QY]) ** 2)
@@ -575,7 +671,21 @@ class DroneTargetEnv(gym.Env):
         hard = height < self.impact_height and abs(float(obs[_VZ])) > self.hard_speed
         hit_cage = self._cage is not None and bool(_cage_hit(obs, self._cage)[0])
         crashed = bool(up_z < self.fail_tilt or hit_obs or hard or hit_cage or dist > self.max_dist)
-        if self.touchdown:                    # success = actually RESTING on the platform
+        if self.race:
+            from src.envs.race_course import project
+            k, d_course = project(self.course, -obs[_REL])     # same numbers as termination_fn
+            k, d_course = int(k[0]), float(d_course[0])
+            crashed = crashed or d_course > self.race_max_off or height < self.race_floor
+            L = self.course["length"]                     # course metres flown (wraps around the lap)
+            ds = (self.course["s"][k] - self.course["s"][self._race_k] + L / 2.0) % L - L / 2.0
+            if d_course < 1.0:
+                self.race_progress += ds
+            self._race_k = k
+        if self.race:                         # "reached" = completed a full lap this episode
+            landed = bool(self.race_progress >= self.course["length"])
+            if crashed:                       # a crash costs (same rule as known_reward_fn)
+                reward -= float(self.rw.get("w_crash", 0.0))
+        elif self.touchdown:                    # success = actually RESTING on the platform
             on_pad = (float(np.linalg.norm(obs[_REL][:2])) < self.pad_radius
                       and -0.02 < height - self.pad_z < 0.04)
             landed = bool(on_pad and speed < self.touch_speed and up_z > 0.9)
@@ -586,6 +696,8 @@ class DroneTargetEnv(gym.Env):
         truncated = self._step_count >= self.max_episode_steps
         info = {"failure": bool(crashed), "dist": dist, "up_z": up_z, "reached": landed,
                 "thrust_eff": self.thrust_eff, "payload": self.payload}
+        if self.race:
+            info["laps"] = self.race_progress / self.course["length"]
         return obs, reward, terminated, truncated, info
 
     def _nearest_obstacle(self, obs) -> float:
@@ -618,6 +730,10 @@ def known_reward_fn(cfg: dict):
     """Return reward_fn(obs, act) -> (batch,), the SAME dense reward the env uses.
     `cfg` is the `env:` sub-config. Used to score imagined transitions identically."""
     rw = cfg["reward"]
+    if cfg.get("race", False):                 # + the crash penalty, from the SAME crash rule as the env
+        from src.envs.race_course import build_course
+        course, crashed, w_crash = build_course(cfg), termination_fn(cfg), float(rw.get("w_crash", 0.0))
+        return lambda obs, act: _race_reward(obs, act, rw, course) - w_crash * crashed(obs)
     n_obs = int(cfg.get("n_obstacles", 2))
     obs_radius = float(cfg.get("obstacle_radius", 0.4))
     obs_scale = float(rw.get("obs_scale", cfg.get("obstacle_scale", 0.5)))
@@ -640,6 +756,12 @@ def termination_fn(cfg: dict):
     impact_height = float(cfg.get("impact_height", 0.06))
     hard_speed = float(cfg.get("hard_speed", 1.0))
     cage = _cage_params(cfg)
+    course = None
+    if cfg.get("race", False):
+        from src.envs.race_course import build_course
+        course = build_course(cfg)
+        race_max_off = float(cfg.get("race_max_off", 1.5))
+        race_floor = float(cfg.get("race_floor", 0.12))
 
     def done_fn(obs):
         obs = np.atleast_2d(np.asarray(obs))
@@ -652,6 +774,9 @@ def termination_fn(cfg: dict):
             done = done | (np.linalg.norm(oxy, axis=-1).min(axis=-1) < obs_radius)
         if cage is not None:
             done = done | _cage_hit(obs, cage)
+        if course is not None:                         # race: left the course or touched the ground
+            from src.envs.race_course import project
+            done = done | (project(course, -obs[:, _REL])[1] > race_max_off) | (obs[:, _H] < race_floor)
         return done
 
     return done_fn

@@ -88,7 +88,7 @@ def evaluate(agent, env, eval_episodes: int, eval_seeds=None) -> dict:
     # unstable even when the policy was steady. Same base -> comparable across algos (fairness).
     base = int(eval_seeds[0]) if eval_seeds else 100
     returns, lengths, failures, successes, heavy = [], [], [], [], []
-    max_sink, lift_steps = [], 0                        # measurement only (read from the sim state)
+    max_sink, lift_steps, laps = [], 0, []               # measurement only (read from the sim state)
     payload_max = float(getattr(env, "payload_max", 0.0))
     raw = getattr(env, "unwrapped", env)
     for i in range(eval_episodes):
@@ -111,6 +111,8 @@ def evaluate(agent, env, eval_episodes: int, eval_seeds=None) -> dict:
         successes.append(float(reached))
         heavy.append(payload_max > 0.0 and env.payload >= 0.5 * payload_max)
         max_sink.append(ep_sink)
+        if "laps" in info:                              # race task: course laps flown this episode
+            laps.append(float(info["laps"]))
     out = {
         "eval_return": float(np.mean(returns)),
         "eval_return_std": float(np.std(returns)),
@@ -120,6 +122,8 @@ def evaluate(agent, env, eval_episodes: int, eval_seeds=None) -> dict:
         "eval_max_sink": float(np.median(max_sink)),     # fastest descent (m/s), median over episodes
         "eval_liftloss": float(lift_steps / max(1, sum(lengths))),   # share of steps losing lift
     }
+    if laps:
+        out["eval_laps"] = float(np.mean(laps))
     if payload_max > 0.0:                                # delivery task: crash rate by package weight
         f, h = np.array(failures), np.array(heavy, dtype=bool)
         out["eval_failure_light"] = float(f[~h].mean()) if (~h).any() else float("nan")
@@ -289,6 +293,8 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
             log["train_episodes"].append(train_episodes)
             log["eval_max_sink"].append(m["eval_max_sink"])
             log["eval_liftloss"].append(m["eval_liftloss"])
+            if "eval_laps" in m:
+                log["eval_laps"].append(m["eval_laps"])
             improved = step >= start_step and m["eval_return"] > best_return
             if improved:                       # overwrite best checkpoint (policy + ensemble + meta)
                 best_return = m["eval_return"]
@@ -389,7 +395,8 @@ def _empty_log():
             # the drones each method breaks WHILE learning - believing a wrong model costs real crashes
             "train_crashes": [], "train_episodes": [],
             # the greedy policy in the evals: fastest descent (median m/s) and share of steps losing lift
-            "eval_max_sink": [], "eval_liftloss": []}
+            "eval_max_sink": [], "eval_liftloss": [],
+            "eval_laps": []}                     # race task: laps flown per eval episode
 
 
 def _pct(x):
@@ -417,7 +424,8 @@ def _print_status(algo, cfg, d, m, tm, dt, elapsed, step, total_steps, every):
         print(f"    model: {line} | fast-descent share of its imagined data {_pct(d.get('fast_frac'))}")
     rate = dt / max(1, every)
     eta = (total_steps - step) * rate / 3600
-    print(f"    policy: fastest descent {m['eval_max_sink']:.1f} m/s | losing lift {_pct(m['eval_liftloss'])}"
+    laps = f"laps {m['eval_laps']:.2f} per flight | " if "eval_laps" in m else ""
+    print(f"    policy: {laps}fastest descent {m['eval_max_sink']:.1f} m/s | losing lift {_pct(m['eval_liftloss'])}"
           f" of the time || time: {dt:.0f} s since last eval (model fit {tm['fit']:.0f} s, imagine "
           f"{tm['imagine']:.0f} s, SAC {tm['sac']:.0f} s) | run so far {elapsed / 60:.0f} min, ~{eta:.1f} h left",
           flush=True)

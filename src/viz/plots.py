@@ -161,6 +161,17 @@ def plot_sample_efficiency(runs, save_path=None):
     return fig
 
 
+def plot_race_laps(runs, save_path=None):
+    """RACE task: laps flown per 10 s evaluation flight over training, mean +/- std over seeds (higher = faster
+    AND still on the course; a crash ends the flight). Runs without laps (other tasks) are skipped."""
+    runs = [r for r in runs if r.get("eval_laps")]
+    fig = _curve_figure(runs, "eval_laps", "laps per flight (10 s)", "Race: laps per flight over training", None)
+    fig.axes[0].axhline(0.93, ls=":", color="k", lw=1.2, label="hand-written autopilot, 3 m/s (0.93)")
+    fig.axes[0].legend()
+    _maybe_save(fig, save_path)
+    return fig
+
+
 def plot_success_rate(runs, save_path=None):
     """Fraction of eval episodes that SUCCEED (drone: reached & held the target), over training."""
     return _curve_figure(runs, "eval_success_rate", "success rate",
@@ -670,12 +681,15 @@ def record_policy_video(ckpt_path, cfg, save_path, seconds=60, seed=999, label=N
         if len(qpos) >= target and shown >= 3:
             break
         shown += 1
-        outcome = "LANDED ✓" if e["reached"] else ("crash ✗" if e["crashed"] else "hover")
+        race = bool(cfg["env"].get("race", False))
+        outcome = (("FULL LAP ✓" if race else "LANDED ✓") if e["reached"]
+                   else ("crash ✗" if e["crashed"] else ("flying" if race else "hover")))
         tag = f"{(label + ' | ') if label else ''}clip {shown}: {outcome}  (return {e['ret']:.0f})"
         for k in range(e["len"]):
             qpos.append(e["qpos"][k]); mocap.append(e["mocap"][k]); pkg.append(e["pkg"])
             labels.append(tag)
-    print(f"  {label or 'policy'}: {n_land}/{len(eps)} episodes landed; showing best {shown} "
+    what = "flew a full lap" if cfg["env"].get("race", False) else "landed"
+    print(f"  {label or 'policy'}: {n_land}/{len(eps)} episodes {what}; showing best {shown} "
           f"({len(qpos)} frames ~ {len(qpos)/fps:.0f}s)")
     frames_file = tempfile.mktemp(suffix=".npz")
     np.savez(frames_file, qpos=np.array(qpos), mocap=np.array(mocap), pkg=np.array(pkg),
@@ -792,11 +806,12 @@ def _render_trajectory_subprocess(frames_file, save_path, fps, label, backend=No
 
 # ── race video: several pilots on the SAME scenarios, side by side, with a scoreboard ─────────────
 def record_race_video(cfg, pilots, save_path, seeds=(100, 101, 102, 103), device="cpu", text=None,
-                      fps=25):
+                      fps=25, camera=None, size=None):
     """Fly each pilot on the SAME scenarios (same reset seed -> same package, spawn and wind gusts) and
     render them side by side with a running scoreboard - e.g. MACURA vs MBPO. `pilots` maps a label to
-    an SB3 checkpoint .zip, or to "autopilot:<descent m/s>" for the hand-written controller (NOT a
-    learned policy). Rollouts run here without graphics; the video is drawn in a mujoco-only subprocess
+    an SB3 checkpoint .zip, or to "autopilot:<descent m/s>[:<race speed m/s>]" for the hand-written controller
+    (NOT a learned policy). RACE task: a fixed wide camera over the whole course, laps on the scoreboard
+    (`camera` = {lookat, distance, elevation, azimuth} and `size` = (w, h) per panel override it). Rollouts run here without graphics; the video is drawn in a mujoco-only subprocess
     (safe next to torch on a headless box). Delivery scenery: windsock follows the gusts, the drone turns
     red while it loses thrust, the trail is green (full thrust) -> red. `text` overrides the captions.
     Returns save_path, or None."""
@@ -807,6 +822,12 @@ def record_race_video(cfg, pilots, save_path, seeds=(100, 101, 102, 103), device
     words = {"package": "package {p:.2f} kg", "status": "descent {v:.1f} m/s   thrust {e:.0f}%",
              "score": "delivered {d}/{n}   crashes {c}",
              "landed": "LANDED", "crash": "CRASH", "timeout": "TIME UP"}
+    race = bool(cfg["env"].get("race", False))
+    if race:
+        words.update({"status": "speed {s:.1f} m/s   sink {v:.1f} m/s   thrust {e:.0f}%",
+                      "score": "laps {p:.1f}   crashes {c}", "timeout": "TIME UP  {laps:.1f} laps"})
+        camera = camera or {"lookat": [0.3, 0.6, 2.0], "distance": 10.5, "elevation": -28.0, "azimuth": 115.0}
+        size = size or (640, 480)
     words.update(text or {})
     runs, xml = {}, None
     for label, pilot in pilots.items():
@@ -817,7 +838,8 @@ def record_race_video(cfg, pilots, save_path, seeds=(100, 101, 102, 103), device
             return None
     data_file, asset = tempfile.mktemp(suffix=".pkl"), tempfile.mktemp(suffix=".xml")
     with open(data_file, "wb") as f:
-        pickle.dump({"runs": runs, "labels": list(pilots), "words": words, "fps": int(fps)}, f)
+        pickle.dump({"runs": runs, "labels": list(pilots), "words": words, "fps": int(fps),
+                     "camera": camera, "size": tuple(size or (480, 360))}, f)
     with open(asset, "w") as f:
         f.write(xml)
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -829,7 +851,11 @@ def record_race_video(cfg, pilots, save_path, seeds=(100, 101, 102, 103), device
         if res.returncode == 0 and os.path.exists(save_path):
             for label in pilots:
                 o = [e["outcome"] for e in runs[label]]
-                print(f"  {label}: landed {o.count('landed')}/{len(o)}, crashed {o.count('crash')}")
+                if race:
+                    laps = sum(float(e["laps"][-1]) for e in runs[label])
+                    print(f"  {label}: {laps:.1f} laps in {len(o)} flights, crashed {o.count('crash')}")
+                else:
+                    print(f"  {label}: landed {o.count('landed')}/{len(o)}, crashed {o.count('crash')}")
             return save_path
         print("race video render failed:", (res.stderr or "")[-600:])
     except Exception as e:
@@ -844,26 +870,29 @@ def _race_rollouts(env_cfg, pilot, seeds, device):
     from src.envs import drone_env
     from src.envs.autopilot import Autopilot
     env, _, _ = drone_env.make_env(env_cfg, seed=0, render=False)
-    agent, descent = None, 0.55
+    agent, descent, speed = None, 0.55, 2.0
     if str(pilot).startswith("autopilot"):
-        descent = float(str(pilot).split(":")[1]) if ":" in str(pilot) else descent
+        parts = str(pilot).split(":")
+        descent = float(parts[1]) if len(parts) > 1 else descent
+        speed = float(parts[2]) if len(parts) > 2 else speed
     else:
         from stable_baselines3 import SAC
         agent = SAC.load(pilot, device=device)
     eps = []
     for s in seeds:
         obs, _ = env.reset(seed=int(s))
-        auto = Autopilot(env, descent=descent) if agent is None else None
-        fr = {"qpos": [], "mocap": [], "wind": [], "eff": [], "vz": []}
+        auto = Autopilot(env, descent=descent, speed=speed) if agent is None else None
+        fr = {"qpos": [], "mocap": [], "wind": [], "eff": [], "vz": [], "speed": [], "laps": []}
         outcome, stop = "timeout", None
         for t in range(env.max_episode_steps):
             act = (auto.act() if agent is None
                    else agent.predict(np.asarray(obs, np.float32), deterministic=True)[0])
             obs, _, term, trunc, info = env.step(act)
             fr["qpos"].append(np.array(env.data.qpos)); fr["mocap"].append(np.array(env.data.mocap_pos))
-            fr["wind"].append(np.array(env._wind)); fr["eff"].append(float(env.thrust_eff))
-            fr["vz"].append(float(obs[10]))
-            if info["reached"] and stop is None:
+            fr["wind"].append(np.array(env._wind) + env._wind_mean); fr["eff"].append(float(env.thrust_eff))
+            fr["vz"].append(float(obs[10])); fr["speed"].append(float(np.linalg.norm(obs[8:11])))
+            fr["laps"].append(float(info.get("laps", 0.0)))
+            if info["reached"] and stop is None and not env.race:
                 outcome, stop = "landed", t + 40
             if term:
                 outcome = "crash"
@@ -889,7 +918,14 @@ from PIL import Image, ImageDraw, ImageFont
 from src.viz import scenery
 d = pickle.load(open("%(data)s", "rb"))
 m = mujoco.MjModel.from_xml_path("%(asset)s"); data = mujoco.MjData(m)
-W, H, BAR = 480, 360, 40
+W, H = d.get("size", (480, 360)); BAR = 40
+CAM = d.get("camera")                      # fixed wide view (race) instead of following the drone
+if CAM:                                    # wide view: DRAW the drone 2x larger so it stays visible
+    for gname in ("core_geom", "arm_fr", "arm_bl", "arm_fl", "arm_br", "rotor1", "rotor2", "rotor3", "rotor4",
+                  "package"):
+        gid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, gname)
+        if gid >= 0:
+            m.geom_size[gid] *= 2.0; m.geom_pos[gid] *= 2.0
 r = mujoco.Renderer(m, height=H, width=W)
 ids = scenery.scenery_ids(m)
 pkg_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, "package")
@@ -905,7 +941,7 @@ def font(size):
 big, small = font(19), font(15)
 labels, runs, words = d["labels"], d["runs"], d["words"]
 COL = {"landed": (90, 220, 120), "crash": (255, 80, 60), "timeout": (230, 200, 90)}
-score = {k: {"d": 0, "c": 0, "n": 0} for k in labels}
+score = {k: {"d": 0, "c": 0, "n": 0, "p": 0.0} for k in labels}
 w = imageio.get_writer("%(out)s", fps=d["fps"], macro_block_size=16)
 for sc in range(len(runs[labels[0]])):
     eps = {k: runs[k][sc] for k in labels}
@@ -914,6 +950,9 @@ for sc in range(len(runs[labels[0]])):
     for k in labels:
         cams[k] = mujoco.MjvCamera(); cams[k].type = mujoco.mjtCamera.mjCAMERA_FREE
         cams[k].distance, cams[k].elevation, cams[k].azimuth = 2.4, -14.0, 90.0
+        if CAM:
+            cams[k].distance, cams[k].elevation, cams[k].azimuth = CAM["distance"], CAM["elevation"], CAM["azimuth"]
+            cams[k].lookat[:] = CAM["lookat"]
         looks[k] = None
     for n_i, i in enumerate(list(range(0, T, 2)) + [T - 1] * int(d["fps"] * 1.2)):
         tiles = []
@@ -924,32 +963,37 @@ for sc in range(len(runs[labels[0]])):
             if j == L - 1 and not done[k]:
                 done[k] = True; s = score[k]; s["n"] += 1
                 s["d"] += ep["outcome"] == "landed"; s["c"] += ep["outcome"] == "crash"
+                s["p"] += float(ep["laps"][-1]) if "laps" in ep else 0.0
             data.qpos[:] = ep["qpos"][j]; data.mocap_pos[:] = ep["mocap"][j]
             if pkg_id >= 0 and ep["pkg"] is not None:
-                m.geom_size[pkg_id] = ep["pkg"][:3]; m.geom_pos[pkg_id] = ep["pkg"][3:]
+                m.geom_size[pkg_id] = ep["pkg"][:3] * (2.0 if CAM else 1.0)
+                m.geom_pos[pkg_id] = ep["pkg"][3:] * (2.0 if CAM else 1.0)
             scenery.decorate(m, data, ids, ep["wind"][j], ep["eff"][j])
             mujoco.mj_forward(m, data)
-            tgt = data.qpos[0:3].copy(); tgt[2] = max(tgt[2] * 0.8, 0.45)
-            looks[k] = tgt if looks[k] is None else 0.9 * looks[k] + 0.1 * tgt
-            cams[k].lookat[:] = looks[k]
+            if not CAM:
+                tgt = data.qpos[0:3].copy(); tgt[2] = max(tgt[2] * 0.8, 0.45)
+                looks[k] = tgt if looks[k] is None else 0.9 * looks[k] + 0.1 * tgt
+                cams[k].lookat[:] = looks[k]
             r.update_scene(data, camera=cams[k])
-            scenery.add_trail(r.scene, [p for p, _, _ in trails[k]], [c for _, c, _ in trails[k]])
+            scenery.add_trail(r.scene, [p for p, _, _ in trails[k]], [c for _, c, _ in trails[k]],
+                              radius=0.03 if CAM else 0.012)
             im = Image.fromarray(r.render()); dr = ImageDraw.Draw(im)
             dr.rectangle([0, 0, W, 50], fill=(0, 0, 0))
             dr.text((8, 3), k + "   " + words["package"].format(p=ep["payload"]), font=big, fill=(255, 255, 255))
             eff = ep["eff"][j]
-            dr.text((8, 28), words["status"].format(v=max(-ep["vz"][j], 0.0), e=100 * eff), font=small,
+            spd = float(ep["speed"][j]) if "speed" in ep else 0.0
+            dr.text((8, 28), words["status"].format(v=max(-ep["vz"][j], 0.0), e=100 * eff, s=spd), font=small,
                     fill=(255, 255, 255) if eff > 0.97 else (255, 120, 80))
             if j == L - 1:
-                txt = words[ep["outcome"]]
-                dr.rectangle([W // 2 - 90, H - 52, W // 2 + 90, H - 12], fill=(0, 0, 0))
-                dr.text((W // 2 - 80, H - 46), txt, font=big, fill=COL[ep["outcome"]])
+                txt = words[ep["outcome"]].format(laps=float(ep["laps"][-1]) if "laps" in ep else 0.0)
+                dr.rectangle([W // 2 - 110, H - 52, W // 2 + 110, H - 12], fill=(0, 0, 0))
+                dr.text((W // 2 - 100, H - 46), txt, font=big, fill=COL[ep["outcome"]])
             tiles.append(np.asarray(im))
         canvas = np.concatenate(tiles, axis=1)
         bar = Image.new("RGB", (canvas.shape[1], BAR), (22, 22, 28)); db = ImageDraw.Draw(bar)
         for n_k, k in enumerate(labels):
             s = score[k]
-            db.text((n_k * W + 10, 9), words["score"].format(d=s["d"], n=s["n"], c=s["c"]), font=big,
+            db.text((n_k * W + 10, 9), words["score"].format(d=s["d"], n=s["n"], c=s["c"], p=s["p"]), font=big,
                     fill=(255, 255, 255))
         for n_k in range(1, len(labels)):
             canvas[:, n_k * W - 1:n_k * W + 1] = 255
@@ -1100,6 +1144,41 @@ def plot_env_layout(cfg, seeds=(0, 1, 2, 3), save_path=None):
         fig.suptitle("Ring task (top-down): calm transit, then thread the gap into the hard-to-predict "
                      "landing zone (orange) and land on the pad", fontsize=12)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
+    _maybe_save(fig, save_path)
+    return fig
+
+
+def plot_race_course(cfg, save_path=None):
+    """RACE task: the course from above (coloured by height; the red stretch = the chute; the 4 gates; the 2
+    pillars; the flying direction) and its height along one lap. Drawn from the env's own course."""
+    from src.envs.race_course import build_course
+    c = build_course(cfg["env"])
+    P, ch = c["points"], c["chute"]
+    fig, ax = plt.subplots(1, 2, figsize=(13, 5.2), gridspec_kw={"width_ratios": [1, 1.35]})
+    sc = ax[0].scatter(P[:, 0], P[:, 1], c=P[:, 2], cmap="viridis", s=9)
+    ax[0].scatter(P[ch, 0], P[ch, 1], color="red", s=30, label="chute (steep 3 m drop)")
+    for i, (g, t) in enumerate(c["gates"]):
+        ax[0].plot(g[0], g[1], "o", ms=13, mfc="none", mec="darkorange", mew=2.5)
+        ax[0].annotate(f"P{i + 1}  {g[2]:.1f} m", g[:2], textcoords="offset points",
+                       xytext=(10, 8) if g[0] < 1.0 else (-80, 8), fontsize=10)
+        ax[0].annotate("", g[:2] + 0.8 * t[:2], g[:2], arrowprops=dict(arrowstyle="->", lw=1.6, color="k"))
+    for (x, y) in cfg["env"].get("race_pillars", []):
+        ax[0].add_patch(plt.Circle((x, y), float(cfg["env"].get("obstacle_radius", 0.3)), color="firebrick",
+                                   alpha=0.85))
+    ax[0].set_aspect("equal"); ax[0].grid(alpha=0.3); ax[0].legend(loc="center", fontsize=9)
+    ax[0].set_title("Course from above (clockwise), colour = height")
+    fig.colorbar(sc, ax=ax[0], fraction=0.046, label="height (m)")
+    ax[1].plot(c["s"], P[:, 2], color="0.3", lw=2)
+    ax[1].plot(c["s"][ch], P[ch, 2], color="red", lw=4, label="chute: drop it too fast -> lift loss")
+    for i, gu in enumerate((0.0, 0.25, 0.5, 0.75)):
+        j = int(np.argmin(np.linalg.norm(P - c["gates"][i][0], axis=1)))
+        ax[1].axvline(c["s"][j], color="darkorange", ls="--", lw=1)
+        ax[1].text(c["s"][j] + 0.2, 4.25, f"P{i + 1}", color="darkorange")
+    ax[1].axhline(float(cfg["env"].get("race_floor", 0.12)), color="k", lw=1)
+    ax[1].set_ylim(0, 4.6); ax[1].set_xlabel("distance along the lap (m)"); ax[1].set_ylabel("height (m)")
+    ax[1].set_title(f"Height along one lap ({c['length']:.1f} m); reward = speed along the course")
+    ax[1].legend(loc="center right"); ax[1].grid(alpha=0.3)
+    fig.tight_layout()
     _maybe_save(fig, save_path)
     return fig
 

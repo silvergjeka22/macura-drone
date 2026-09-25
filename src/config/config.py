@@ -186,23 +186,74 @@ DELIVERY = {
 #   * Longer, higher approach: start 3-4 m up and 1-2 m to the side. Diving straight is fast but walks into
 #     the lift loss; descending diagonally is safe (sideways speed escapes it) - a real strategy choice.
 #   * Package weight stays visible; physics stays deterministic (random noise makes the members AGREE).
-#   * HIGHER start, 5-6 m (was 3-4 m, changed 2026-09-24 BEFORE any delivery2 run): more room to build
-#     speed makes hurrying pay more and the cliff steeper. Autopilot, 40 scenarios (seeds 5000-5039):
-#                    3-4 m, 500 steps              5-6 m, 700 steps
-#       0.55 m/s     lands 100%, return  869       lands 100%, return  993   (careful; p90 lands step 529)
-#       1.0  m/s     lands  97%, return 1091       lands  97%, return 1438   (best: +26% -> +45% vs careful)
-#       1.5  m/s     crash  55%, return  576       crash  70%, return  554
-#       2.0  m/s     crash  65%, return  452       crash  88%, return  241   (dive)
+#   * Start 3-4 m (TRIED 5-6 m / 700 steps on 2026-09-24 and REVERTED after the 5k-step Kaggle test: from
+#     5-6 m the DISCOUNTED return SAC optimizes (gamma 0.99) pays MORE for hovering forever at the start
+#     than for landing - the pad reward is too far in the future - and the test policies just hovered).
+#     Discounted value vs hovering in place (autopilot, 40 scenarios):  delivery v1 (2.2-2.6 m, the pilot
+#     that learned to land): careful 1.58x, best 2.04x | 3-4 m: careful 1.14x, best (1 m/s) 1.62x |
+#     5-6 m: careful 0.70x, best 0.98x (landing does not pay).
 DELIVERY2 = dict(DELIVERY, **{
     "vrs_powered": True, "vrs_upright": 0.85, "vrs_thrust": 0.7,
-    "start_height_min": 5.0, "start_height_max": 6.0, "start_offset_min": 1.0, "start_offset": 2.0,
-    "max_episode_steps": 700,    # 14 s: a careful 0.55 m/s descent from 6 m still lands with time to settle
+    "start_height_min": 3.0, "start_height_max": 4.0, "start_offset_min": 1.0, "start_offset": 2.0,
+    "max_episode_steps": 500,    # 10 s: the longer, higher approach (checked with the autopilot)
 })
+# delivery2 REWARD: the "stay upright" term paid 0.5 per step ANYWHERE, so hovering in place was a comfortable
+# sofa: with SAC's discount (gamma 0.99) landing was worth only 1.14x (careful) / 1.62x (best) of hovering
+# forever, and the 5k-step Kaggle test policies hovered. Halving it (decided 2026-09-24, BEFORE the full run;
+# same for all four algorithms; physics unchanged) - autopilot, 40 scenarios (seeds 5000-5039):
+#                       discounted value vs hovering        raw return (careful / best / dive, dive crash)
+#   w_level 0.5    careful 1.14x  best 1.62x  dive 1.03x     869 / 1091 (+26%) / 452, 65%
+#   w_level 0.25   careful 1.27x  best 2.16x  dive 1.28x     745 /  970 (+30%) / 394, 65%   <- used
+#   w_level 0.1    careful 1.56x  best 3.31x  dive 1.82x     671 /  898 (+34%) / 359, 65%   (dive > careful)
+# (the delivery pilot, where the agents DID learn to land: careful 1.58x, best 2.04x). A wider pull toward
+# the pad (pos_scale 2-3 m) was also tried: it pays hovering too and weakens the temptation - not used.
+DELIVERY2_REWARD = {"w_level": 0.25}
+# RACE (opt-in: MACURA_TASK=race, built 2026-09-25) - closer to the paper's running tasks: an OPEN-ENDED goal
+# (every metre of course flown pays, no finish line: faster = more laps = more reward), so the policy keeps
+# flying into NEW, faster states all training long - the frontier where a learned model is confidently wrong.
+#   * the course (src/envs/race_course.py): a 6 x 6 m rounded square flown clockwise through 4 gates,
+#     P1 2 m -> P2 4 m -> a near-VERTICAL 3 m CHUTE (the powered lift loss of delivery2 when you drop fast)
+#     -> P3 1 m (a tight corner right after the chute, pillar inside it) -> P4 1.5 m -> P1.
+#   * visible steady wind (random direction/strength each episode, IN the obs) + the usual mild hidden gusts;
+#     package 0-0.2 kg (in the obs); 2 pillars inside two corners (visible, analytic crash).
+#   * crash: flip, ground (< 0.12 m), pillar, or > 1.5 m off the course. Episode 10 s; start at a random
+#     point of the course.
+RACE = {
+    "race": True, "cage": False, "spawn_above_pad": False, "touchdown": False,
+    "race_size": 3.0, "race_power": 4.0, "race_heights": (2.0, 4.0, 1.0, 1.5),
+    "race_chute_u": 0.30, "race_chute_len": 0.25, "race_max_off": 1.5, "race_floor": 0.12,
+    "n_obstacles": 2, "obstacle_radius": 0.30,
+    "race_pillars": [(2.1, 2.1), (-2.1, -2.1)],   # 0.6 m inside the top-right / bottom-left corner apex
+    "payload_max": 0.2,
+    "vrs_loss": 0.35, "vrs_speed": 1.2, "vrs_full": 2.2, "vrs_escape": 1.0,
+    "vrs_powered": True, "vrs_upright": 0.85, "vrs_thrust": 0.7,
+    "wind_mean_max": 0.5,                          # visible steady wind (N), up to ~10% of the drone's weight
+    "max_episode_steps": 500,
+    "scenery": True,
+}
+RACE_REWARD = {"w_prog": 1.0,       # per step: speed ALONG the course (m/s), counted only near it
+               "w_track": 1.0,      # per step: minus metres outside the course tube
+               "race_tube": 0.35, "race_tube_soft": 0.35,
+               "w_level": 0.1,      # small: hovering must not pay (only flying the course does)
+               "w_crash": 500.0}    # a crash costs ~10 m of course (50 reward per metre flown)
+# Checked with the race autopilot (30 scenarios, seeds 5000-5029), discounted return (gamma 0.99) - without
+# a crash cost, diving down the chute was worth as much as flying it safely (crashing only lost FUTURE reward):
+#                          laps  crash   discounted, crash cost 0 / 250 / 500
+#   careful 1.5 m/s (chute 0.8)  0.52  0.03   117 / 116 / 114
+#   fast 3 m/s (chute 1.1)       0.93  0.00   209 / 209 / 209   <- the best way to fly it
+#   dive 3 m/s (chute 2.0)       ~     0.40   213 / 199 / 186
+#   dive 3 m/s (chute 3.0)       0.63  0.83   204 / 174 / 144
 TASK = os.environ.get("MACURA_TASK", "").strip().lower()
 if TASK == "delivery":
     ENV.update(DELIVERY)
 elif TASK == "delivery2":
     ENV.update(DELIVERY2)
+    ENV["reward"] = dict(REWARD, **DELIVERY2_REWARD)      # a copy: the other tasks keep REWARD unchanged
+elif TASK == "race":
+    ENV.update(RACE)
+    ENV["reward"] = dict(REWARD, **RACE_REWARD)
+    if not os.environ.get("MACURA_STEPS", "").strip():
+        TOTAL_ENV_STEPS = 50000                            # race pilot: 50k steps (~8 h for 4 algorithms)
 
 # ENSEMBLE (probabilistic dynamics model, shared by all model-based algos)
 ENSEMBLE = {
@@ -290,7 +341,7 @@ EXPLORATION = {"type": "pink_noise", "scale": 0.3}
 # method's value by its AVERAGE training-time eval return (selection scenarios 100-119), then report the
 # full study on the fresh final-eval scenarios (1000+) only.
 # (max_epochs 10 per model round - instead of open-ended early stopping - keeps a 4-algorithm seed < 12 h.)
-if TASK == "delivery2":
+if TASK in ("delivery2", "race"):
     ENSEMBLE.update({"num_members": 7, "num_elites": 5, "holdout_ratio": 0.2, "holdout_max": 5000,
                      "max_epochs": 10, "patience": 3})
     ROLLOUT.update({"freq_steps": 250, "num_rollouts": 25000, "model_buffer_capacity": 1_000_000})
