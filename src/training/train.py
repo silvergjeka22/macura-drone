@@ -35,6 +35,7 @@ from __future__ import annotations
 import os
 import json
 import time
+import collections
 import numpy as np
 
 from src.envs import drone_env as env_mod
@@ -186,6 +187,14 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
     kappa_state: dict = {}
     trust_diag_state: dict = {}   # MACURA's trust rule applied to MBPO/M2AC rollouts (measurement only)
     log = _empty_log()
+    # IMAGINED-DATA LIFETIME (off by default = one plain FIFO buffer). As in the MACURA / MBPO reference code, imagined
+    # data expires after `lifetime` model rounds: SAC samples only the newest rounds, and MACURA's Eq. 22 scales its
+    # updates by how full that window is (= average imagined trip length / t_max), not by a buffer that fills up anyway.
+    lifetime = int(cfg["rollout"].get("model_lifetime_rounds") or 0) if model_based else 0
+    round_sizes = collections.deque(maxlen=lifetime) if lifetime else None
+    model_window = None
+    if lifetime:
+        log["utd"] = []                        # SAC updates per real step at each eval (MACURA: Eq. 22)
     best_return = -np.inf
     best_step = None
     best_ckpt = None
@@ -260,6 +269,14 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
                 log["untrusted_frac"].append((step, diag.get("untrusted_frac", float("nan"))))
                 log["fast_frac"].append((step, diag["fast_frac"]))
             _store_model_transitions(agent, trans)
+            if lifetime:                          # live window = the newest `lifetime` rounds of imagined data
+                round_sizes.append(sum(len(t[0]) for t in trans))
+                model_window = min(sum(round_sizes), buf_cap)
+                if algo_name == "macura":         # Eq. 22 on the live window (reference: 2G x fill level)
+                    num_updates = macura_mod.gradient_steps(
+                        model_window, buf_cap, g_max_macura,
+                        cfg["rollout"]["macura"]["adaptive_gradient_steps"])
+            diag["utd"] = num_updates
             model_trained = True
             last_diag = diag
             tm["imagine"] += time.perf_counter() - t1
@@ -274,7 +291,8 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
             # model-based: within-batch real/imagined mixing at the FIXED real_ratio. The SAME
             # path runs for MACURA/MBPO/M2AC; only `num_updates` (UTD) and which rollout produced
             # the model data differ. The SAC math is untouched.
-            sac_mod.sac_update_mixed(agent, real_rb, model_rb, num_updates, batch, real_ratio, mix_rng)
+            sac_mod.sac_update_mixed(agent, real_rb, model_rb, num_updates, batch, real_ratio, mix_rng,
+                                     model_window=model_window)
         tm["sac"] += time.perf_counter() - t_sac
 
         # --- periodic GREEDY evaluation on FIXED shared seeds → headline curve + selection ---
@@ -295,6 +313,8 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
             log["eval_liftloss"].append(m["eval_liftloss"])
             if "eval_laps" in m:
                 log["eval_laps"].append(m["eval_laps"])
+            if "utd" in log:
+                log["utd"].append(num_updates)
             improved = step >= start_step and m["eval_return"] > best_return
             if improved:                       # overwrite best checkpoint (policy + ensemble + meta)
                 best_return = m["eval_return"]
@@ -317,6 +337,9 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
     final_eval = _final_eval(agent, eval_env, best_ckpt, final_eval_episodes, _final_seeds(cfg))
     setup = {"exploration": expl_cfg["type"], "task": cfg["env"].get("task", ""),     # what this run used
              "xi": cfg["rollout"]["macura"]["xi"], "mbpo_horizon": cfg["rollout"]["mbpo"]["rollout_schedule"][1]}
+    if lifetime:                                  # (only recorded when the option is on: other logs stay identical)
+        setup.update({"model_lifetime_rounds": lifetime, "macura_gmax": g_max_macura,
+                      "mbpo_utd": cfg["rollout"]["mbpo"]["fixed_gradient_steps"]})
     meta = {"algo": algo_name, "seed": seed, "best_step": best_step,
             "best_return": float(best_return), "final_eval": final_eval, "setup": setup,
             "train_crashes_total": train_crashes, "train_episodes_total": train_episodes}
@@ -421,7 +444,8 @@ def _print_status(algo, cfg, d, m, tm, dt, elapsed, step, total_steps, every):
         else:
             line = (f"keeps {_pct(d.get('kept_fraction'))} of imagined steps | data MACURA would reject "
                     f"{_pct(d.get('untrusted_frac'))}")
-        print(f"    model: {line} | fast-descent share of its imagined data {_pct(d.get('fast_frac'))}")
+        utd = f" | SAC updates/step {d['utd']}" if "utd" in d else ""
+        print(f"    model: {line} | fast-descent share of its imagined data {_pct(d.get('fast_frac'))}{utd}")
     rate = dt / max(1, every)
     eta = (total_steps - step) * rate / 3600
     laps = f"laps {m['eval_laps']:.2f} per flight | " if "eval_laps" in m else ""

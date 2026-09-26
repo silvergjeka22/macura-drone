@@ -131,10 +131,21 @@ class _MixedReplaySampler:
     2019): every SAC gradient step sees a steady fraction of real data. Any other
     attribute access is proxied to a real SB3 buffer, so `agent.train()` is untouched."""
 
-    def __init__(self, real_buf, model_buf, real_ratio):
+    def __init__(self, real_buf, model_buf, real_ratio, model_window=None):
         self.real_buf = real_buf
         self.model_buf = model_buf
         self.real_ratio = float(real_ratio)
+        self.model_window = model_window    # sample MODEL data only from the newest `model_window` entries
+
+    def _sample_model(self, n, env=None):
+        """Model batch: the whole buffer (default), or only its newest `model_window` transitions when imagined
+        data expires after a few rounds (as in the MACURA / MBPO reference code: rollout.model_lifetime_rounds)."""
+        w = self.model_window
+        if not w:
+            return self.model_buf.sample(n, env=env)
+        cap = self.model_buf.buffer_size
+        idx = (self.model_buf.pos - 1 - np.random.randint(0, min(int(w), cap), size=n)) % cap
+        return self.model_buf._get_samples(idx, env=env)
 
     def sample(self, batch_size, env=None):
         from stable_baselines3.common.type_aliases import ReplayBufferSamples
@@ -148,7 +159,7 @@ class _MixedReplaySampler:
         if n_real > 0:
             parts.append(self.real_buf.sample(n_real, env=env))
         if n_model > 0:
-            parts.append(self.model_buf.sample(n_model, env=env))
+            parts.append(self._sample_model(n_model, env=env))
         if len(parts) == 1:
             return parts[0]
 
@@ -162,13 +173,13 @@ class _MixedReplaySampler:
         return ReplayBufferSamples(*(_merge(f) for f in ReplayBufferSamples._fields))
 
     def __getattr__(self, name):                       # proxy everything else to a real buffer
-        if name in ("real_buf", "model_buf", "real_ratio"):
+        if name in ("real_buf", "model_buf", "real_ratio", "model_window"):
             raise AttributeError(name)
         return getattr(self.model_buf, name)
 
 
 def sac_update_mixed(agent, real_buf, model_buf, num_updates: int, batch_size: int,
-                     real_ratio: float, rng=None) -> dict:
+                     real_ratio: float, rng=None, model_window=None) -> dict:
     """WITHIN-BATCH real/imagined mixing for the model-based agents (canonical MBPO/MACURA;
     Janner 2019). Every SAC batch is `real_ratio * batch_size` REAL transitions + the rest
     MODEL (imagined) — the standard Dyna mix, so each gradient step gets a steady real-data
@@ -176,6 +187,7 @@ def sac_update_mixed(agent, real_buf, model_buf, num_updates: int, batch_size: i
     pointing the learner at a `_MixedReplaySampler` for the duration; the SAC math is SB3's
     own `agent.train()`, untouched. `rng` is accepted for signature compatibility (unused —
     the mix is a fixed per-batch proportion). The agent's own buffer is restored afterwards.
+    `model_window`: if set, model data is drawn only from the newest `model_window` imagined transitions.
     """
     n_real = int(round(float(real_ratio) * batch_size))
     if num_updates <= 0:
@@ -184,7 +196,7 @@ def sac_update_mixed(agent, real_buf, model_buf, num_updates: int, batch_size: i
                 "real_pct": 100.0 * float(real_ratio),
                 "imagined_pct": 100.0 * (1.0 - float(real_ratio))}
     saved = agent.replay_buffer
-    agent.replay_buffer = _MixedReplaySampler(real_buf, model_buf, real_ratio)
+    agent.replay_buffer = _MixedReplaySampler(real_buf, model_buf, real_ratio, model_window)
     try:
         agent.train(gradient_steps=int(num_updates), batch_size=batch_size)
     finally:

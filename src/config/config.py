@@ -384,16 +384,43 @@ if TASK in ("delivery2", "race", "race2"):
     ENSEMBLE.update({"num_members": 7, "num_elites": 5, "holdout_ratio": 0.2, "holdout_max": 5000,
                      "max_epochs": 10, "patience": 3})
     ROLLOUT.update({"freq_steps": 250, "num_rollouts": 25000, "model_buffer_capacity": 1_000_000})
-    ROLLOUT["macura"] = dict(ROLLOUT["macura"], xi=float(os.environ.get("MACURA_XI", "") or 1.0),
-                             gradient_steps_max=16)
+    ROLLOUT["macura"] = dict(ROLLOUT["macura"], gradient_steps_max=16,
+                             xi=float(os.environ.get("MACURA_XI", "") or (0.5 if TASK == "race2" else 1.0)))
     _h = int(os.environ.get("MBPO_HORIZON", "") or 10)
-    ROLLOUT["mbpo"] = dict(ROLLOUT["mbpo"], rollout_schedule=[1, _h, 500, 3000])
+    ROLLOUT["mbpo"] = dict(ROLLOUT["mbpo"], rollout_schedule=[1, _h, 500, 3000],
+                           fixed_gradient_steps=int(os.environ.get("MBPO_UTD", "") or 8))   # MBPO_UTD: control run
     ROLLOUT["m2ac"] = {"mode": "paper", "t_max": 10, "uncertainty_penalty": 1e-3, "uncertainty": "ovr",
                        "fixed_gradient_steps": 8}
     SAC["real_ratio"] = 0.05
     if os.environ.get("MACURA_EXPLORATION", "paper").strip().lower() != "equal":
         EXPLORATION["per_algo"] = {"macura": "pink_noise", "mbpo": "deterministic",
                                    "m2ac": "deterministic", "sac": "stochastic"}
+# race2: imagined data EXPIRES after 4 model rounds (= 1000 real steps), as in the MACURA authors' code
+# (github.com/Data-Science-in-Mechanical-Engineering/macura, mbrl/algorithms/macura.py: ReplayBufferDynamicLifeTime with
+# lifetime = retained epochs x rounds per epoch, capacity = t_max x rollouts x lifetime; updates per step
+# = int(2 x fill level x G)). Found after the race2 seed-0 run (2026-09-26): our buffer was one FIFO that stays full
+# however short MACURA's imagined trips are, so Eq. 22 always gave MACURA its maximum 16 updates. There MACURA's trips
+# were ~9.7/10 (its filter barely cut), so it correctly got ~2x MBPO's 8 updates; with shorter trips (tuned xi) the
+# fill level - and so MACURA's update count - must drop, as in the paper (App. D.5, Fig. 19). The same 4-round
+# lifetime applies to MBPO and M2AC (with full 10-step trips MBPO's window is the same 1M transitions as before).
+# 1M capacity = 25,000 rollouts x t_max 10 x 4 rounds. Off (0) for every other task.
+# race2 also starts with 5000 RANDOM steps before the first model / SAC update (all four algorithms), as the MACURA
+# reference code does (conf/algorithm/macura.yaml: initial_exploration_steps 5000; we used 500). Why: with 500 steps
+# the first models are trained on ~1500 transitions and MACURA's first-step uncertainty SPIKES in the first rounds
+# (q95 GJS 110-442 around step 1500-2000, vs ~6-14 later); kappa is a running mean over ALL rounds (as in the reference,
+# history 2000 rounds), so the spike keeps kappa 3-11x above the later uncertainty and the filter trusts everything:
+# trips 9.6-9.8/10 (seed-0 Kaggle run, xi 1; local test, xi 0.5). Local check with 5000 warm-up steps (screening
+# scenarios 7000+, 1 seed, 2026-09-26), mean imagined trip at 5k / 6k / 7k / 8k steps:
+#   xi 1: 7.8 / 7.0 / 9.2 (filter switches off again)  |  xi 0.5: 4.3 / 4.7 / 6.7 / 6.5 (cuts, and learns)
+#   xi 0.25: 0.4 / 0.5 / 0.7 / 2.0 (too strict: MACURA barely learns)
+# -> race2 default xi 0.5 (paper App. D.2: xi is the one per-task knob; the target is trips that are neither ~full nor
+#    ~empty). Chosen from this mechanism check, not from evaluation returns. MACURA_XI=1 is the tuning alternative.
+# MBPO's horizon ramp (1 -> horizon over 2500 steps) is shifted to start with training, i.e. after the warm-up
+# (it ran 500 -> 3000 before, so it would otherwise be over before MBPO's first model round).
+if TASK == "race2":
+    ROLLOUT["model_lifetime_rounds"] = 4
+    WARMUP_RANDOM_STEPS = 5000
+    ROLLOUT["mbpo"]["rollout_schedule"] = [1, _h, WARMUP_RANDOM_STEPS, WARMUP_RANDOM_STEPS + 2500]
 ENV["task"] = TASK
 
 # assembled config the training functions consume
