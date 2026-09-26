@@ -315,6 +315,118 @@ def plot_trust_by_zone(macura_runs, save_path=None, split="zone"):
     return fig
 
 
+def _rolling_nanmean(steps, vals, window):
+    """Trailing rolling mean that ignores NaN (rounds with no such states). Returns (steps, smoothed)."""
+    vals = np.asarray(vals, dtype=float)
+    out = np.full(len(vals), np.nan)
+    for i in range(len(vals)):
+        w = vals[max(0, i - window + 1): i + 1]
+        if np.isfinite(w).any():
+            out[i] = np.nanmean(w)
+    return np.asarray(steps), out
+
+
+def plot_model_trust(runs, save_path=None, smooth=8, t_max=10):
+    """Does MACURA trust its world model 100%? One figure, one question per panel (mean over seeds, rolling mean
+    over `smooth` model rounds):
+      A  share of the full t_max-step imagination each method trusts (MBPO keeps every step it imagines, M2AC
+         the 25% most certain; MACURA's average trip / t_max - its trip stops where the models disagree. The logged
+         `discarded_frac` would understate this: it only counts the one step where a trip stops);
+      B  MACURA's trust in FAST descents (the chute, where the lift loss makes the model wrong) vs the rest;
+      C  how many steps each method imagines ahead (MACURA stops where its models disagree);
+      D  SAC updates per real step (MACURA's follows how much it trusted; only logged in newer runs)."""
+    import warnings
+    by = _group_by_algo(runs)
+    has_utd = any(r.get("utd") for rs in by.values() for r in rs)
+    fig, axes = plt.subplots(1, 4 if has_utd else 3, figsize=(20 if has_utd else 15.5, 4.4))
+
+    def _mean_series(run_list, key):
+        series = [np.asarray(r[key], dtype=float) for r in run_list if r.get(key)]
+        if not series:
+            return None, None
+        n = min(len(s) for s in series)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            return series[0][:n, 0], np.nanmean(np.stack([s[:n, 1] for s in series]), axis=0)
+
+    ax = axes[0]                                                   # A: share of imagined steps kept
+    for algo, run_list in by.items():
+        if algo == "sac":
+            continue
+        if algo == "macura":
+            steps, trip = _mean_series(run_list, "rollout_length")
+            if steps is not None:
+                s, m = _rolling_nanmean(steps, 100.0 * trip / t_max, smooth)
+                ax.plot(s, m, color=_color(algo), lw=2, label="MACURA: until its models disagree")
+        elif algo == "mbpo":
+            ax.axhline(100.0, color=_color(algo), lw=2, ls="--", label="MBPO: keeps all (by design)")
+        elif algo == "m2ac":
+            ax.axhline(25.0, color=_color(algo), lw=2, ls="--", label="M2AC: keeps the 25% most certain")
+    ax.set_ylim(0, 105); ax.set_ylabel("imagined steps trusted (%)"); ax.set_title("A. How much of its imagination it trusts")
+
+    ax = axes[1]                                                   # B: MACURA fast vs slow descents
+    for key, color, lab in (("trust_slow", _color("macura"), "normal flight"),
+                            ("trust_fast", "#ff7f0e", "fast descents (the chute)")):
+        steps, m = _mean_series(by.get("macura", []), key)
+        if steps is not None:
+            s, sm = _rolling_nanmean(steps, 100.0 * m, smooth)
+            ax.plot(s, sm, color=color, lw=2, label=lab)
+    ax.set_ylim(0, 105); ax.set_ylabel("imagined steps MACURA trusts (%)")
+    ax.set_title("B. Where MACURA trusts its model")
+
+    ax = axes[2]                                                   # C: imagined trip length
+    for algo, run_list in by.items():
+        if algo == "sac":
+            continue
+        steps, m = _mean_series(run_list, "rollout_length")
+        if steps is not None:
+            s, sm = _rolling_nanmean(steps, m, smooth if algo == "macura" else 1)
+            ax.plot(s, sm, color=_color(algo), lw=2, ls="--" if algo == "m2ac" else "-", label=algo.upper())
+    ax.set_ylim(0, 10.5); ax.set_ylabel("imagined steps per trip (max 10)")
+    ax.set_title("C. How far ahead each method imagines")
+
+    if has_utd:                                                    # D: SAC updates per real step
+        ax = axes[3]
+        for algo, run_list in by.items():
+            rs = [r for r in run_list if r.get("utd")]
+            if not rs:
+                continue
+            n = min(len(r["utd"]) for r in rs)
+            ax.plot(rs[0]["steps"][:n], np.mean([r["utd"][:n] for r in rs], axis=0), color=_color(algo), lw=2,
+                    label=algo.upper())
+        ax.set_ylim(bottom=0); ax.set_ylabel("SAC updates per real step")
+        ax.set_title("D. Training updates per real step")
+    for ax in axes:
+        ax.set_xlabel("real environment steps"); ax.grid(alpha=0.3); ax.legend(fontsize=8, loc="lower right")
+    fig.suptitle("Does MACURA trust its world model 100%? (mean over seeds, rolling mean over "
+                 f"{smooth} model rounds)", fontsize=13)
+    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    _maybe_save(fig, save_path)
+    return fig
+
+
+def trust_summary(runs) -> str:
+    """One line per model-based method: how much of its imagination it trusted over the whole run (MACURA: average
+    trip / 10, and the share of imagined steps passing its trust check in fast descents vs normal flight)."""
+    import warnings
+    lines = []
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        for algo, run_list in _group_by_algo(runs).items():
+            if algo == "macura":
+                fast = np.nanmean([v for r in run_list for _, v in r.get("trust_fast", [])])
+                slow = np.nanmean([v for r in run_list for _, v in r.get("trust_slow", [])])
+                trip = np.nanmean([v for r in run_list for _, v in r.get("rollout_length", [])])
+                lines.append(f"MACURA trusted {10 * trip:.0f}% of a full 10-step imagination (average trip {trip:.1f}/10);"
+                             f" imagined steps passing its trust check: fast descents {100 * fast:.0f}%, "
+                             f"normal flight {100 * slow:.0f}%")
+            elif algo == "mbpo":
+                lines.append("MBPO trusted 100% of what it imagined (it has no trust check)")
+            elif algo == "m2ac":
+                lines.append("M2AC kept 25% of its imagined steps (the least uncertain ones, by design)")
+    return "\n".join(lines)
+
+
 def plot_untrusted_data(runs, save_path=None):
     """The WHY plot. Left: share of the imagined data each model-based method actually TRAINS on
     that is above MACURA's trust threshold (the models disagree about it). MBPO and M2AC are
@@ -808,7 +920,7 @@ def _render_trajectory_subprocess(frames_file, save_path, fps, label, backend=No
 
 # ── race video: several pilots on the SAME scenarios, side by side, with a scoreboard ─────────────
 def record_race_video(cfg, pilots, save_path, seeds=(100, 101, 102, 103), device="cpu", text=None,
-                      fps=25, camera=None, size=None, frame_step=2):
+                      fps=25, camera=None, size=None, frame_step=2, max_steps=None):
     """Fly each pilot on the SAME scenarios (same reset seed -> same package, spawn and wind gusts) and
     render them side by side with a running scoreboard - e.g. MACURA vs MBPO. `pilots` maps a label to
     an SB3 checkpoint .zip, or to "autopilot:<descent m/s>[:<race speed m/s>]" for the hand-written controller
@@ -817,7 +929,8 @@ def record_race_video(cfg, pilots, save_path, seeds=(100, 101, 102, 103), device
     (safe next to torch on a headless box). Delivery scenery: windsock follows the gusts, the drone turns
     red while it loses thrust, the trail is green (full thrust) -> red. `text` overrides the captions.
     `frame_step`: draw every n-th control step (with fps = 50 / frame_step the clip plays in real time).
-    Returns save_path, or None."""
+    `max_steps`: fly this many control steps instead of the env's episode length (a longer DEMO flight: the
+    policy does not see the time, so it simply keeps flying; not an evaluation score). Returns save_path, or None."""
     import pickle
     import subprocess
     import sys
@@ -835,7 +948,7 @@ def record_race_video(cfg, pilots, save_path, seeds=(100, 101, 102, 103), device
     runs, xml = {}, None
     for label, pilot in pilots.items():
         try:
-            runs[label], xml = _race_rollouts(cfg["env"], pilot, seeds, device)
+            runs[label], xml = _race_rollouts(cfg["env"], pilot, seeds, device, max_steps)
         except Exception as e:
             print(f"race rollout failed for {label}:", e)
             return None
@@ -866,7 +979,7 @@ def record_race_video(cfg, pilots, save_path, seeds=(100, 101, 102, 103), device
     return None
 
 
-def _race_rollouts(env_cfg, pilot, seeds, device):
+def _race_rollouts(env_cfg, pilot, seeds, device, max_steps=None):
     """One pilot over the given scenarios, no graphics. Records what the video needs per frame (pose,
     markers, gust, lift factor, vertical speed) and each episode's package + outcome. Episodes stop at a
     crash, 0.8 s after landing, or at the time limit. Returns (episodes, the env's MJCF xml)."""
@@ -887,7 +1000,8 @@ def _race_rollouts(env_cfg, pilot, seeds, device):
         auto = Autopilot(env, descent=descent, speed=speed) if agent is None else None
         fr = {"qpos": [], "mocap": [], "wind": [], "eff": [], "vz": [], "speed": [], "laps": []}
         outcome, stop = "timeout", None
-        for t in range(env.max_episode_steps):
+        steps = int(max_steps or env.max_episode_steps)
+        for t in range(steps):
             act = (auto.act() if agent is None
                    else agent.predict(np.asarray(obs, np.float32), deterministic=True)[0])
             obs, _, term, trunc, info = env.step(act)
@@ -900,7 +1014,7 @@ def _race_rollouts(env_cfg, pilot, seeds, device):
             if term:
                 outcome = "crash"
                 break
-            if trunc or (stop is not None and t >= stop):
+            if t + 1 >= steps or (stop is not None and t >= stop):     # (= the env's time limit by default)
                 break
         pkg = (np.r_[env.model.geom_size[env._pkg], env.model.geom_pos[env._pkg]]
                if env._pkg >= 0 else None)
