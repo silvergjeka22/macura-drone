@@ -14,7 +14,6 @@ import glob
 import os
 import sys
 
-os.environ.setdefault("MACURA_TASK", "race2")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -48,8 +47,6 @@ def main():
                 print(f"  {algo}: no seed {args.seed}, skipped")
                 continue
         run = R.best_run(rs)
-        if run.get("setup", {}).get("task", cfg.TASK) != cfg.TASK:
-            print(f"  {algo}: trained on task {run['setup']['task']!r}, set MACURA_TASK to match")
         ckpt = R.checkpoint(run)
         if not ckpt or not os.path.exists(ckpt):
             print(f"  {algo} seed {run['seed']}: checkpoint not found ({ckpt}), skipped")

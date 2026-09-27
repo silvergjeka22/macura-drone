@@ -21,20 +21,19 @@ SETUP = '''import os, sys, time, subprocess
 NAME = "{name}"
 SEEDS = {seeds}
 ALGOS = {algos}
-TASK = "race3"
 STEPS = 50000
 UPDATES = 12            # SAC updates per real step for MBPO and M2AC
 VIDEO_SECONDS = 30
-REPO, BRANCH = "silvergjeka22/macura-drone", "race3"
+REPO, BRANCH = "silvergjeka22/macura-drone", "main"
 ROOT = "/tmp/macura-drone"
 OUT = "/kaggle/working/runs"
 T0 = time.time()
 DEADLINE = T0 + 11 * 3600    # stop training at 11 h (Kaggle stops at 12 h)
 
-print(f"{{NAME}} | seeds {{SEEDS}} | {{ALGOS}} | {{TASK}} | {{STEPS}} steps")
+print(f"{{NAME}} | seeds {{SEEDS}} | {{ALGOS}} | {{STEPS}} steps")
 
 os.environ.update({{
-    "MACURA_TASK": TASK, "MACURA_STEPS": str(STEPS), "MACURA_SEEDS": " ".join(map(str, SEEDS)),
+    "MACURA_STEPS": str(STEPS), "MACURA_SEEDS": " ".join(map(str, SEEDS)),
     "MACURA_ALGOS": " ".join(ALGOS), "MBPO_UTD": str(UPDATES), "M2AC_UTD": str(UPDATES),
     "MACURA_OUTPUT_ROOT": OUT, "MACURA_DEADLINE": str(DEADLINE),
 }})
@@ -59,7 +58,7 @@ from src.training.parallel import run_parallel
 from src.viz import figures as F, video as V
 
 os.makedirs(OUT, exist_ok=True)
-json.dump({"notebook": NAME, "seeds": SEEDS, "algorithms": ALGOS, "task": TASK, "steps": STEPS},
+json.dump({"notebook": NAME, "seeds": SEEDS, "algorithms": ALGOS, "steps": STEPS},
           open(f"{OUT}/RUN_INFO.json", "w"))'''
 
 TASK_PLOTS = '''F.plot_race_course(cfg.CFG, f"{OUT}/plots/task_course.png"); plt.show()

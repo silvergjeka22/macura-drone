@@ -11,7 +11,6 @@ SETUP = '''import os, sys
 ROOT = os.path.abspath(".." if os.path.basename(os.getcwd()) == "testing" else ".")
 os.chdir(ROOT)
 sys.path.insert(0, ROOT)
-os.environ["MACURA_TASK"] = "race3"
 os.environ.setdefault("MUJOCO_GL", "disable")
 
 DOWNLOADS = "downloads"

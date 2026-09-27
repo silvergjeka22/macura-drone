@@ -193,8 +193,7 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
                 log["rollout_length"].append((step, diag["mean_rollout_length"]))
                 log["base_uncertainty"].append((step, diag["base_uncertainty"]))
                 log["rollout_len_hist"] = diag["lengths"]
-                for k in ("unc_near", "unc_far", "trust_near", "trust_far",
-                          "unc_fast", "unc_slow", "trust_fast", "trust_slow",
+                for k in ("unc_fast", "unc_slow", "trust_fast", "trust_slow",
                           "untrusted_frac", "discarded_frac", "fast_frac"):
                     log[k].append((step, diag[k]))
             elif algo_name == "mbpo":
@@ -316,7 +315,6 @@ def _empty_log():
             "eval_failure_rate": [], "eval_success_rate": [],
             "kappa": [], "rollout_length": [],
             "base_uncertainty": [], "rollout_len_hist": [],
-            "unc_near": [], "unc_far": [], "trust_near": [], "trust_far": [],
             "untrusted_frac": [], "discarded_frac": [],
             "unc_fast": [], "unc_slow": [], "trust_fast": [], "trust_slow": [], "fast_frac": [],
             "eval_failure_light": [], "eval_failure_heavy": [],

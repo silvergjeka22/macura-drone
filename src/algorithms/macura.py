@@ -93,9 +93,8 @@ def macura_rollout(dynamics_model, agent, start_obs: np.ndarray,
     transitions = []
     kappa = kappa_state.get("kappa", np.inf)
     base_u = 0.0
-    zone_r = float(cfg.get("env", {}).get("zone_radius", 1.0))
     v_fast = fast_threshold(cfg)
-    zs = {f"{q}_{tag}": 0 for q in ("u", "n", "t") for tag in ("near", "far", "fast", "slow")}
+    zs = {f"{q}_{tag}": 0 for q in ("u", "n", "t") for tag in ("fast", "slow")}
 
     from src.algorithms.sac import select_actions
 
@@ -115,10 +114,8 @@ def macura_rollout(dynamics_model, agent, start_obs: np.ndarray,
         trust = u < kappa
         keep = alive & trust
 
-        near = np.linalg.norm(obs[:, 0:2], axis=-1) < zone_r
         fast = is_fast(obs, v_fast)
-        for tag, m in (("near", alive & near), ("far", alive & ~near),
-                       ("fast", alive & fast), ("slow", alive & ~fast)):
+        for tag, m in (("fast", alive & fast), ("slow", alive & ~fast)):
             zs["u_" + tag] += float(u[m].sum())
             zs["n_" + tag] += int(m.sum())
             zs["t_" + tag] += int((m & trust).sum())
@@ -132,15 +129,13 @@ def macura_rollout(dynamics_model, agent, start_obs: np.ndarray,
     def ratio(a, b):
         return zs[a] / zs[b] if zs[b] else float("nan")
 
-    n_all = zs["n_near"] + zs["n_far"]
+    n_all = zs["n_fast"] + zs["n_slow"]
     diag = {
         "kappa": float(kappa),
         "mean_rollout_length": float(lengths.mean()),
         "max_rollout_length": int(lengths.max()) if len(lengths) else 0,
         "base_uncertainty": base_u,
         "lengths": lengths.tolist(),
-        "unc_near": ratio("u_near", "n_near"), "unc_far": ratio("u_far", "n_far"),
-        "trust_near": ratio("t_near", "n_near"), "trust_far": ratio("t_far", "n_far"),
         "unc_fast": ratio("u_fast", "n_fast"), "unc_slow": ratio("u_slow", "n_slow"),
         "trust_fast": ratio("t_fast", "n_fast"), "trust_slow": ratio("t_slow", "n_slow"),
         "fast_frac": fast_share(transitions, v_fast),

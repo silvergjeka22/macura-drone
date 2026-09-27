@@ -53,8 +53,8 @@ Why every setting has its value, every earlier run and its numbers: `docs/EXPERI
 ## Code
 
 ```
-src/config/config.py      every setting; task presets; env vars MACURA_TASK, MACURA_STEPS, MACURA_SEEDS, MBPO_UTD, ...
-src/envs/                 drone_env.py (the tasks), race_course.py, autopilot.py (hand-written, not learned), assets/
+src/config/config.py      every setting; env vars MACURA_STEPS, MACURA_SEEDS, MBPO_UTD, M2AC_UTD, ...
+src/envs/                 drone_env.py (race3), race_course.py, autopilot.py (hand-written, not learned), assets/
 src/models/ensemble.py    probabilistic ensemble world model
 src/algorithms/           sac.py (shared learner, model loading), macura.py, mbpo.py, m2ac.py
 src/training/             train.py (Dyna loop + evaluation), exploration.py, seed.py
@@ -63,5 +63,5 @@ src/analysis/             results.py (loading, IQM + CIs, tables, model check), 
 src/viz/                  figures.py, test_figures.py, video.py (race videos with MACURA's trust), simulator.py
 ```
 
-Other tasks from earlier stages (race2, race, delivery, cage) are still in the code behind `MACURA_TASK` so earlier
-results stay reproducible; the race2 pilot (seed 0, 50k) is described in `docs/EXPERIMENTS.md`.
+Only the race3 task is in the code. The earlier tasks (cage, delivery, race, race2) and their runs are described in
+`docs/EXPERIMENTS.md`; their code is in the git history (last version with all tasks: commit `e402d16`).

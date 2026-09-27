@@ -394,29 +394,27 @@ def plot_lift_loss(cfg, save_path=None):
     """The danger: lift available vs sink speed, and the best braking left with each package weight."""
     from src.envs import drone_env
     env, _, _ = drone_env.make_env(cfg["env"], seed=0)
-    loss, v_on, v_full, v_esc = env.vrs_loss, env.vrs_speed, env.vrs_full, env.vrs_escape
-    powered, up_on, thr_on = env.vrs_powered, env.vrs_upright, env.vrs_thrust
-    m0, top, full = env._mass0, env.n_act * min(env._hover * (1.0 + env.thrust_gain), env._ctrl_hi), 1.0 + env.thrust_gain
+    c = cfg["env"]
+    top = env.n_act * min(env._hover * (1.0 + env.thrust_gain), env._ctrl_hi)
+    full, m0 = 1.0 + env.thrust_gain, env._mass0
     env.close()
 
-    def eff(desc, vh=0.0, ratio=full):
-        if powered:
-            return drone_env._powered_lift_factor([vh, 0.0, -desc], [1.0, 0.0, 0.0, 0.0], ratio, loss,
-                                                  v_on, v_full, v_esc, up_on, thr_on)
-        return drone_env._lift_factor(desc, vh, loss, v_on, v_full, v_esc)
+    def lift(sink, sideways=0.0, ratio=full):
+        return drone_env.lift_factor([sideways, 0.0, -sink], [1.0, 0.0, 0.0, 0.0], ratio, c["vrs_loss"], c["vrs_speed"],
+                                     c["vrs_full"], c["vrs_escape"], c["vrs_upright"], c["vrs_thrust"])
 
     v = np.linspace(0.0, 3.0, 200)
     fig, ax = plt.subplots(1, 2, figsize=(13, 4.6))
-    for vh, ratio, ls, lab in ((0.0, full, "-", "straight down, rotors pushing"),
-                               (v_esc, full, "--", f"also {v_esc:.1f} m/s sideways"),
-                               (0.0, 0.0, ":", "straight down, motors off")):
-        ax[0].plot(v, [100 * eff(x, vh, ratio) for x in v], ls, color="#d62728", lw=2, label=lab)
-    ax[0].axvspan(v_on, v_full, color="#ff7f0e", alpha=0.12, label="lift-loss zone")
+    for sideways, ratio, ls, label in ((0.0, full, "-", "straight down, rotors pushing"),
+                                       (c["vrs_escape"], full, "--", f"also {c['vrs_escape']:.1f} m/s sideways"),
+                                       (0.0, 0.0, ":", "straight down, motors off")):
+        ax[0].plot(v, [100 * lift(x, sideways, ratio) for x in v], ls, color="#d62728", lw=2, label=label)
+    ax[0].axvspan(c["vrs_speed"], c["vrs_full"], color="#ff7f0e", alpha=0.12, label="lift-loss zone")
     ax[0].set_xlabel("sink speed (m/s)"); ax[0].set_ylabel("lift available (%)")
     ax[0].set_title("Sinking fast while pushing loses lift"); ax[0].legend(fontsize=8); ax[0].grid(alpha=0.3)
     for p, col in ((0.0, "#2ca02c"), (0.1, "#ff7f0e"), (0.2, "#d62728")):
         m = m0 + p
-        ax[1].plot(v, (top * np.array([eff(x) for x in v]) - m * 9.81) / m, color=col, lw=2, label=f"package {p:.1f} kg")
+        ax[1].plot(v, (top * np.array([lift(x) for x in v]) - m * 9.81) / m, color=col, lw=2, label=f"package {p:.1f} kg")
     ax[1].axhline(0.0, color="k", lw=0.8)
     ax[1].set_xlabel("sink speed (m/s)"); ax[1].set_ylabel("max braking (m/s²)")
     ax[1].set_title("A heavy package leaves less to brake with"); ax[1].legend(); ax[1].grid(alpha=0.3)

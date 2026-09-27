@@ -201,3 +201,12 @@ deadlier trap can also hurt MACURA (as in the delivery pilot).
 - Checkpoints saved on Kaggle (numpy 2) did not open on a laptop with numpy 1 (`SAC.load` fails):
   `src/algorithms/sac.load_agent` falls back to loading the policy weights; used by the videos, the model check, the
   test and the simulator.
+
+**Decision (2026-09-27): race3.** The race3 test (seeds 0-3, 50k) was at about 80% of training when it was decided,
+from the progress printouts (MACURA - MBPO, mean evaluation return so far): seed 0 +211, seed 1 -37, seed 2 +134,
+seed 3 +31; mean +85. MACURA ahead in 3 of 4 seeds and on average, which is the rule fixed before the run (to be
+confirmed with the complete logs). MACURA broke more drones while learning in all 4 seeds (e.g. 73 vs 56 in seed 3).
+From here on the code contains only race3 (other tasks removed; last version with all of them: commit e402d16).
+Checked after removing them: race3 environment identical (observations, rewards, crashes, laps, lift, gusts,
+positions over 11,615 steps of random, autopilot and diving flights; imagined reward and crash functions; MuJoCo
+scene), and 5,600-step training logs of all four algorithms identical to the previous code.

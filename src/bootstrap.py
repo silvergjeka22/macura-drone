@@ -46,6 +46,6 @@ def setup(install_deps: bool = True, root: str = DEFAULT_ROOT):
     from src.config import config as cfg
     for d in ("checkpoints", "videos", "plots", "logs"):
         os.makedirs(f"{cfg.OUTPUT_ROOT}/{d}", exist_ok=True)
-    print(f"task {cfg.TASK or 'cage'} | {cfg.TOTAL_ENV_STEPS} steps | seeds {cfg.SEEDS} | "
+    print(f"task {cfg.TASK} | {cfg.TOTAL_ENV_STEPS} steps | seeds {cfg.SEEDS} | "
           f"algorithms {cfg.ALGORITHMS} | output {cfg.OUTPUT_ROOT}")
     return cfg.OUTPUT_ROOT
