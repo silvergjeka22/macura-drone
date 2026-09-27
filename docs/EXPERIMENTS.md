@@ -186,3 +186,18 @@ deadlier trap can also hurt MACURA (as in the delivery pilot).
   in **at least 3 of the 4 seeds** and on their average; otherwise the race2 plan stays. Drones broken, test return,
   crash rate, updates per step and the chute check are reported either way, and the race2 pilot is reported next to
   the race3 runs whichever task is chosen.
+
+**Final study notebooks** (prepared 2026-09-27, while the race3 test runs; same settings as that test):
+- `kaggle_final_a/final_a.ipynb` (account nouradon): **MACURA and MBPO**, seeds 0-3, 50,000 steps, 4 trainings at a time.
+- `kaggle_final_b/final_b.ipynb` (account silvergjeka01): **M2AC** for seeds 0-3 at the same time, then **SAC**.
+- MBPO **and M2AC** do 12 SAC updates per real step (`M2AC_UTD`, new; default 8, so every other task is unchanged,
+  checked); MACURA adaptive up to 16; SAC 1.
+- `./finals.sh push | status | get`: starts both (it refuses while a run is still going and first downloads each
+  account's previous output), and downloads each into its own new folder (`out_final_a`, `out_final_b`; a date is
+  added if the folder exists), so neither result is lost.
+- `notebooks/final_merge.ipynb` (runs on the computer): merges the downloads, lists which run came from which folder,
+  and makes the tables (IQM + 95% CI over 4 seeds, per seed, MACURA vs each method seed by seed), the fairness check
+  (updates per step), the chute check, all figures, the world-model check and the race videos.
+- Notebook A repeats the race3 test's MACURA and MBPO runs exactly (same code, seeds and settings; runs are
+  deterministic). If the decision rule chooses race3, the test outputs can be used as A (`RESULTS` in the merge
+  notebook) instead of running A again.

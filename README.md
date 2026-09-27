@@ -8,8 +8,10 @@ imagined trip where its models disagree, so it does not trust its model everywhe
 > **Branch `race3`:** the final race3 test: `MACURA_TASK=race3` (race2 with a deadlier chute: up to 50% lift lost
 > instead of 35%), MACURA vs MBPO with 12 updates per step, plus SAC, seeds 0-3 at 50,000 steps on two Kaggle
 > accounts (`notebooks/drone.ipynb` = seeds 0, 1 via `./run.sh push`; `kaggle_seeds23/` = seeds 2, 3 via
-> `kaggle kernels push -p kaggle_seeds23`). Why, and the decision rule: `docs/EXPERIMENTS.md`, section 6. The rest of
-> this README describes the race2 study on `main`.
+> `kaggle kernels push -p kaggle_seeds23`). Why, and the decision rule: `docs/EXPERIMENTS.md`, section 6.
+> **Final study**: `./finals.sh push` starts notebook A (MACURA + MBPO, nouradon) and B (M2AC + SAC, silvergjeka01),
+> seeds 0-3 at 50k; `./finals.sh get` downloads both into separate folders; `notebooks/final_merge.ipynb` merges
+> them (tables, figures, videos). The rest of this README describes the race2 study on `main`.
 
 > Paper: *Trust the Model Where It Trusts Itself: Model-Based Actor-Critic with Uncertainty-Aware Rollout
 > Adaption*, Frauenknecht et al., ICML 2024 (arXiv:2405.19014, `paper/`).

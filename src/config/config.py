@@ -7,7 +7,7 @@ Pick the task and the run size with environment variables BEFORE this module is 
     MACURA_STEPS        real environment steps per run (race tasks default to 50000)
     MACURA_SEEDS        e.g. "1" or "0 1 2"
     MACURA_ALGOS        e.g. "macura mbpo" (default: all four)
-    MACURA_XI, MBPO_HORIZON, MBPO_UTD, MACURA_EXPLORATION=equal     tuning / control runs
+    MACURA_XI, MBPO_HORIZON, MBPO_UTD, M2AC_UTD, MACURA_EXPLORATION=equal     tuning / control runs
     MACURA_OUTPUT_ROOT  where checkpoints, logs, plots and videos go (default /kaggle/working/runs)
     MACURA_DEADLINE     unix time: a run still training then stops at its next evaluation and is saved
 
@@ -168,7 +168,7 @@ if TASK in PAPER_PROTOCOL_TASKS:
     ROLLOUT["mbpo"] = dict(ROLLOUT["mbpo"], rollout_schedule=[1, _horizon, 500, 3000],
                            fixed_gradient_steps=int(os.environ.get("MBPO_UTD", "") or 8))
     ROLLOUT["m2ac"] = {"mode": "paper", "t_max": 10, "uncertainty_penalty": 1e-3, "uncertainty": "ovr",
-                       "fixed_gradient_steps": 8}
+                       "fixed_gradient_steps": int(os.environ.get("M2AC_UTD", "") or 8)}
     SAC["real_ratio"] = 0.05
     if os.environ.get("MACURA_EXPLORATION", "paper").strip().lower() != "equal":
         EXPLORATION["per_algo"] = {"macura": "pink_noise", "mbpo": "deterministic",

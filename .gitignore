@@ -43,7 +43,9 @@ checkpoints/
 # downloaded Kaggle results and local comparisons
 out/
 out_seed*/
+out_*/
 results/
+results_*/
 # local Claude tooling (not part of the project)
 .claude/
 MUJOCO_LOG.TXT
