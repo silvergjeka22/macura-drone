@@ -15,6 +15,7 @@ Numbers marked *measured* come from runs; anything else is labelled *not measure
 | `delivery2` | powered lift loss (upright + sinking along the rotor axis + pushing), higher start | policies hovered: the discounted value of landing was too close to hovering |
 | `race` | laps around a 3-D course with a chute; open-ended reward (speed along the course) | 10k-step test: nobody learned to fly (laps ~0, 55-100% crashes) |
 | **`race2`** | `race` + altitude-hold stabiliser, racing-line sensor, 2.5 m off-course limit | **the study** |
+| `race3` | `race2` with a deadlier chute (up to 50% lift lost instead of 35%) | quick test, branch `race3` (section 6) |
 
 Landing-zone physics tried offline and rejected (removed from the code in the refactor; they were off in every
 task): turbulence near the pad, ground effect, a deterministic wake, hidden action noise, a solid touchdown
@@ -140,3 +141,29 @@ The code was reorganised (dead physics removed from the environment, `plots.py` 
 environment trajectories, rewards, terminations, random-number state and MJCF identical for all five tasks, and
 5,600-step race2 training logs of all four algorithms byte-identical. Seed 0 therefore stays valid next to seeds
 1 and 2 run with the new code.
+
+## 6. RACE3: a deadlier chute (branch `race3`, decided 2026-09-27)
+
+`MACURA_TASK=race3` = `race2` with one change, `vrs_loss` 0.35 -> 0.50. Where the lift loss starts (1.2 m/s) and
+everything else (course, reward, crash cost, wind, package, stabiliser, protocol) is unchanged; the other tasks'
+settings are identical to before (checked). Real and imagined reward / crash flags: 0 mismatches (4,396 steps, 405
+losing lift).
+
+Why (*measured*, hand-written autopilot at 3 m/s, 30 scenarios 5000-5029, discounted return gamma 0.99):
+
+| chute speed | race2 (35%) | race3 (50%) |
+|---|---|---|
+| safe, 1.0 m/s | 0% crash, 205 | 0% crash, 205 |
+| moderate dive, 1.5 m/s | 7% crash, **213** | 57% crash, 168 |
+| dive, 2.0 m/s | 27% crash, 202 | 77% crash, 149 |
+| random warm-up steps losing lift | 1.0% | 0.9% |
+
+In race2 a moderate dive paid slightly MORE than flying the chute safely, so avoiding the trap could not help MACURA;
+in race3 it clearly loses, while random warm-up still almost never loses lift (the trap stays new to the world model).
+Rejected: 65% (the safe line crashes 23%); starting the lift loss at 0.8 m/s instead of 1.2 (random warm-up would lose
+lift in 4.2% of steps, so the trap would no longer be new). Seed-0 race2 pilot policies in the chute (test scenarios):
+MACURA sinks at up to 1.06 m/s in 90% of its steps (max 1.82), MBPO 0.70 (max 1.61): MACURA flies it faster, so a
+deadlier trap can also hurt MACURA (as in the delivery pilot).
+
+First look: the notebook on branch `race3` runs seed 0 for 10,000 steps (5,000 warm-up + 5,000 learning) of MACURA,
+MBPO and SAC on race3 and on race2 and prints the MACURA - MBPO gap for both (*not measured yet*).

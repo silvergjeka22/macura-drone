@@ -5,6 +5,10 @@ Four reinforcement-learning algorithms learn the same MuJoCo drone race from scr
 scenarios; only the way they use the learned model to imagine extra practice differs. MACURA stops each
 imagined trip where its models disagree, so it does not trust its model everywhere.
 
+> **Branch `race3`:** the notebook is a quick one-seed test of `MACURA_TASK=race3` (race2 with a deadlier chute:
+> up to 50% lift lost instead of 35%) next to race2, 10,000 steps per algorithm, ~1 h on Kaggle. Why and how:
+> `docs/EXPERIMENTS.md`, section 6. The rest of this README describes the race2 study on `main`.
+
 > Paper: *Trust the Model Where It Trusts Itself: Model-Based Actor-Critic with Uncertainty-Aware Rollout
 > Adaption*, Frauenknecht et al., ICML 2024 (arXiv:2405.19014, `paper/`).
 

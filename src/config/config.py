@@ -3,7 +3,7 @@
 Every module receives one sub-dict of CFG (experiment, env, ensemble, sac, rollout, exploration, selection).
 Pick the task and the run size with environment variables BEFORE this module is first imported:
 
-    MACURA_TASK         race2 (the current study) | race | delivery2 | delivery | "" (cage)
+    MACURA_TASK         race2 (the current study) | race3 (race2 + deadlier chute) | race | delivery2 | delivery | "" (cage)
     MACURA_STEPS        real environment steps per run (race tasks default to 50000)
     MACURA_SEEDS        e.g. "1" or "0 1 2"
     MACURA_ALGOS        e.g. "macura mbpo" (default: all four)
@@ -23,15 +23,16 @@ def _env_list(name, default, cast):
 
 
 TASK = os.environ.get("MACURA_TASK", "").strip().lower()
-RACE_TASKS = ("race", "race2")
-PAPER_PROTOCOL_TASKS = ("delivery2", "race", "race2")
+RACE_TASKS = ("race", "race2", "race3")
+RACE2_PROTOCOL_TASKS = ("race2", "race3")             # race3 runs the exact race2 protocol
+PAPER_PROTOCOL_TASKS = ("delivery2", "race", "race2", "race3")
 
 # ── experiment ────────────────────────────────────────────────────────────────────────────────────────
 SEED = 0
 SEEDS = _env_list("MACURA_SEEDS", [0], int)
 ALGORITHMS = _env_list("MACURA_ALGOS", ["macura", "mbpo", "m2ac", "sac"], lambda x: x.strip().lower())
 TOTAL_ENV_STEPS = int(os.environ.get("MACURA_STEPS", "") or (50000 if TASK in RACE_TASKS else 40000))
-WARMUP_RANDOM_STEPS = 5000 if TASK == "race2" else 500   # random actions before the first update (all algorithms)
+WARMUP_RANDOM_STEPS = 5000 if TASK in RACE2_PROTOCOL_TASKS else 500   # random actions before the first update (all algorithms)
 EVAL_EVERY_STEPS = 1000
 EVAL_EPISODES = 20                                      # fixed selection scenarios: seeds 100..119
 EVAL_SEEDS = [100, 101, 102, 103, 104]                  # evaluate() uses base = EVAL_SEEDS[0]
@@ -115,6 +116,9 @@ RACE_REWARD = {"w_prog": 1.0,          # speed along the course, only near it
 # RACE2 = RACE + altitude-hold stabiliser, racing-line sensor, 2.5 m off-course limit
 RACE2 = dict(RACE, **{"ctrl_mode": "althold", "att_max_tilt_deg": 40.0, "alt_vz_max": 3.0, "alt_kz": 3.0,
                       "race_max_off": 2.5, "race_obs_course": True, "race_obs_ahead": 0.5})
+# RACE3 = RACE2 with a deadlier chute: up to 50% lift lost (was 35%); where it starts (1.2 m/s) is unchanged.
+# At 35% a moderate dive paid more than flying the chute safely; at 50% it clearly loses (docs/EXPERIMENTS.md).
+RACE3 = dict(RACE2, vrs_loss=0.50)
 
 if TASK == "delivery":
     ENV.update(DELIVERY)
@@ -122,7 +126,7 @@ elif TASK == "delivery2":
     ENV.update(DELIVERY2)
     ENV["reward"] = dict(REWARD, **DELIVERY2_REWARD)
 elif TASK in RACE_TASKS:
-    ENV.update(RACE if TASK == "race" else RACE2)
+    ENV.update({"race": RACE, "race2": RACE2, "race3": RACE3}[TASK])
     ENV["reward"] = dict(REWARD, **RACE_REWARD)
 ENV["task"] = TASK
 
@@ -159,7 +163,7 @@ if TASK in PAPER_PROTOCOL_TASKS:
                      "max_epochs": 10, "patience": 3})
     ROLLOUT.update({"freq_steps": 250, "num_rollouts": 25000, "model_buffer_capacity": 1_000_000})
     ROLLOUT["macura"] = dict(ROLLOUT["macura"], gradient_steps_max=16,
-                             xi=float(os.environ.get("MACURA_XI", "") or (0.5 if TASK == "race2" else 1.0)))
+                             xi=float(os.environ.get("MACURA_XI", "") or (0.5 if TASK in RACE2_PROTOCOL_TASKS else 1.0)))
     _horizon = int(os.environ.get("MBPO_HORIZON", "") or 10)
     ROLLOUT["mbpo"] = dict(ROLLOUT["mbpo"], rollout_schedule=[1, _horizon, 500, 3000],
                            fixed_gradient_steps=int(os.environ.get("MBPO_UTD", "") or 8))
@@ -170,7 +174,7 @@ if TASK in PAPER_PROTOCOL_TASKS:
         EXPLORATION["per_algo"] = {"macura": "pink_noise", "mbpo": "deterministic",
                                    "m2ac": "deterministic", "sac": "stochastic"}
 
-if TASK == "race2":
+if TASK in RACE2_PROTOCOL_TASKS:
     ROLLOUT["model_lifetime_rounds"] = 4   # imagined data expires after 4 model rounds (MACURA reference code)
     ROLLOUT["mbpo"]["rollout_schedule"] = [1, _horizon, WARMUP_RANDOM_STEPS, WARMUP_RANDOM_STEPS + 2500]
 

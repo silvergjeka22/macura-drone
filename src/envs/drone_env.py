@@ -1,6 +1,7 @@
 """MuJoCo quadrotor tasks.
 
     race2 (the study)  laps around a fixed 3-D course with a steep chute; altitude-hold stabiliser
+    race3              race2 with a deadlier chute (up to 50% lift lost instead of 35%)
     race               the same course, raw rotor commands
     delivery, delivery2  land a package of random weight on a pad
     "" (cage)          land inside an open-top cage
