@@ -190,19 +190,25 @@ def summary(runs) -> dict:
     return out
 
 
+def best_per_score(s) -> dict:
+    """{score: algo} for the scores where one algorithm is best at the shown precision (ties: none)."""
+    best = {}
+    for k, _, hib, fmt in SCORES:
+        vals = {a: v[k][0] for a, v in s.items() if np.isfinite(v[k][0])}
+        if len(vals) > 1:
+            top = (max if hib else min)(vals.values())
+            winners = [a for a, x in vals.items() if fmt.format(x) == fmt.format(top)]
+            if len(winners) == 1:
+                best[k] = winners[0]
+    return best
+
+
 def summary_markdown(runs) -> str:
     s = summary(runs)
     n_seeds = max((len(v["seeds"]) for v in s.values()), default=0)
     head = "| | seeds | " + " | ".join(lbl for _, lbl, _, _ in SCORES) + " |"
     rows = [head, "|" + "---|" * (len(SCORES) + 2)]
-    best = {}
-    for k, _, hib, fmt in SCORES:
-        vals = {a: v[k][0] for a, v in s.items() if np.isfinite(v[k][0])}
-        if vals:
-            top = (max if hib else min)(vals.values())
-            winners = [a for a, x in vals.items() if fmt.format(x) == fmt.format(top)]
-            if len(winners) == 1:
-                best[k] = winners[0]
+    best = best_per_score(s)
     for a, v in s.items():
         cells = []
         for k, _, _, fmt in SCORES:

@@ -88,11 +88,14 @@ def plot_learning_curves(runs, refs=None, save_path=None, window=R.SMOOTH):
 
 
 def plot_summary_table(runs, save_path=None):
-    """The results table: one row per algorithm, IQM over seeds (+ 95% CI with 3 or more seeds)."""
+    """The results table: one row per algorithm, IQM over seeds (95% CI below it with 3 or more seeds),
+    the best value of each column in bold."""
     import textwrap
     s = R.summary(runs)
-    head = ["algorithm", "seeds"] + [textwrap.fill(lbl, 16) for _, lbl, _, _ in R.SCORES]
-    rows, cols = [], []
+    best = R.best_per_score(s)
+    many = any(len(v["seeds"]) >= 3 for v in s.values())
+    head = ["algorithm", "seeds"] + [textwrap.fill(lbl, 14) for _, lbl, _, _ in R.SCORES]
+    rows, bold = [], []
     for a, v in s.items():
         cells = []
         for k, _, _, fmt in R.SCORES:
@@ -102,20 +105,36 @@ def plot_summary_table(runs, save_path=None):
                 txt += f"\n[{fmt.format(lo)}, {fmt.format(hi)}]"
             cells.append(txt)
         rows.append([_name(a), str(len(v["seeds"]))] + cells)
-        cols.append(COLORS.get(a))
-    many = any(len(v["seeds"]) >= 3 for v in s.values())
-    fig, ax = plt.subplots(figsize=(15, 1.2 + (0.75 if many else 0.5) * len(rows)))
+        bold.append([False, False] + [best.get(k) == a for k, *_ in R.SCORES])
+    head_h, row_h = 0.8, (0.62 if many else 0.42)
+    total = head_h + len(rows) * row_h
+    fig_h = total + 1.05
+    fig = plt.figure(figsize=(13.5, fig_h))
+    ax = fig.add_axes([0.01, 0.42 / fig_h, 0.98, total / fig_h])
     ax.axis("off")
-    tbl = ax.table(cellText=rows, colLabels=head, cellLoc="center", loc="center")
-    tbl.auto_set_font_size(False); tbl.set_fontsize(11); tbl.scale(1, 2.6 if many else 1.8)
-    for j in range(len(head)):
-        tbl[0, j].set_text_props(weight="bold"); tbl[0, j].set_height(tbl[0, j].get_height() * 1.5)
-    for i, c in enumerate(cols, start=1):
-        if c:
-            tbl[i, 0].set_facecolor(c); tbl[i, 0].set_text_props(color="white", weight="bold")
-    note = "IQM over seeds, [95% bootstrap CI]" if many else "fewer than 3 seeds: no confidence interval"
-    ax.set_title(f"Results ({note}). Success = share of a full lap flown per 10 s test flight "
-                 "(autopilot: 54% at 1.5 m/s, 95% at 3 m/s)", pad=14, fontsize=11)
+    widths = [0.12, 0.06] + [0.82 / len(R.SCORES)] * len(R.SCORES)
+    tbl = ax.table(cellText=rows, colLabels=head, colWidths=widths, cellLoc="center", bbox=[0, 0, 1, 1])
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(11)
+    for (r, c), cell in tbl.get_celld().items():
+        cell.set_height((head_h if r == 0 else row_h) / total)
+        cell.set_edgecolor("0.7")
+        if r == 0:
+            cell.set_facecolor("#eeeeee"); cell.set_text_props(weight="bold", fontsize=10.5)
+        elif c == 0:
+            cell.set_facecolor(COLORS.get(list(s)[r - 1], "0.5"))
+            cell.set_text_props(color="white", weight="bold")
+        else:
+            cell.set_facecolor("white" if r % 2 else "#f7f7f7")
+            if bold[r - 1][c]:
+                cell.set_text_props(weight="bold")
+    n = max(len(v["seeds"]) for v in s.values())
+    title = (f"Results: IQM over {n} seeds, 95% bootstrap CI below; bold = best" if many else
+             f"Results: {n} seed{'s' if n > 1 else ''} per algorithm (a confidence interval needs 3 or more); bold = best")
+    fig.text(0.5, 1 - 0.18 / fig_h, title, ha="center", va="top", fontsize=12, weight="bold")
+    fig.text(0.01, 0.12 / fig_h, "Test = the best checkpoint on 30 fresh scenarios.  Success = share of a full lap "
+             "flown per 10 s test flight (autopilot: 54% at 1.5 m/s, 95% at 3 m/s).  Drones broken = real crashes "
+             "while learning, after the warm-up.", ha="left", va="bottom", fontsize=9, color="0.3")
     return _save(fig, save_path)
 
 
