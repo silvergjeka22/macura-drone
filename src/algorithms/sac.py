@@ -1,23 +1,7 @@
-"""SAC backbone — shared by ALL four algorithms (fairness), built on SB3.
+"""SAC learner shared by all four algorithms (Stable-Baselines3, driven step by step from train.py).
 
-We use Stable-Baselines3's SAC as the single learner for MACURA, MBPO, M2AC and
-the model-free SAC baseline. Only the data the agent trains on differs:
-  * SAC baseline  -> trains from REAL transitions (agent.replay_buffer);
-  * model-based   -> trains from MODEL transitions added to agent.replay_buffer.
-
-We drive SB3 manually (add transitions + call .train) instead of .learn(), so
-the Dyna loop in training/train.py controls env interaction, rollouts and UTD.
-
-Pure-function library.
-
-Public functions:
-    build_sac(obs_dim, act_dim, cfg, device) -> agent
-    build_replay_buffer(agent, capacity) -> ReplayBuffer       (a second SB3 buffer)
-    add_transition(agent, obs, act, next_obs, reward, done)
-    add_to_buffer(buf, obs, act, next_obs, reward, done)
-    sac_update(agent, num_updates, batch_size) -> metrics
-    sac_update_mixed(agent, real_buf, model_buf, num_updates, batch, rr, rng) -> metrics
-    select_action(agent, obs, evaluate) -> action
+SAC trains from real data only; the model-based agents train on batches of real_ratio real + the rest
+imagined transitions (sac_update_mixed).
 """
 
 from __future__ import annotations
@@ -37,8 +21,6 @@ except ImportError:
 
 
 class _DummyEnv(gym.Env if gym is not None else object):
-    """Spaces-only env so SB3 can build its networks/buffer without stepping."""
-
     def __init__(self, obs_dim, act_dim):
         self.observation_space = gym.spaces.Box(-np.inf, np.inf, (obs_dim,), np.float32)
         self.action_space = gym.spaces.Box(-1.0, 1.0, (act_dim,), np.float32)
@@ -52,7 +34,7 @@ class _DummyEnv(gym.Env if gym is not None else object):
 
 
 def build_sac(obs_dim: int, act_dim: int, cfg: dict, device: str = "cuda", seed: int = 0):
-    """Build the SB3 SAC agent. `cfg` is the `sac:` sub-config."""
+    """cfg = the `sac` sub-config."""
     if SAC is None:
         raise ImportError("stable-baselines3 is required for SAC")
     device = device if torch.cuda.is_available() else "cpu"
@@ -73,19 +55,12 @@ def build_sac(obs_dim: int, act_dim: int, cfg: dict, device: str = "cuda", seed:
         seed=seed,
         verbose=0,
     )
-    # initialize SB3's internal logger/counters so .train() works without .learn()
     agent._setup_learn(total_timesteps=0, callback=None)
     return agent
 
 
 def build_replay_buffer(agent, capacity: int):
-    """Build a SECOND SB3 ReplayBuffer matching the agent's spaces/device.
-
-    Used by the model-based Dyna loop to keep a separate REAL buffer alongside the agent's own
-    (model/imagined) buffer, so the SAC update can draw whole batches from one or the other
-    (batch-level real/imagined mixing — see `sac_update_mixed`). `handle_timeout_termination`
-    is off (the loop stores raw terminated flags) to match `add_to_buffer` / `add_transition`.
-    """
+    """A second SB3 buffer (the real data of the model-based agents)."""
     if ReplayBuffer is None:
         raise ImportError("stable-baselines3 is required for the replay buffer")
     return ReplayBuffer(
@@ -100,7 +75,6 @@ def build_replay_buffer(agent, capacity: int):
 
 
 def add_to_buffer(buf, obs, act, next_obs, reward, done):
-    """Add one transition to a given SB3 ReplayBuffer (SB3 expects batched)."""
     buf.add(
         np.asarray(obs, np.float32).reshape(1, -1),
         np.asarray(next_obs, np.float32).reshape(1, -1),
@@ -112,12 +86,10 @@ def add_to_buffer(buf, obs, act, next_obs, reward, done):
 
 
 def add_transition(agent, obs, act, next_obs, reward, done):
-    """Add one transition to the agent's own replay buffer."""
     add_to_buffer(agent.replay_buffer, obs, act, next_obs, reward, done)
 
 
 def sac_update(agent, num_updates: int, batch_size: int):
-    """Run `num_updates` SAC gradient steps from the agent's replay buffer."""
     if agent.replay_buffer.size() < batch_size or num_updates <= 0:
         return {"updates": 0}
     agent.train(gradient_steps=num_updates, batch_size=batch_size)
@@ -125,16 +97,23 @@ def sac_update(agent, num_updates: int, batch_size: int):
 
 
 class _MixedReplaySampler:
-    """Presents SB3's ReplayBuffer.sample() API but returns a WITHIN-BATCH mix: each
-    sampled batch is `real_ratio * batch` REAL transitions concatenated with the rest
-    MODEL (imagined) transitions. This is the canonical MBPO/MACURA Dyna mix (Janner
-    2019): every SAC gradient step sees a steady fraction of real data. Any other
-    attribute access is proxied to a real SB3 buffer, so `agent.train()` is untouched."""
+    """Stands in for agent.replay_buffer during agent.train(): each batch is real_ratio real + the rest
+    imagined. With `model_window`, imagined data is drawn only from the newest `model_window` entries
+    (imagined data expires after rollout.model_lifetime_rounds rounds, as in the MACURA reference code)."""
 
-    def __init__(self, real_buf, model_buf, real_ratio):
+    def __init__(self, real_buf, model_buf, real_ratio, model_window=None):
         self.real_buf = real_buf
         self.model_buf = model_buf
         self.real_ratio = float(real_ratio)
+        self.model_window = model_window
+
+    def _sample_model(self, n, env=None):
+        w = self.model_window
+        if not w:
+            return self.model_buf.sample(n, env=env)
+        cap = self.model_buf.buffer_size
+        idx = (self.model_buf.pos - 1 - np.random.randint(0, min(int(w), cap), size=n)) % cap
+        return self.model_buf._get_samples(idx, env=env)
 
     def sample(self, batch_size, env=None):
         from stable_baselines3.common.type_aliases import ReplayBufferSamples
@@ -148,35 +127,27 @@ class _MixedReplaySampler:
         if n_real > 0:
             parts.append(self.real_buf.sample(n_real, env=env))
         if n_model > 0:
-            parts.append(self.model_buf.sample(n_model, env=env))
+            parts.append(self._sample_model(n_model, env=env))
         if len(parts) == 1:
             return parts[0]
 
-        # Concatenate field-by-field. Newer SB3 adds Optional fields (e.g. `discounts`,
-        # None unless n-step replay) - torch.cat can't take None, so pass those through.
+        # newer SB3 versions add optional fields that are None: pass those through
         def _merge(field):
             vals = [getattr(p, field) for p in parts]
             if all(torch.is_tensor(v) for v in vals):
                 return torch.cat(vals, dim=0)
-            return vals[0]                              # non-tensor (e.g. None): pass through
+            return vals[0]
         return ReplayBufferSamples(*(_merge(f) for f in ReplayBufferSamples._fields))
 
-    def __getattr__(self, name):                       # proxy everything else to a real buffer
-        if name in ("real_buf", "model_buf", "real_ratio"):
+    def __getattr__(self, name):
+        if name in ("real_buf", "model_buf", "real_ratio", "model_window"):
             raise AttributeError(name)
         return getattr(self.model_buf, name)
 
 
 def sac_update_mixed(agent, real_buf, model_buf, num_updates: int, batch_size: int,
-                     real_ratio: float, rng=None) -> dict:
-    """WITHIN-BATCH real/imagined mixing for the model-based agents (canonical MBPO/MACURA;
-    Janner 2019). Every SAC batch is `real_ratio * batch_size` REAL transitions + the rest
-    MODEL (imagined) — the standard Dyna mix, so each gradient step gets a steady real-data
-    correction (not the higher-variance whole-batch-real-or-model scheme). Implemented by
-    pointing the learner at a `_MixedReplaySampler` for the duration; the SAC math is SB3's
-    own `agent.train()`, untouched. `rng` is accepted for signature compatibility (unused —
-    the mix is a fixed per-batch proportion). The agent's own buffer is restored afterwards.
-    """
+                     real_ratio: float, rng=None, model_window=None) -> dict:
+    """SB3's own agent.train() on mixed real / imagined batches (`rng` is unused)."""
     n_real = int(round(float(real_ratio) * batch_size))
     if num_updates <= 0:
         return {"updates": 0, "n_real_per_batch": n_real,
@@ -184,7 +155,7 @@ def sac_update_mixed(agent, real_buf, model_buf, num_updates: int, batch_size: i
                 "real_pct": 100.0 * float(real_ratio),
                 "imagined_pct": 100.0 * (1.0 - float(real_ratio))}
     saved = agent.replay_buffer
-    agent.replay_buffer = _MixedReplaySampler(real_buf, model_buf, real_ratio)
+    agent.replay_buffer = _MixedReplaySampler(real_buf, model_buf, real_ratio, model_window)
     try:
         agent.train(gradient_steps=int(num_updates), batch_size=batch_size)
     finally:
@@ -199,13 +170,10 @@ def sac_update_mixed(agent, real_buf, model_buf, num_updates: int, batch_size: i
 
 
 def select_action(agent, obs: np.ndarray, evaluate: bool = False) -> np.ndarray:
-    """Mean action (eval) or a sample from the squashed Gaussian (train)."""
     action, _ = agent.predict(np.asarray(obs, np.float32), deterministic=evaluate)
     return action
 
 
 def select_actions(agent, obs_batch: np.ndarray, evaluate: bool = False) -> np.ndarray:
-    """Batched action selection — one SB3 `predict` over (N, obs_dim) instead of N
-    Python calls. Used to vectorize branched model rollouts (big speedup)."""
     actions, _ = agent.predict(np.asarray(obs_batch, np.float32), deterministic=evaluate)
     return actions

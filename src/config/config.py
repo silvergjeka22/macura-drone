@@ -1,200 +1,185 @@
+"""Experiment configuration: the single source of truth.
+
+Every module receives one sub-dict of CFG (experiment, env, ensemble, sac, rollout, exploration, selection).
+Pick the task and the run size with environment variables BEFORE this module is first imported:
+
+    MACURA_TASK         race2 (the current study) | race | delivery2 | delivery | "" (cage)
+    MACURA_STEPS        real environment steps per run (race tasks default to 50000)
+    MACURA_SEEDS        e.g. "1" or "0 1 2"
+    MACURA_ALGOS        e.g. "macura mbpo" (default: all four)
+    MACURA_XI, MBPO_HORIZON, MBPO_UTD, MACURA_EXPLORATION=equal     tuning / control runs
+    MACURA_OUTPUT_ROOT  where checkpoints, logs, plots and videos go (default /kaggle/working/runs)
+    MACURA_DEADLINE     unix time: a run still training then stops at its next evaluation and is saved
+
+Why each task setting has its value (with the measurements behind it): docs/EXPERIMENTS.md.
+"""
+
 import os
 
-# Single source of truth for every quantity. Nothing is hard-coded in the other .py
-# files; each receives the relevant sub-dict (ENV, ENSEMBLE, SAC, ROLLOUT...).
-#
-# TASK: a quadrotor in wind flies from its start, threads the gap of a ring of no-fly columns
-# and lands softly on the pad in the middle. The four algorithms (MACURA, MBPO, M2AC, SAC)
-# share the SAC backbone, the ensemble, pink-noise exploration and eval seeds - ONLY the
-# rollout strategy differs.
 
-# EXPERIMENT
-# SEEDS and ALGORITHMS are overridable from the environment (set them in a notebook cell BEFORE
-# `from src.bootstrap import setup`, i.e. before config is first imported). Handy for a fast smoke
-# test without editing code: e.g. `os.environ["MACURA_SEEDS"] = "0"`.
-#   A Kaggle commit that runs past 12h is killed and saves NOTHING: at 8 updates/step, 4 algos take
-#   ~3.4h per seed, so run at most 2-3 seeds per commit and merge the logs locally afterwards.
 def _env_list(name, default, cast):
     raw = os.environ.get(name, "")
-    if not raw.strip():
-        return default
-    return [cast(x) for x in raw.replace(",", " ").split()]
+    return [cast(x) for x in raw.replace(",", " ").split()] if raw.strip() else default
 
-SEED                = 0
-SEEDS               = _env_list("MACURA_SEEDS", [1, 2], int)   # FULL STUDY (8 updates/step), split in
-                                         # Kaggle commits: seed 0 = the pilot run (identical settings, keep its
-                                         # output), commit 1 = [1, 2], commit 2 = [3, 4]. Merge all logs locally.
-ALGORITHMS          = _env_list("MACURA_ALGOS", ["macura", "mbpo", "m2ac", "sac"],
-                                lambda x: x.strip().lower())
-TOTAL_ENV_STEPS     = 40000              # same as the pilot (the 40k ring baseline run with UTD 4 -> 8).
-                                         # ~3.4h per seed for all 4 algos -> 2 seeds per commit ~= 7h.
-WARMUP_RANDOM_STEPS = 500
-EVAL_EVERY_STEPS    = 1000               # ~20 eval points over the run
-EVAL_EPISODES       = 20                 # 20 FIXED-seed episodes/eval -> per-point crash noise ~sqrt(p(1-p)/20)
-                                         # ~=0.11 (was ~0.22 at 5): the learning curve reflects the POLICY, not
-                                         # scenario luck. Cheap (eval is a small fraction of runtime); the UTD cut
-                                         # below more than pays for it.
-EVAL_SEEDS          = [100, 101, 102, 103, 104]   # base for the fixed eval scenarios (evaluate() uses
-                                         # base+i, i.e. seeds 100..119 for 20 episodes) - SAME across all algorithms.
 
-# OUTPUT ROOT  -  bootstrap.setup() makes these folders (checkpoints/logs/plots/videos).
-# /kaggle/working is the only writable dir Kaggle saves as the kernel's downloadable output,
-# so results go to /kaggle/working/runs. Override with MACURA_OUTPUT_ROOT if you like.
+TASK = os.environ.get("MACURA_TASK", "").strip().lower()
+RACE_TASKS = ("race", "race2")
+PAPER_PROTOCOL_TASKS = ("delivery2", "race", "race2")
+
+# ── experiment ────────────────────────────────────────────────────────────────────────────────────────
+SEED = 0
+SEEDS = _env_list("MACURA_SEEDS", [0], int)
+ALGORITHMS = _env_list("MACURA_ALGOS", ["macura", "mbpo", "m2ac", "sac"], lambda x: x.strip().lower())
+TOTAL_ENV_STEPS = int(os.environ.get("MACURA_STEPS", "") or (50000 if TASK in RACE_TASKS else 40000))
+WARMUP_RANDOM_STEPS = 5000 if TASK == "race2" else 500   # random actions before the first update (all algorithms)
+EVAL_EVERY_STEPS = 1000
+EVAL_EPISODES = 20                                      # fixed selection scenarios: seeds 100..119
+EVAL_SEEDS = [100, 101, 102, 103, 104]                  # evaluate() uses base = EVAL_SEEDS[0]
 OUTPUT_ROOT = os.environ.get("MACURA_OUTPUT_ROOT", "/kaggle/working/runs")
-
-# RENDERING - OFF in the training kernel (MUJOCO_GL=disable; loading libOSMesa next to
-# torch/SB3 segfaults). The env-preview video renders in an isolated osmesa subprocess.
+DEADLINE = float(os.environ.get("MACURA_DEADLINE", "") or 0) or None   # Kaggle kills a session at 12 h
 RENDER = os.environ.get("MACURA_RENDER", "0") == "1"
 
-# ENV (drone in wind: fly through obstacles, land softly on a pad). Dense reward, analytic in
-# (obs, action) - identical for real and imagined transitions. PROCESS NOISE (gusts + actuator
-# noise) makes the learned model uncertain across the whole trajectory: a fixed-horizon rollout
-# (MBPO) over-imagines and diverges, while MACURA truncates where the ensemble disagrees. This
-# is MACURA's strongest honest case on the drone (paper App. D.4: MACURA excels under process noise).
+# best checkpoint = highest periodic eval return (after start_step); its final test runs on FRESH
+# scenarios (seeds 1000..1029), never on the selection scenarios it was picked on
+SELECTION = {"start_step": 1000, "eval_every": 1000, "final_eval_episodes": 30, "final_eval_seed_base": 1000}
+
+# ── environment: the base task is CAGE (land in an open-top cage); presets below switch task ──────────
 REWARD = {
-    "w_pos":     2.0,    # reward being AT the landing pad (max, via exp(-dist/scale))
-    "pos_scale": 1.0,    # distance scale (m) of the proximity reward (was 1.5 -> steeper pull INTO the pad)
-    "w_level":   0.5,    # reward staying upright (body-z world component)
-    "w_spin":    0.01,   # penalize angular velocity
-    "w_vel":     0.20,   # penalize speed (was 0.10 -> actually rewards slowing down to land)
-    "w_ctrl":    0.01,   # mild control penalty (thrust deviation from hover)
-    "w_obs":     0.4,    # obstacle-avoidance penalty (softened so it doesn't destabilize learning)
-    "obs_scale": 0.5,    # distance scale (m) of the obstacle penalty
-    # SETTLE bonus: a reward "well" that fires ONLY inside the landing envelope (close AND slow AND
-    # upright) so the policy is actually driven to REACH the pad, not just hover ~1 m away. Pure
-    # function of obs (dist, speed, up_z) -> real == imagined kept, and applied to all 4 algos (fair).
-    "w_settle":     4.0,   # strength of the landing-envelope bonus
-    "settle_dist":  0.30,  # distance scale (m): tight, so it only rewards being ON the pad
-    "settle_speed": 0.40,  # speed scale (m/s): only rewards a slow, controlled arrival
+    "w_pos": 2.0, "pos_scale": 1.0,                     # be at the pad
+    "w_level": 0.5, "w_spin": 0.01, "w_vel": 0.20, "w_ctrl": 0.01,
+    "w_obs": 0.4, "obs_scale": 0.5,                     # obstacle proximity penalty
+    "w_settle": 4.0, "settle_dist": 0.30, "settle_speed": 0.40,   # bonus only when close, slow and upright
+    "w_cage": 0.8, "cage_scale": 0.15,                  # cage-wall proximity penalty (below its top)
 }
+
 ENV = {
-    "mjcf_scene":        "",     # "" -> bundled src/envs/assets/drone.xml
-    "action_repeat":     2,      # 50 Hz control (timestep 0.01 * 2)
-    "max_episode_steps": 250,    # ~5 s episodes
-    "init_height":       2.0,    # spawn height (m) - descend from here to the pad
-    "init_noise":        0.05,   # small random pose + velocity perturbation at reset
-    "init_tilt":         0.2,    # gentler start tilt (rad) so the policy can converge
-    "init_spin":         0.3,    # gentler start angular velocity (rad/s)
-    "target_range_xy":   1.8,    # pad + obstacles sampled in x,y in [-1.8, 1.8] m
-    "pad_min_dist":      1.7,    # min start->pad distance: keeps the drone's start OUTSIDE the ring
-                                 # (ring reaches ~1.05 m from the pad) with room to approach the gap
-    "pad_z":             0.2,    # landing-pad height (the drone lands here)
-    "thrust_gain":       1.0,    # action*gain about hover: action 0 = hover, +-1 = 0..2x hover
-    "max_dist":          8.0,    # flew away this far = crashed
-    "fail_tilt":         0.0,    # flipped past horizontal (up_z < 0) = crashed
-
-    # PROCESS NOISE - only in the REAL dynamics (reward/termination stay analytic).
-    "wind_force":        0.4,    # OU gust std (N), ~9% of hover - same as the 40k ring baseline run
-    "wind_correlation":  0.95,   # smooth, sustained gusts
-    "actuator_noise":    0.04,   # per-rotor multiplicative thrust noise (4% std)
-
-    # LANDING-ZONE PHYSICS - implemented in drone_env but OFF (all 0). Offline ensemble tests
-    # (2026-09-23) showed each of them makes the 7-member ensemble AGREE MORE near the pad, not less:
-    # GJS near/transit = turbulence 0.43x, ground effect 0.87x, deterministic wake 0.47-0.59x (vs 1.04x
-    # without them) - the members widen their predicted variance where they can't fit, so MACURA would
-    # trust the landing zone MORE. Kept as options for future tests, not used.
-    "turb_force":        0.0,    # landing-zone turbulence std (N)
-    "turb_correlation":  0.8,
-    "turb_radius":       1.3,    # also the "landing zone" radius for MACURA's near-vs-transit diagnostic
-    "turb_ramp":         0.15,
-    "action_noise":      0.0,    # hidden additive action noise (paper App. D.4 method)
-    "action_noise_zone": 0.0,
-    "ge_gain":           0.0,    # ground effect
-    "ge_scale":          0.25,
-    "wake_gamma":        0.0,    # deterministic column wake (m^2/s)
-    "pad_downwash":      0.0,    # deterministic pad downwash (m/s)
-
-    # OBSTACLES - a RING of virtual no-fly columns AROUND the pad, with ONE entry gap facing the
-    # start: the drone must thread the gap and land in the middle (analytic, so imagined rollouts
-    # see the same envelope). This concentrates model uncertainty at the gap/pocket - exactly where
-    # MBPO's fixed-horizon rollout over-imagines (clipping a column) and MACURA's truncation wins.
-    "n_obstacles":       4,      # columns forming the ring
-    "obstacle_radius":   0.3,    # crash within this xy radius of a column (thinner -> threadable gap)
-    "obstacle_min_clear": 0.5,   # keep columns clear of the start and each other at reset
-    "ring_radius":       0.85,   # columns sit this far from the pad center (pocket radius ~0.55 m)
-    "ring_gap_half_deg": 65.0,   # wider entry gap (~0.94 m opening) so landing is achievable while the
-                                 # far columns still enclose the pad and punish MBPO's over-imagination
-
-    # LANDING / crash envelope
-    "land_radius":       0.5,    # within this 3-D distance of the pad (at low speed, upright) = landed
-    "soft_speed":        0.8,    # land softly below this speed (achievable under moderate wind)
-    "impact_height":     0.06,   # below this height...
-    "hard_speed":        1.5,    # ...moving faster than this = a hard crash (forgives light touchdowns)
-    # TOUCHDOWN option (OFF): the pad becomes a solid raised platform and success means actually
-    # RESTING on it. Screened offline 2026-09-23 and REJECTED: contact makes the ensemble 19-26x more
-    # WRONG at landing, but the members AGREE MORE there (GJS landing/transit 0.33x equal data, 0.76x
-    # sparse; 0.92x / 1.38x without the platform) - MACURA would not detect it, both methods would suffer.
-    "touchdown":         False,
-    "pad_height":        0.15,   # platform top above the floor (m)
-    "pad_radius":        0.35,   # platform radius (m) - same as the visual pad
-    "touch_speed":       0.3,    # "resting on the pad" below this speed (m/s)
-    "reward":            REWARD,
+    "mjcf_scene": "",                  # "" = the bundled src/envs/assets/drone.xml
+    "action_repeat": 2,                # 50 Hz control
+    "max_episode_steps": 400,
+    "init_height": 2.0, "init_noise": 0.05, "init_tilt": 0.2, "init_spin": 0.3,
+    "target_range_xy": 1.8, "pad_min_dist": 1.7, "pad_z": 0.2,
+    "thrust_gain": 1.0,                # rotor command c -> thrust = empty-drone hover x (1 + c)
+    "max_dist": 8.0, "fail_tilt": 0.0,
+    # hidden process noise (real dynamics only)
+    "wind_force": 0.4, "wind_correlation": 0.95, "actuator_noise": 0.04,
+    "zone_radius": 1.0,                # "near the pad" radius of MACURA's near/far diagnostic
+    # obstacles
+    "n_obstacles": 0, "obstacle_radius": 0.3, "obstacle_min_clear": 0.5,
+    "ring_radius": 0.85, "ring_gap_half_deg": 65.0,
+    # landing envelope
+    "land_radius": 0.5, "soft_speed": 0.8, "impact_height": 0.06, "hard_speed": 1.5,
+    # cage
+    "cage": True, "cage_radius": 0.8, "cage_height": 1.0, "cage_margin": 0.15, "cage_bars": 16,
+    "start_height_min": 2.2, "start_height_max": 2.6, "start_offset": 1.0, "start_offset_min": 0.0,
+    # delivery pieces (off here)
+    "spawn_above_pad": False, "payload_max": 0.0,
+    "vrs_loss": 0.0, "vrs_speed": 1.2, "vrs_full": 2.2, "vrs_escape": 1.0,
+    "vrs_powered": False, "vrs_upright": 0.85, "vrs_thrust": 0.7,
+    "scenery": False,
+    "reward": REWARD,
 }
 
-# ENSEMBLE (probabilistic dynamics model, shared by all model-based algos)
-ENSEMBLE = {
-    "num_members": 5, "hidden_size": 200, "num_layers": 4, "activation": "silu",   # = baseline run (paper
-                                                                                   # uses 7; kept at 5 so the
-                                                                                   # pilot changes ONE thing)
+DELIVERY = {
+    "cage": False, "n_obstacles": 0, "spawn_above_pad": True,
+    "start_height_min": 2.2, "start_height_max": 2.6, "start_offset": 0.5,
+    "payload_max": 0.2,
+    "vrs_loss": 0.35, "vrs_speed": 1.2, "vrs_full": 2.2, "vrs_escape": 1.0,
+    "zone_radius": 1.0,
+    "scenery": True,
+}
+DELIVERY2 = dict(DELIVERY, **{
+    "vrs_powered": True, "vrs_upright": 0.85, "vrs_thrust": 0.7,
+    "start_height_min": 3.0, "start_height_max": 4.0, "start_offset_min": 1.0, "start_offset": 2.0,
+    "max_episode_steps": 500,
+})
+DELIVERY2_REWARD = {"w_level": 0.25}
+
+# RACE: laps around a fixed 3-D course with a steep chute (src/envs/race_course.py)
+RACE = {
+    "race": True, "cage": False, "spawn_above_pad": False,
+    "race_size": 3.0, "race_power": 4.0, "race_heights": (2.0, 4.0, 1.0, 1.5),
+    "race_chute_u": 0.30, "race_chute_len": 0.25, "race_max_off": 1.5, "race_floor": 0.12,
+    "n_obstacles": 2, "obstacle_radius": 0.30, "race_pillars": [(2.1, 2.1), (-2.1, -2.1)],
+    "payload_max": 0.2,
+    "vrs_loss": 0.35, "vrs_speed": 1.2, "vrs_full": 2.2, "vrs_escape": 1.0,
+    "vrs_powered": True, "vrs_upright": 0.85, "vrs_thrust": 0.7,
+    "wind_mean_max": 0.5,              # visible steady wind (N)
+    "max_episode_steps": 500,          # 10 s flights
+    "scenery": True,
+}
+RACE_REWARD = {"w_prog": 1.0,          # speed along the course, only near it
+               "w_track": 1.0,         # minus metres outside the course tube
+               "race_tube": 0.35, "race_tube_soft": 0.35,
+               "w_level": 0.1,
+               "w_crash": 500.0}
+# RACE2 = RACE + altitude-hold stabiliser, racing-line sensor, 2.5 m off-course limit
+RACE2 = dict(RACE, **{"ctrl_mode": "althold", "att_max_tilt_deg": 40.0, "alt_vz_max": 3.0, "alt_kz": 3.0,
+                      "race_max_off": 2.5, "race_obs_course": True, "race_obs_ahead": 0.5})
+
+if TASK == "delivery":
+    ENV.update(DELIVERY)
+elif TASK == "delivery2":
+    ENV.update(DELIVERY2)
+    ENV["reward"] = dict(REWARD, **DELIVERY2_REWARD)
+elif TASK in RACE_TASKS:
+    ENV.update(RACE if TASK == "race" else RACE2)
+    ENV["reward"] = dict(REWARD, **RACE_REWARD)
+ENV["task"] = TASK
+
+# ── learning: shared by all four algorithms ───────────────────────────────────────────────────────────
+ENSEMBLE = {                           # probabilistic ensemble world model (MACURA / MBPO / M2AC)
+    "num_members": 5, "hidden_size": 200, "num_layers": 4, "activation": "silu",
     "learning_rate": 1.0e-3, "weight_decay": 1.0e-5, "batch_size": 256,
     "train_epochs_per_round": 8,
-    "logvar_bounds": [-10.0, 0.5],   # bound logvars -> stable uGJS (Eq. 15-19)
-    "deterministic": False, "propagation": "random_member",
+    "logvar_bounds": [-10.0, 0.5],
 }
 
-# SAC backbone (IDENTICAL for all four algorithms - fairness)
-SAC = {
-    "gamma": 0.99, "tau": 0.005, "alpha": "auto",
-    "actor_lr": 3.0e-4, "critic_lr": 3.0e-4,   # critic_lr ignored (SB3 uses one learning_rate)
+SAC = {                                # the same SAC learner for every algorithm
+    "gamma": 0.99, "tau": 0.005, "alpha": "auto", "actor_lr": 3.0e-4,
     "hidden_size": 256, "batch_size": 256, "target_update_interval": 1,
-    "gradient_steps_max": 8,        # Gmax in Eq. 22 (model-based UTD ceiling), SAME for all model-based (fair).
-                                    # Raised 4->8: training HARD on imagined data is exactly where a fixed-
-                                    # horizon method (MBPO) memorizes its model's mistakes and destabilizes,
-                                    # while MACURA's truncated data stays clean (paper runs MBPO at G=10-30).
-                                    # MACURA's adaptive UTD (Eq. 22) gives it slightly FEWER updates (~88%),
-                                    # so this is conservative toward MACURA. SAC stays at 1.
-    "baseline_gradient_steps": 1,   # model-free SAC baseline UTD (~1 = standard SAC)
-    "real_ratio": 0.1,              # within-batch real mixing (Janner/MBPO; MACURA inherits). Raised 0.05->0.1:
-                                    # grounds the critic in twice as much REAL data -> less model exploitation.
+    "gradient_steps_max": 8,           # model-based updates per real step (MACURA: its Gmax, Eq. 22)
+    "baseline_gradient_steps": 1,      # model-free SAC
+    "real_ratio": 0.1,                 # share of real transitions in each model-based batch
 }
 
-# checkpoint selection & final eval (best = highest periodic greedy-eval return)
-SELECTION = {"start_step": 1000, "eval_every": 1000, "final_eval_episodes": 30}
-
-# ROLLOUT strategies (the ONLY thing that differs across algorithms).
-# model_buffer_capacity is chosen so MACURA fills it (and thus reaches full adaptive UTD,
-# Eq. 22) within roughly the first third of the run - NOT scaled linearly with
-# TOTAL_ENV_STEPS: a too-large buffer would leave MACURA perpetually below MBPO/M2AC's fixed
-# update budget. At 25k steps (capacity 12k) MACURA reaches |D_mod|_max around step ~7k.
-ROLLOUT = {
+ROLLOUT = {                            # how each method uses imagined data - the only difference between them
     "freq_steps": 500, "num_rollouts": 200, "model_buffer_capacity": 12000,
-    # MACURA: uncertainty-adaptive truncation (Algorithm 2)
-    # xi is the ONE per-task knob (paper Table 5: xi in {0.3, 2, 5, 30} across envs; Tmax=10,
-    # zeta=0.95 fixed; App. D.2 recipe: start at 1, lower only if learning is unstable).
-    # History on this task: xi=1 barely truncated (rollouts ~9/10 -> MACURA == MBPO); xi=0.4 truncated
-    # (~8/10 late) but was timid early. Kept at 0.4 = the 40k baseline run, so the UTD pilot changes
-    # ONE thing; under harder training the extra truncation is exactly the protection being tested.
     "macura": {"t_max": 10, "zeta": 0.95, "xi": 0.4, "adaptive_gradient_steps": True},
-    # MBPO: fixed truncated-linear schedule; ramp scaled to REACH horizon 10 within the run.
-    "mbpo": {"rollout_schedule": [1, 10, 500, 3000],
-             "adaptive_gradient_steps": False, "fixed_gradient_steps": 8},  # matches SAC gradient_steps_max
-    # M2AC: fixed length + mask least-trustworthy transitions. "ovr" = M2AC's own one-vs-rest
-    # disagreement (paper-faithful); "gjs" = reuse MACURA's GJS (same-signal ablation).
-    "m2ac": {"t_max": 10, "mask_fraction": 0.5, "uncertainty_penalty": 1.0,
-             "uncertainty": "ovr", "fixed_gradient_steps": 8},  # matches SAC gradient_steps_max
+    "mbpo": {"rollout_schedule": [1, 10, 500, 3000], "adaptive_gradient_steps": False, "fixed_gradient_steps": 8},
+    "m2ac": {"t_max": 10, "mask_fraction": 0.5, "uncertainty_penalty": 0.1, "uncertainty": "ovr",
+             "fixed_gradient_steps": 8},
     "sac": {},
 }
 
-# EXPLORATION (kept CONSISTENT across algos to avoid the exploration confound)
 EXPLORATION = {"type": "pink_noise", "scale": 0.3}
 
-# assembled config the training functions consume
+# ── paper protocol (MACURA paper App. D; M2AC as in Pan et al. 2020) ─────────────────────────────────
+if TASK in PAPER_PROTOCOL_TASKS:
+    ENSEMBLE.update({"num_members": 7, "num_elites": 5, "holdout_ratio": 0.2, "holdout_max": 5000,
+                     "max_epochs": 10, "patience": 3})
+    ROLLOUT.update({"freq_steps": 250, "num_rollouts": 25000, "model_buffer_capacity": 1_000_000})
+    ROLLOUT["macura"] = dict(ROLLOUT["macura"], gradient_steps_max=16,
+                             xi=float(os.environ.get("MACURA_XI", "") or (0.5 if TASK == "race2" else 1.0)))
+    _horizon = int(os.environ.get("MBPO_HORIZON", "") or 10)
+    ROLLOUT["mbpo"] = dict(ROLLOUT["mbpo"], rollout_schedule=[1, _horizon, 500, 3000],
+                           fixed_gradient_steps=int(os.environ.get("MBPO_UTD", "") or 8))
+    ROLLOUT["m2ac"] = {"mode": "paper", "t_max": 10, "uncertainty_penalty": 1e-3, "uncertainty": "ovr",
+                       "fixed_gradient_steps": 8}
+    SAC["real_ratio"] = 0.05
+    if os.environ.get("MACURA_EXPLORATION", "paper").strip().lower() != "equal":
+        EXPLORATION["per_algo"] = {"macura": "pink_noise", "mbpo": "deterministic",
+                                   "m2ac": "deterministic", "sac": "stochastic"}
+
+if TASK == "race2":
+    ROLLOUT["model_lifetime_rounds"] = 4   # imagined data expires after 4 model rounds (MACURA reference code)
+    ROLLOUT["mbpo"]["rollout_schedule"] = [1, _horizon, WARMUP_RANDOM_STEPS, WARMUP_RANDOM_STEPS + 2500]
+
 CFG = {
     "experiment": {
         "name": "macura_drone", "seeds": SEEDS, "algorithms": ALGORITHMS,
         "total_env_steps": TOTAL_ENV_STEPS, "warmup_random_steps": WARMUP_RANDOM_STEPS,
         "eval_every_steps": EVAL_EVERY_STEPS, "eval_episodes": EVAL_EPISODES,
-        "eval_seeds": EVAL_SEEDS, "output_root": OUTPUT_ROOT,
+        "eval_seeds": EVAL_SEEDS, "output_root": OUTPUT_ROOT, "deadline": DEADLINE,
     },
     "env": ENV, "ensemble": ENSEMBLE, "sac": SAC,
     "selection": SELECTION, "rollout": ROLLOUT, "exploration": EXPLORATION,
