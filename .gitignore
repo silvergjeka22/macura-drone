@@ -46,6 +46,9 @@ out_seed*/
 out_*/
 results/
 results_*/
+downloads/
+old_files/
+.ipynb_checkpoints/
 # local Claude tooling (not part of the project)
 .claude/
 MUJOCO_LOG.TXT

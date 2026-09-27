@@ -1,5 +1,5 @@
 # Kaggle: installed by the notebook (numpy and torch come preinstalled there).
-# Your computer (compare.py, simulate.py): pip install -r requirements.txt torch
+# Your computer (testing/test.ipynb, simulate.py): pip install -r requirements.txt torch notebook
 
 mujoco>=3.1                # MuJoCo physics (runs the drone model; native viewer on macOS)
 gymnasium>=0.29            # env API

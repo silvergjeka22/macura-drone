@@ -137,7 +137,7 @@ would test whether "more updates" alone explains a MACURA lead (*not measured*).
 ## 5. Refactor check (2026-09-27)
 
 The code was reorganised (dead physics removed from the environment, `plots.py` split into `analysis/results.py`,
-`viz/figures.py` and `viz/video.py`, a simulator added). Verified against the code that ran seed 0 (commit aa0f744):
+`viz/figures.py` and `viz/video.py`, a simulator added). Verified against the code that ran seed 0 (commit 05cbc23, called aa0f744 before the history rewrite):
 environment trajectories, rewards, terminations, random-number state and MJCF identical for all five tasks, and
 5,600-step race2 training logs of all four algorithms byte-identical. Seed 0 therefore stays valid next to seeds
 1 and 2 run with the new code.
@@ -187,17 +187,17 @@ deadlier trap can also hurt MACURA (as in the delivery pilot).
   crash rate, updates per step and the chute check are reported either way, and the race2 pilot is reported next to
   the race3 runs whichever task is chosen.
 
-**Final study notebooks** (prepared 2026-09-27, while the race3 test runs; same settings as that test):
-- `kaggle_final_a/final_a.ipynb` (account nouradon): **MACURA and MBPO**, seeds 0-3, 50,000 steps, 4 trainings at a time.
-- `kaggle_final_b/final_b.ipynb` (account silvergjeka01): **M2AC** for seeds 0-3 at the same time, then **SAC**.
-- MBPO **and M2AC** do 12 SAC updates per real step (`M2AC_UTD`, new; default 8, so every other task is unchanged,
-  checked); MACURA adaptive up to 16; SAC 1.
-- `./finals.sh push | status | get`: starts both (it refuses while a run is still going and first downloads each
-  account's previous output), and downloads each into its own new folder (`out_final_a`, `out_final_b`; a date is
-  added if the folder exists), so neither result is lost.
-- `notebooks/final_merge.ipynb` (runs on the computer): merges the downloads, lists which run came from which folder,
-  and makes the tables (IQM + 95% CI over 4 seeds, per seed, MACURA vs each method seed by seed), the fairness check
-  (updates per step), the chute check, all figures, the world-model check and the race videos.
-- Notebook A repeats the race3 test's MACURA and MBPO runs exactly (same code, seeds and settings; runs are
-  deterministic). If the decision rule chooses race3, the test outputs can be used as A (`RESULTS` in the merge
-  notebook) instead of running A again.
+**Final study** (structure decided 2026-09-27; settings as in the race3 test above, plus M2AC):
+- `training/`: 4 identical notebooks built from one template (`training/build_notebooks.py`): MACURA + MBPO and
+  M2AC + SAC, each for seeds 0, 1 (account nouradon) and 2, 3 (account silvergjeka01); in every notebook its 4
+  trainings run at the same time. Each shows the live printout of every run (evaluations with lap progress in %, what
+  the world model did, how the policy flies), results, figures, MACURA's trust and the world-model check, a 30 s video
+  of each seed's best checkpoint, and saves everything in one file `<name>.zip`.
+- MBPO and M2AC do 12 SAC updates per real step (`MBPO_UTD`, `M2AC_UTD`; M2AC's default stays 8, so every other task
+  is unchanged, checked); MACURA adaptive up to 16; SAC 1.
+- `./kaggle.sh push | status | get` starts, checks and downloads the 4 (into `downloads/<name>`, never overwriting).
+- `testing/test.ipynb` (on the computer): all training results together, a test of every model on 50 new scenarios
+  (seeds 3000-3049) with plots and videos, the final comparison, and a check that every model opens in the simulator.
+- Checkpoints saved on Kaggle (numpy 2) did not open on a laptop with numpy 1 (`SAC.load` fails):
+  `src/algorithms/sac.load_agent` falls back to loading the policy weights; used by the videos, the model check, the
+  test and the simulator.

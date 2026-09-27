@@ -1,6 +1,6 @@
 """Watch the trained drones race live in MuJoCo's 3-D viewer (macOS: run with mjpython).
 
-    mjpython simulate.py                                   # best seed of every algorithm, found under ./out*
+    mjpython simulate.py                                   # best seed of every algorithm, found under ./downloads
     mjpython simulate.py --runs out_seed0 out_seed1 out_seed2 --algos macura mbpo
     mjpython simulate.py --seed 1 --scenarios 1000 1001 --seconds 30 --autopilot
     mjpython simulate.py --follow MACURA --speed 0.5
@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 def main():
     p = argparse.ArgumentParser(description="Race the trained drones live in the MuJoCo viewer.")
-    p.add_argument("--runs", nargs="*", help="downloaded output folders (default: every ./out* folder)")
+    p.add_argument("--runs", nargs="*", help="downloaded output folders (default: everything in ./downloads)")
     p.add_argument("--algos", nargs="*", default=["macura", "mbpo", "m2ac", "sac"])
     p.add_argument("--seed", type=int, help="fly this seed (default: each algorithm's best seed)")
     p.add_argument("--scenarios", nargs="*", type=int, default=[1000, 1001, 1002, 1003, 1004],
@@ -36,7 +36,7 @@ def main():
     from src.analysis import results as R
     from src.viz import simulator
 
-    roots = args.runs or sorted(glob.glob("out*")) or ["."]
+    roots = args.runs or sorted(glob.glob("downloads/*")) or sorted(glob.glob("out*")) or ["."]
     runs = R.load_runs(*roots, algorithms=args.algos)
     if not runs and not args.autopilot:
         raise SystemExit(f"no run logs found under {roots}: pass --runs <downloaded output folder>")

@@ -38,8 +38,8 @@ class Pilot:
             parts = str(policy).split(":")
             self.auto_args = (float(parts[1]) if len(parts) > 1 else 0.8, float(parts[2]) if len(parts) > 2 else 1.5)
         else:
-            from stable_baselines3 import SAC
-            self.agent = SAC.load(policy, device=device)
+            from src.algorithms.sac import load_agent
+            self.agent = load_agent(policy, obs_dim, act_dim, cfg["sac"], device)
         self.kappa, self.check = None, None
         if trust and trust.get("ensemble") and trust.get("kappa") is not None:
             from src.viz.video import _trust_check

@@ -78,8 +78,8 @@ def _fly(cfg, pilot, seeds, device, max_steps, trust):
         descent = float(parts[1]) if len(parts) > 1 else descent
         speed = float(parts[2]) if len(parts) > 2 else speed
     else:
-        from stable_baselines3 import SAC
-        agent = SAC.load(pilot, device=device)
+        from src.algorithms.sac import load_agent
+        agent = load_agent(pilot, obs_dim, act_dim, cfg["sac"], device)
     check = _trust_check(cfg, obs_dim, act_dim, trust, device) if trust else None
     eps = []
     for s in seeds:

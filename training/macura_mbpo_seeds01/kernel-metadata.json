@@ -1,7 +1,7 @@
 {
-  "id": "silvergjeka01/macura-drone",
-  "title": "macura-drone",
-  "code_file": "drone.ipynb",
+  "id": "nouradon/train-macura-mbpo-seeds01",
+  "title": "train-macura-mbpo-seeds01",
+  "code_file": "macura_mbpo_seeds01.ipynb",
   "language": "python",
   "kernel_type": "notebook",
   "is_private": true,

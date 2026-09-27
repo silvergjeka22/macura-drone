@@ -59,6 +59,21 @@ def build_sac(obs_dim: int, act_dim: int, cfg: dict, device: str = "cuda", seed:
     return agent
 
 
+def load_agent(path: str, obs_dim: int, act_dim: int, cfg: dict, device: str = "cpu"):
+    """A saved policy (.zip). SB3's own loader first; if the file was written with another numpy version (Kaggle
+    saves with numpy 2, a laptop may have numpy 1), rebuild the network and load only its weights (policy.pth)."""
+    try:
+        return SAC.load(path, device=device)
+    except Exception:
+        import io
+        import zipfile
+        agent = build_sac(obs_dim, act_dim, cfg, device)
+        with zipfile.ZipFile(path) as z:
+            state = torch.load(io.BytesIO(z.read("policy.pth")), map_location=agent.device)
+        agent.policy.load_state_dict(state)
+        return agent
+
+
 def build_replay_buffer(agent, capacity: int):
     """A second SB3 buffer (the real data of the model-based agents)."""
     if ReplayBuffer is None:

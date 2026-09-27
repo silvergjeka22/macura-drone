@@ -328,16 +328,16 @@ def model_check(run, cfg, episodes=10, seed_base=1000, device="cpu") -> dict:
 
     Returns per-step arrays: gjs, error (RMS over dims, normalised units), fast (sinking faster than the
     lift-loss onset), plus kappa (MACURA's threshold at that checkpoint) and the share of steps trusted."""
-    from stable_baselines3 import SAC
     import torch
     from src.envs import drone_env
+    from src.algorithms.sac import load_agent
     from src.models import ensemble as ens
     from src.algorithms.macura import compute_gjs, fast_threshold
     ens_path = ensemble_checkpoint(run)
     if ens_path is None:
         raise FileNotFoundError(f"no ensemble checkpoint for {run['algo']} seed {run['seed']}")
     env, obs_dim, act_dim = drone_env.make_env(cfg["env"], seed=0)
-    agent = SAC.load(checkpoint(run), device=device)
+    agent = load_agent(checkpoint(run), obs_dim, act_dim, cfg["sac"], device)
     model = ens.build_ensemble(cfg["ensemble"], obs_dim, act_dim, device)
     ens.load_ensemble(model, ens_path)
     tn = model["target_normalizer"]

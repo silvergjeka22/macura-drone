@@ -256,8 +256,8 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
             if improved:
                 best_return, best_step = m["eval_return"], step
                 best_ckpt = _save_best(agent, dynamics_model, output_dir, run_name)
-            print(f"[{algo_name} seed{seed}] step {step:>6}  return {m['eval_return']:7.1f}"
-                  f"  reach {m['eval_success_rate']:.2f}  crash {m['eval_failure_rate']:.2f}"
+            print(f"[{algo_name} seed{seed}] step {step:>6}  return {m['eval_return']:7.1f}  {_progress(m)}"
+                  f"  crash {m['eval_failure_rate']:.2f}"
                   f"  broken {train_crashes}/{train_episodes}"
                   f"{'  <- best' if improved else ''}")
             now = time.perf_counter()
@@ -284,7 +284,7 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
             "train_crashes_total": train_crashes, "train_episodes_total": train_episodes}
     _save_json(meta, output_dir, "checkpoints", f"{run_name}_best_meta.json", indent=2)
     print(f"[{algo_name} seed{seed}] FINAL  return {final_eval['eval_return']:.1f}"
-          f"±{final_eval['eval_return_std']:.1f}  crash {final_eval['eval_failure_rate']:.2f}"
+          f"±{final_eval['eval_return_std']:.1f}  {_progress(final_eval)}  crash {final_eval['eval_failure_rate']:.2f}"
           f"  (best @ step {best_step})  real crashes while learning {train_crashes}/{train_episodes}")
 
     run = {"algo": algo_name, "seed": seed, "checkpoint": best_ckpt, "total_env_steps": total_steps,
@@ -325,6 +325,13 @@ def _empty_log():
             "eval_laps": []}
 
 
+def _progress(m):
+    """Race: how much of a full lap a 10 s flight covers, in % (0-100). Other tasks: the landing success rate."""
+    if "eval_laps" in m:
+        return f"lap {100 * min(max(m['eval_laps'], 0.0), 1.0):4.1f}%"
+    return f"reach {m['eval_success_rate']:.2f}"
+
+
 def _pct(x):
     return "-" if x is None or not np.isfinite(x) else f"{100 * x:.0f}%"
 
@@ -345,7 +352,7 @@ def _print_status(algo, cfg, d, m, tm, dt, elapsed, step, total_steps, every):
         utd = f" | SAC updates/step {d['utd']}" if "utd" in d else ""
         print(f"    model: {line} | fast-descent share of its imagined data {_pct(d.get('fast_frac'))}{utd}")
     eta = (total_steps - step) * dt / max(1, every) / 3600
-    laps = f"laps {m['eval_laps']:.2f} per flight | " if "eval_laps" in m else ""
+    laps = f"{_progress(m)} of a lap per flight | " if "eval_laps" in m else ""
     print(f"    policy: {laps}fastest descent {m['eval_max_sink']:.1f} m/s | losing lift {_pct(m['eval_liftloss'])}"
           f" of the time || time: {dt:.0f} s since last eval (model fit {tm['fit']:.0f} s, imagine "
           f"{tm['imagine']:.0f} s, SAC {tm['sac']:.0f} s) | run so far {elapsed / 60:.0f} min, ~{eta:.1f} h left",
