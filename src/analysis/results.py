@@ -367,3 +367,77 @@ def model_check(run, cfg, episodes=10, seed_base=1000, device="cpu") -> dict:
     fast = -O[:, 10] > fast_threshold(cfg)
     return {"algo": run["algo"], "seed": run["seed"], "gjs": gjs, "error": err, "fast": fast, "kappa": kappa,
             "trusted": float(np.mean(gjs < kappa)) if kappa is not None else float("nan"), "steps": len(gjs)}
+
+
+# ── tables used by the notebooks ─────────────────────────────────────────────────────────────────
+PAIR_SCORES = [("avg_return", "avg return while learning", "{:+.0f}", 1),
+               ("broken", "drones broken after warm-up", "{:+.0f}", -1),
+               ("test_return", "final test return", "{:+.0f}", 1),
+               ("test_success", "lap progress (test)", "{:+.0%}", 1),
+               ("test_crash", "final test crash rate", "{:+.0%}", -1)]
+
+
+def pair_table(runs, a, b):
+    """a - b for every seed both have (same seed = same scenarios, wind and gusts)."""
+    sc = {(r["algo"], r["seed"]): run_scores(r) for r in runs}
+    seeds = sorted(s for (x, s) in sc if x == a and (b, s) in sc)
+    if not seeds:
+        return ""
+    rows = [f"| {NAMES[a]} - {NAMES[b]} | " + " | ".join(f"seed {s}" for s in seeds) + f" | mean | {NAMES[a]} better in |",
+            "|---|" + "---|" * (len(seeds) + 2)]
+    for key, label, fmt, sign in PAIR_SCORES:
+        d = [sc[(a, s)][key] - sc[(b, s)][key] for s in seeds]
+        better = sum(sign * x > 0 for x in d)
+        rows.append(f"| {label} | " + " | ".join(fmt.format(x) for x in d)
+                    + f" | {fmt.format(np.mean(d))} | {better} of {len(d)} |")
+    return "\n".join(rows)
+
+
+def updates_table(runs):
+    rows = ["| algorithm | seed | SAC updates per real step |", "|---|---|---|"]
+    for r in runs:
+        utd = f"{np.mean(r['utd']):.1f}" if r.get("utd") else "1"
+        rows.append(f"| {NAMES[r['algo']]} | {r['seed']} | {utd} |")
+    return "\n".join(rows)
+
+
+def chute_table(runs):
+    """Did a trained policy lose lift? Second half of training and the final test only."""
+    rows = ["| algorithm | seed | fastest descent, 2nd half (m/s) | losing lift, 2nd half | test: losing lift |",
+            "|---|---|---|---|---|"]
+    for r in runs:
+        late = np.asarray(r["steps"]) >= run_length(r) / 2
+        sink = np.asarray(r["eval_max_sink"])[late]
+        lift = np.asarray(r["eval_liftloss"])[late]
+        test = r["final_eval"].get("eval_liftloss", 0)
+        fastest = sink.max() if len(sink) else float("nan")
+        losing = 100 * lift.mean() if len(lift) else float("nan")
+        rows.append(f"| {NAMES[r['algo']]} | {r['seed']} | {fastest:.2f} | {losing:.1f}% | {100 * test:.1f}% |")
+    return "\n".join(rows)
+
+
+def where_table(runs, seeds=(0, 1, 2, 3)):
+    """Which folder every run comes from; 'missing' if not found."""
+    where = {(r["algo"], r["seed"]): os.path.basename(os.path.dirname(r["_root"].rstrip("/"))) for r in runs}
+    rows = ["| algorithm | " + " | ".join(f"seed {s}" for s in seeds) + " |", "|---|" + "---|" * len(seeds)]
+    for a in ALGOS:
+        rows.append(f"| {NAMES[a]} | " + " | ".join(where.get((a, s), "**missing**") for s in seeds) + " |")
+    return "\n".join(rows)
+
+
+def find_downloads(folder="downloads"):
+    """The newest download of each training notebook (unpacks a notebook's <name>.zip if that is all there is)."""
+    import zipfile
+    for z in glob.glob(f"{folder}/*/*.zip"):
+        d = os.path.dirname(z)
+        if not glob.glob(f"{d}/**/logs/*_seed*.json", recursive=True):
+            zipfile.ZipFile(z).extractall(f"{d}/runs")
+    newest = {}
+    for root in run_roots(folder):
+        if f"{os.sep}previous{os.sep}" in root:
+            continue
+        info = os.path.join(root, "RUN_INFO.json")
+        name = json.load(open(info)).get("notebook", root) if os.path.exists(info) else root
+        if name not in newest or os.path.getmtime(root) > os.path.getmtime(newest[name]):
+            newest[name] = root
+    return sorted(newest.values())
