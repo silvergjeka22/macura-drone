@@ -165,5 +165,24 @@ lift in 4.2% of steps, so the trap would no longer be new). Seed-0 race2 pilot p
 MACURA sinks at up to 1.06 m/s in 90% of its steps (max 1.82), MBPO 0.70 (max 1.61): MACURA flies it faster, so a
 deadlier trap can also hurt MACURA (as in the delivery pilot).
 
-First look: the notebook on branch `race3` runs seed 0 for 10,000 steps (5,000 warm-up + 5,000 learning) of MACURA,
-MBPO and SAC on race3 and on race2 and prints the MACURA - MBPO gap for both (*not measured yet*).
+**Quick test** (Kaggle, seed 0, 10,000 steps = 5,000 warm-up + 5,000 learning, MACURA / MBPO / SAC, *measured*):
+- The race2 half reproduced the first 10,000 steps of the seed-0 race2 pilot **exactly** (every evaluation identical):
+  runs are deterministic on Kaggle for a given seed, and the race3 branch leaves race2 unchanged.
+- MACURA - MBPO, race3 vs race2: avg return while learning -9 vs +7, drones broken +6 vs +9, final test return +187 vs
+  -131, test crash -17% vs +30%. The signs flip, so this is noise: race3 already diverges from race2 during the random
+  warm-up (34 vs 32 drones broken at step 5,000), and after 5,000 learning steps the drones barely fly.
+- The chute: lift loss below 1% of the evaluation time, 0% in MACURA's test; the only fast descent (2.2 m/s) was a
+  beginner policy that crashed in every flight. The notebook's check counted it; it now looks only at the second half
+  of training and the final test.
+- One sign of the mechanism: MACURA trusted fast descents less in race3 (58% of the steps) than in race2 (81%), lower
+  at all 5 evaluations; average imagined trip 5.0 vs 6.1 of 10.
+
+**Final race3 test** (decided 2026-09-27, before running it):
+- race3, **seeds 0-3**, **50,000 steps**, MACURA, MBPO and SAC; seeds 0, 1 on one Kaggle account and 2, 3 on another,
+  at the same time; in each session MACURA and MBPO of both seeds train in parallel (one process each), SAC after.
+- **MBPO: 12 SAC updates per real step** (was 8) = MACURA's average in the race2 pilot (11.7), so neither method
+  simply trains more (MACURA keeps its adaptive updates, up to 16). Exploration unchanged (paper protocol, disclosed).
+- **Decision rule**: race3 becomes the final study if MACURA's average return while learning is higher than MBPO's
+  in **at least 3 of the 4 seeds** and on their average; otherwise the race2 plan stays. Drones broken, test return,
+  crash rate, updates per step and the chute check are reported either way, and the race2 pilot is reported next to
+  the race3 runs whichever task is chosen.
