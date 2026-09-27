@@ -158,6 +158,7 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
     train_episodes, train_crashes = 0, 0
     last_diag, tm = None, {"fit": 0.0, "imagine": 0.0, "sac": 0.0}
     t_run = t_eval = time.perf_counter()
+    deadline, stopped_at = cfg["experiment"].get("deadline"), None
 
     obs, _ = env.reset(seed=seed)
     for step in range(total_steps):
@@ -262,6 +263,10 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
             now = time.perf_counter()
             _print_status(algo_name, cfg, last_diag, m, tm, now - t_eval, now - t_run, step, total_steps, eval_every)
             t_eval, tm = now, {k: 0.0 for k in tm}
+            if deadline and time.time() > deadline:
+                stopped_at = step
+                print(f"[{algo_name} seed{seed}] session time limit: training stops at step {step}, saving", flush=True)
+                break
 
     if best_ckpt is None:
         best_ckpt = _save_best(agent, dynamics_model, output_dir, run_name)
@@ -269,6 +274,8 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
     final_eval = _final_eval(agent, eval_env, best_ckpt, final_eval_episodes, _final_seeds(cfg))
     setup = {"exploration": expl_cfg["type"], "task": cfg["env"].get("task", ""),
              "xi": cfg["rollout"]["macura"]["xi"], "mbpo_horizon": cfg["rollout"]["mbpo"]["rollout_schedule"][1]}
+    if stopped_at is not None:
+        setup["stopped_early_at"] = stopped_at
     if lifetime:
         setup.update({"model_lifetime_rounds": lifetime, "macura_gmax": g_max_macura,
                       "mbpo_utd": cfg["rollout"]["mbpo"]["fixed_gradient_steps"]})
@@ -280,7 +287,7 @@ def train_one(algo_name: str, cfg: dict, output_dir: str, seed: int = 0) -> dict
           f"±{final_eval['eval_return_std']:.1f}  crash {final_eval['eval_failure_rate']:.2f}"
           f"  (best @ step {best_step})  real crashes while learning {train_crashes}/{train_episodes}")
 
-    run = {"algo": algo_name, "seed": seed, "checkpoint": best_ckpt,
+    run = {"algo": algo_name, "seed": seed, "checkpoint": best_ckpt, "total_env_steps": total_steps,
            "best_return": float(best_return), "best_step": best_step,
            "final_eval": final_eval, "setup": setup,
            "train_crashes_total": train_crashes, "train_episodes_total": train_episodes, **log}

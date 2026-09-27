@@ -79,7 +79,8 @@ def plot_learning_curves(runs, refs=None, save_path=None, window=R.SMOOTH):
             a.axvspan(0, w, color="0.85", alpha=0.5, lw=0)
         a.set_xlim(left=0)
         a.legend(fontsize=8, loc="best")
-    band = "IQM / mean over seeds, shaded = 95% bootstrap CI" if n >= 3 else "one seed per algorithm: no CI yet"
+    band = ("IQM / mean over seeds, shaded = 95% bootstrap CI" if n >= 3 else
+            "mean of 2 seeds, shaded = range between them" if n == 2 else "one seed per algorithm")
     smooth = f"; A-C: rolling mean over {window} evaluations, faint = raw" if window > 1 else ""
     fig.suptitle(f"MACURA vs MBPO vs M2AC vs SAC  ({band}{smooth}; grey = random warm-up; (n) = seeds)",
                  fontsize=12)
@@ -93,7 +94,8 @@ def plot_summary_table(runs, save_path=None):
     import textwrap
     s = R.summary(runs)
     best = R.best_per_score(s)
-    many = any(len(v["seeds"]) >= 3 for v in s.values())
+    many = any(len(v["seeds"]) >= 2 for v in s.values())
+    n = max(len(v["seeds"]) for v in s.values())
     head = ["algorithm", "seeds"] + [textwrap.fill(lbl, 14) for _, lbl, _, _ in R.SCORES]
     rows, bold = [], []
     for a, v in s.items():
@@ -103,6 +105,8 @@ def plot_summary_table(runs, save_path=None):
             txt = fmt.format(c) if np.isfinite(c) else "-"
             if len(v["seeds"]) >= 3 and np.isfinite(c):
                 txt += f"\n[{fmt.format(lo)}, {fmt.format(hi)}]"
+            elif len(v["seeds"]) == 2 and np.isfinite(c):
+                txt += "\n(" + " / ".join(fmt.format(x) for x in v[k][3]) + ")"
             cells.append(txt)
         rows.append([_name(a), str(len(v["seeds"]))] + cells)
         bold.append([False, False] + [best.get(k) == a for k, *_ in R.SCORES])
@@ -128,9 +132,9 @@ def plot_summary_table(runs, save_path=None):
             cell.set_facecolor("white" if r % 2 else "#f7f7f7")
             if bold[r - 1][c]:
                 cell.set_text_props(weight="bold")
-    n = max(len(v["seeds"]) for v in s.values())
-    title = (f"Results: IQM over {n} seeds, 95% bootstrap CI below; bold = best" if many else
-             f"Results: {n} seed{'s' if n > 1 else ''} per algorithm (a confidence interval needs 3 or more); bold = best")
+    title = (f"Results: IQM over {n} seeds, 95% bootstrap CI below; bold = best" if n >= 3 else
+             "Results: mean of 2 seeds, each seed below (a confidence interval needs 3 or more); bold = best"
+             if n == 2 else "Results: one seed per algorithm (no confidence interval); bold = best")
     fig.text(0.5, 1 - 0.18 / fig_h, title, ha="center", va="top", fontsize=12, weight="bold")
     fig.text(0.01, 0.12 / fig_h, "Test = the best checkpoint on 30 fresh scenarios.  Success = share of a full lap "
              "flown per 10 s test flight (autopilot: 54% at 1.5 m/s, 95% at 3 m/s).  Drones broken = real crashes "

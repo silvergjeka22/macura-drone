@@ -40,7 +40,7 @@ def record_race(cfg, pilots, save_path, seeds=(1000, 1001), trust=None, notes=No
             print(f"flight failed for {label}: {e}")
             return None
     job = {"flights": flights, "labels": list(pilots), "fps": int(fps), "step": int(frame_step),
-           "camera": camera or WIDE_CAMERA, "size": tuple(size), "cols": int(cols or min(len(pilots), 2)),
+           "camera": camera or WIDE_CAMERA, "size": tuple(size), "cols": int(cols or (len(pilots) if len(pilots) <= 3 else 2)),
            "notes": {k: notes.get(k, "") for k in pilots}, "kappa": {k: v.get("kappa") for k, v in trust.items()}}
     data_file, asset = tempfile.mktemp(suffix=".pkl"), tempfile.mktemp(suffix=".xml")
     with open(data_file, "wb") as f:

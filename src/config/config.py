@@ -9,6 +9,7 @@ Pick the task and the run size with environment variables BEFORE this module is 
     MACURA_ALGOS        e.g. "macura mbpo" (default: all four)
     MACURA_XI, MBPO_HORIZON, MBPO_UTD, MACURA_EXPLORATION=equal     tuning / control runs
     MACURA_OUTPUT_ROOT  where checkpoints, logs, plots and videos go (default /kaggle/working/runs)
+    MACURA_DEADLINE     unix time: a run still training then stops at its next evaluation and is saved
 
 Why each task setting has its value (with the measurements behind it): docs/EXPERIMENTS.md.
 """
@@ -35,6 +36,7 @@ EVAL_EVERY_STEPS = 1000
 EVAL_EPISODES = 20                                      # fixed selection scenarios: seeds 100..119
 EVAL_SEEDS = [100, 101, 102, 103, 104]                  # evaluate() uses base = EVAL_SEEDS[0]
 OUTPUT_ROOT = os.environ.get("MACURA_OUTPUT_ROOT", "/kaggle/working/runs")
+DEADLINE = float(os.environ.get("MACURA_DEADLINE", "") or 0) or None   # Kaggle kills a session at 12 h
 RENDER = os.environ.get("MACURA_RENDER", "0") == "1"
 
 # best checkpoint = highest periodic eval return (after start_step); its final test runs on FRESH
@@ -177,7 +179,7 @@ CFG = {
         "name": "macura_drone", "seeds": SEEDS, "algorithms": ALGORITHMS,
         "total_env_steps": TOTAL_ENV_STEPS, "warmup_random_steps": WARMUP_RANDOM_STEPS,
         "eval_every_steps": EVAL_EVERY_STEPS, "eval_episodes": EVAL_EPISODES,
-        "eval_seeds": EVAL_SEEDS, "output_root": OUTPUT_ROOT,
+        "eval_seeds": EVAL_SEEDS, "output_root": OUTPUT_ROOT, "deadline": DEADLINE,
     },
     "env": ENV, "ensemble": ENSEMBLE, "sac": SAC,
     "selection": SELECTION, "rollout": ROLLOUT, "exploration": EXPLORATION,

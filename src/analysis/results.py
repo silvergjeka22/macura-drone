@@ -39,25 +39,40 @@ def run_roots(path: str) -> list:
     return sorted({os.path.dirname(os.path.dirname(h)) for h in hits})
 
 
-def load_runs(*paths, algorithms=None, verbose=True) -> list:
+def run_length(run) -> int:
+    """Planned real steps of a run (older logs: last evaluation step + 1000)."""
+    return int(run.get("total_env_steps") or ((run["steps"][-1] + 1000) if run.get("steps") else 0))
+
+
+def load_runs(*paths, algorithms=None, verbose=True, same_length=True) -> list:
     """Merge the run logs found under `paths` (output roots, or any folder above them). A duplicate
-    (algo, seed) keeps the first one found. Each run gets `_root`, its output folder."""
-    runs, seen = [], {}
+    (algo, seed) keeps the first one found. Each run gets `_root`, its output folder. With `same_length`
+    only the runs of the longest planned length are kept (curves of different lengths do not mix)."""
+    found = []
     for p in paths:
         for root in run_roots(p):
             for path in sorted(glob.glob(os.path.join(root, "logs", "*_seed*.json"))):
                 with open(path) as f:
                     r = json.load(f)
-                key = (r.get("algo"), r.get("seed"))
-                if algorithms and key[0] not in algorithms:
-                    continue
-                if key in seen:
-                    if verbose:
-                        print(f"  duplicate {key[0]} seed {key[1]}: keeping {seen[key]}, skipping {root}")
-                    continue
-                seen[key] = root
-                r["_root"] = root
-                runs.append(r)
+                if not algorithms or r.get("algo") in algorithms:
+                    r["_root"] = root
+                    found.append(r)
+    if same_length and found:
+        longest = max(run_length(r) for r in found)
+        skipped = [r for r in found if run_length(r) != longest]
+        found = [r for r in found if run_length(r) == longest]
+        if skipped and verbose:
+            print(f"  kept the {longest:,}-step runs; skipped " + ", ".join(
+                f"{NAMES.get(r['algo'], r['algo'])} seed {r['seed']} ({run_length(r):,} steps)" for r in skipped))
+    runs, seen = [], {}
+    for r in found:
+        key = (r.get("algo"), r.get("seed"))
+        if key in seen:
+            if verbose:
+                print(f"  duplicate {key[0]} seed {key[1]}: keeping {seen[key]}, skipping {r['_root']}")
+            continue
+        seen[key] = r["_root"]
+        runs.append(r)
     runs.sort(key=lambda r: (ALGOS.index(r["algo"]) if r["algo"] in ALGOS else 99, r["seed"]))
     if verbose:
         for a, rs in by_algo(runs).items():
@@ -107,7 +122,8 @@ def iqm(vals) -> float:
 
 
 def ci(vals, stat="iqm", n_boot=2000, alpha=0.05, seed=0):
-    """(center, lo, hi): IQM or mean over seeds with a percentile-bootstrap CI (lo = hi = center below 3 seeds)."""
+    """(center, lo, hi): IQM or mean over seeds with a percentile-bootstrap CI (lo = hi = center below 3 seeds;
+    with 2 seeds the IQM is their mean)."""
     vals = np.asarray([v for v in vals if v is not None and np.isfinite(v)], dtype=float)
     if len(vals) == 0:
         return float("nan"), float("nan"), float("nan")
@@ -122,17 +138,26 @@ def ci(vals, stat="iqm", n_boot=2000, alpha=0.05, seed=0):
 
 
 def curves(run_list, key):
-    """(steps, matrix n_seeds x n_evals) of a per-eval series, cut to the shortest run."""
+    """(steps, matrix n_seeds x n_evals) of a per-eval series; a shorter run (stopped early) is padded with NaN."""
     rs = [r for r in run_list if r.get(key)]
     if not rs:
         return None, None
-    n = min(min(len(r["steps"]), len(r[key])) for r in rs)
-    return np.asarray(rs[0]["steps"][:n]), np.array([r[key][:n] for r in rs], dtype=float)
+    lens = [min(len(r["steps"]), len(r[key])) for r in rs]
+    n = max(lens)
+    mat = np.full((len(rs), n), np.nan)
+    for i, (r, k) in enumerate(zip(rs, lens)):
+        mat[i, :k] = r[key][:k]
+    return np.asarray(rs[lens.index(n)]["steps"][:n]), mat
 
 
 def band(mat, stat="iqm"):
-    """Per-eval-point center and CI across seeds."""
-    c = np.array([ci(mat[:, j], stat, seed=j) for j in range(mat.shape[1])])
+    """Per-eval-point center and band across seeds: 95% CI with 3 or more seeds, else the seeds' range."""
+    out = []
+    for j in range(mat.shape[1]):
+        v = mat[:, j][np.isfinite(mat[:, j])]
+        out.append(ci(v, stat, seed=j) if len(v) >= 3 else
+                   ((float(np.mean(v)), float(v.min()), float(v.max())) if len(v) else (np.nan,) * 3))
+    c = np.array(out)
     return c[:, 0], c[:, 1], c[:, 2]
 
 
@@ -216,10 +241,13 @@ def summary_markdown(runs) -> str:
             txt = fmt.format(c) if np.isfinite(c) else "-"
             if len(v["seeds"]) >= 3 and np.isfinite(c):
                 txt += f" [{fmt.format(lo)}, {fmt.format(hi)}]"
+            elif len(v["seeds"]) == 2 and np.isfinite(c):
+                txt += " (" + " / ".join(fmt.format(x) for x in v[k][3]) + ")"
             cells.append(f"**{txt}**" if best.get(k) == a and len(s) > 1 else txt)
         rows.append(f"| {NAMES.get(a, a)} | {len(v['seeds'])} | " + " | ".join(cells) + " |")
     note = ("IQM over seeds [95% bootstrap CI]" if n_seeds >= 3 else
-            "one value per algorithm (mean when 2 seeds): no confidence interval below 3 seeds")
+            "mean of the 2 seeds (each seed in brackets); a confidence interval needs 3 or more" if n_seeds == 2 else
+            "one seed per algorithm: no confidence interval")
     return "\n".join(rows) + (f"\n\n{note}; bold = best. Test = the best checkpoint on 30 fresh scenarios. "
                               "Success = share of a full lap flown per 10 s flight (autopilot on the same test flights: "
                               "54% at 1.5 m/s, 95% at 3 m/s).")

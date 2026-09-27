@@ -30,11 +30,17 @@ src/
   viz/                    figures.py, video.py (race videos with MACURA's trust panel), simulator.py, scenery.py
 ```
 
-## Run on Kaggle (one seed per session)
+## Run on Kaggle: the final study (one seed per session)
 
-One session trains **one seed of all four algorithms**, 50,000 real steps each, about 6 hours on a P100. Kaggle
-stops a session after 12 hours and a stopped session saves nothing, so every seed gets its own session. Seed 0
-is done; run **seed 1** and **seed 2**. Two Kaggle accounts can run them at the same time.
+**Plan, decided before running:** seeds **1 and 2**, **100,000** real steps each, **MACURA, MBPO and SAC**, the
+environment unchanged. One Kaggle session per seed, about 9 h each (~18 h of your GPU quota). Seed 0 (50,000
+steps, all four algorithms) is the pilot; it is analysed on its own because curves of different lengths do not
+mix. M2AC is not in the long runs: all four at 100k would need ~25 h and more than one 12 h session per seed.
+
+Time per seed, estimated from the seed-0 Kaggle timings (the model fit grows with the data): MACURA ~4.5 h,
+MBPO ~3.4 h, SAC ~0.5 h, setup + tests + videos ~0.6 h. Kaggle stops a session after 12 h and then saves
+nothing, so the notebook stops training at 11 h (the run is cut there and saved) and skips videos when time is
+short. It prints "session time limit" if that ever happens.
 
 One-time setup on your computer:
 
@@ -46,56 +52,52 @@ One-time setup on your computer:
 
 For each seed:
 
-1. In `notebooks/drone.ipynb`, first code cell: `SEED = 1` (then `2` for the next session). Leave `STEPS = 50000`.
-2. `./run.sh push` (uploads the notebook and starts it; you can turn your computer off).
-3. `./run.sh status` until it says complete (about 6 h).
-4. `./run.sh get` downloads into `./out`; rename it right away: `mv out out_seed1`. Or on the notebook page:
-   Output → Download, unzip into `out_seed1/`.
+1. `git pull` (so `./run.sh push` uploads the current notebook).
+2. In `notebooks/drone.ipynb`, first code cell: `SEED = 1` (then `SEED = 2` for the second session). Leave
+   `STEPS = 100000` and `ALGOS = "macura mbpo sac"`.
+3. `./run.sh push` (starts it on Kaggle; you can turn your computer off), `./run.sh status` until complete.
+4. `./run.sh get` downloads into `./out`; rename it right away: `mv out out_seed1` (then `out_seed2`). Or on the
+   notebook page: Output → Download, unzip into `out_seed1/`.
 
-Second account at the same time: log in with that account's `kaggle.json` (or use its website), put its
-username into `kernel-metadata.json` and `run.sh`, set `SEED = 2`, push. Add the `GITHUB_TOKEN` secret there too.
+For seed 2 you can attach seed 1's output as an input (Add Input → Your Work): section 8 then compares both
+seeds on Kaggle. Two accounts can also run the two seeds at the same time (each with its own username in
+`kernel-metadata.json` / `run.sh` and its own `GITHUB_TOKEN` secret).
 
-Your seed-0 download (the folder that holds `runs/logs` and `runs/checkpoints`) becomes `out_seed0/`.
+What the notebook shows for each algorithm, right after it is trained: its learning curve, the **test** of its
+best checkpoint on 30 fresh scenarios (return, success, crash rate) and a **test video** of 3 of them (MACURA's
+panel shows its world model's verdict at every step). At the end: all results, MACURA's trust figures, a race
+video of the chosen algorithms (`SHOW`) and a 30 s MACURA vs MBPO flight.
 
 Quick test first (optional, ~15 min): `STEPS = 2000`, push, check that it completes, then set it back.
 
-### Longer runs (e.g. 80,000 steps)
-Measured on Kaggle for seed 0 at 50k: MACURA 1.95 h, MBPO 1.45 h, M2AC 1.45 h, SAC 0.2 h (+ ~0.5 h setup and
-videos). At 80k one seed of all four would take about 10 h (estimated, not measured: the model fit grows with
-the data), too close to the 12 h limit. Split each seed over two sessions with `ALGOS` in the first code cell:
-`ALGOS = "macura mbpo"` (~6.5 h) and `ALGOS = "m2ac sac"` (~3.5 h), same `SEED`; download both
-(`out_seed1a`, `out_seed1b`); `compare.py` and the simulator merge them. All seeds of a study need the same
-`STEPS`, so seed 0 (50k) would have to be run again at 80k. Kaggle gives about 30 GPU hours per week per account.
+Options (in the first code cell): `ALGOS` (which algorithms), and environment variables before setup:
+`MACURA_EXPLORATION=equal` (the same pink noise for all), `MACURA_XI=1`, `MBPO_HORIZON=5`, `MBPO_UTD=16`.
 
-Options (environment variables in the first code cell, before setup): `MACURA_ALGOS="macura mbpo"` (only some
-algorithms), `MACURA_EXPLORATION=equal` (the same pink noise for all four), `MACURA_XI=1`, `MBPO_HORIZON=5`,
-`MBPO_UTD=16` (control run: MBPO with MACURA's maximum update budget).
-
-## Compare all seeds on your computer
+## Compare the seeds on your computer
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-python compare.py out_seed0 out_seed1 out_seed2 --out results            # figures + tables (~2 min)
-python compare.py out_seed0 out_seed1 out_seed2 --out results --videos   # + race videos (~10 min)
+pip install -r requirements.txt torch
+python compare.py out_seed1 out_seed2 --out results             # figures + tables (~2 min)
+python compare.py out_seed1 out_seed2 --out results --videos    # + race videos (~10 min)
+python compare.py out_seed0 --out results_pilot                  # the 50k pilot (all four) on its own
 ```
 
-It finds every `logs/<algo>_seed<n>.json` below the given folders (a seed found twice is used once) and writes:
+It finds every `logs/<algo>_seed<n>.json` below the given folders (a seed found twice is used once; only the runs
+of the longest length are compared, the others are listed as skipped) and writes:
 
 | file | what |
 |---|---|
-| `results/summary.md` | scores per algorithm (IQM over seeds with 95% bootstrap CI), per seed, trust numbers, autopilot reference |
-| `plots/learning_curves.png` | return (IQM + CI), crash rate, success, drones broken while learning (paper Fig. 4); rolling mean over 5 evaluations, raw values faint |
-| `plots/summary_table.png` | the results table as a figure (IQM and 95% CI per score) |
-| `plots/scores.png` | the six scores: bars = IQM, whiskers = 95% CI, dots = seeds |
+| `results/summary.md` | scores per algorithm (2 seeds: their mean and each seed; 3+: IQM with 95% CI), per seed, trust numbers, autopilot reference |
+| `plots/learning_curves.png` | return, crash rate, success, drones broken while learning (paper Fig. 4); rolling mean over 5 evaluations, raw values faint; shaded = the range of 2 seeds (95% CI with 3+) |
+| `plots/summary_table.png` | the results table as a figure |
+| `plots/scores.png` | the six scores as bars, dots = seeds |
 | `plots/model_trust.png` | how much of its imagination each method trusts; MACURA in fast descents vs normal flight |
 | `plots/kappa.png` | MACURA's threshold κ over training (paper Fig. 8) |
 | `plots/model_check.png` | best world model on real test flights: disagreement vs actual error (paper Fig. 10) |
 | `plots/untrusted_data.png` | imagined training data above MACURA's threshold; imagined fast descents |
 | `videos/race_all.mp4` | the best policy of each algorithm on the same 3 fresh scenarios, MACURA's live trust panel |
 | `videos/long_flight.mp4` | MACURA vs MBPO, 30 s demo flights |
-
-The notebook's section 8 builds the same report on Kaggle if you attach the other seeds' outputs as inputs.
 
 ## Watch the drones on your Mac
 
@@ -118,7 +120,8 @@ Run (the `out_seed*` folders next to the repo files are found automatically):
 
 ```bash
 mjpython simulate.py                                     # best seed of each algorithm, scenarios 1000-1004
-mjpython simulate.py --runs out_seed0 out_seed1 out_seed2
+mjpython simulate.py --runs out_seed1 out_seed2           # the 100k runs (the longest runs are used)
+mjpython simulate.py --runs out_seed0                     # the 50k pilot, including M2AC
 mjpython simulate.py --algos macura mbpo                 # only these two
 mjpython simulate.py --seed 2                            # seed 2 of every algorithm instead of the best seed
 mjpython simulate.py --seconds 30                        # 30 s flights (a demo: training flights are 10 s)
@@ -144,8 +147,8 @@ is printed in the terminal.
   MBPO 19%, SAC 6%; the autopilot 54% (1.5 m/s) and 95% (3 m/s).
 - One evaluation is 20 flights, so single points are noisy: the curves show a rolling mean over 5 evaluations
   with the raw values faint behind. Every score is computed from the raw values.
-- With 3 seeds every score is an IQM with a 95% bootstrap confidence interval. Overlapping intervals mean the
-  seeds cannot tell the methods apart; say so rather than picking a winner.
+- With 2 seeds the table shows their mean and each seed's value. If the two seeds disagree about which method is
+  better, the study cannot tell them apart; say so rather than picking a winner. (3+ seeds: IQM with 95% CI.)
 - Reference: the hand-written autopilot scores a return of 673 (1.5 m/s) and 1172 (3 m/s) on the selection
   scenarios, without crashes.
 - **MACURA does not trust its model 100%**: `model_trust.png`, `kappa.png`, `model_check.png` and the trust panel

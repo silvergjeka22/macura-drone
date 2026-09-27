@@ -113,6 +113,21 @@ normal flight. No policy reached the chute trap: the fastest descents stayed ≤
 full at 2.2), so the lift loss rarely came into play. One seed shows a trend, not a result; seeds 1 and 2 give
 the confidence intervals.
 
+### Final study (decided 2026-09-27, before running it)
+Seeds 1 and 2, 100,000 real steps, MACURA, MBPO and SAC, the environment unchanged; one Kaggle session per seed.
+- **Longer, not a different task.** The one region where the models are wrong and disagree about it (the chute's
+  lift loss) was barely reached at 50k (fastest descents 1.4 m/s) and MACURA's best checkpoint was its last
+  evaluation. Training longer is the fair way to reach it; a new environment would need a screening run first.
+- **Budget.** Estimated from the seed-0 Kaggle timings (model fit grows linearly with the data), per seed at 100k:
+  MACURA ~4.5 h, MBPO ~3.4 h, M2AC ~3.4 h, SAC ~0.5 h. All four: ~11.7 h + setup, too close to Kaggle's 12 h limit,
+  and ~25 h for two seeds (budget 23 h). Without M2AC: ~9 h per seed, ~18 h in total. MBPO is the method MACURA
+  builds on, so MACURA vs MBPO stays the main comparison; M2AC appears in the 50k pilot only.
+- **Safety.** Training stops at 11 h into a session (the run is cut at its next evaluation and saved; the log
+  records `stopped_early_at`); a killed session would save nothing.
+- **Two seeds** give no confidence interval: the tables show both seeds' values; a method is only called better if
+  both seeds agree.
+- Seed 0 (50k) is analysed on its own; the analysis compares runs of the same length only.
+
 ### Not run (paper results not reproduced here)
 Exploration ablation (paper Fig. 5), ξ sweep (Fig. 6), component ablations (Fig. 7), SAC to its asymptote, other
 MuJoCo tasks. The optional control run `MACURA_ALGOS=mbpo MBPO_UTD=16` (MBPO with MACURA's maximum update budget)
