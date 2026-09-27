@@ -59,6 +59,14 @@ Your seed-0 download (the folder that holds `runs/logs` and `runs/checkpoints`) 
 
 Quick test first (optional, ~15 min): `STEPS = 2000`, push, check that it completes, then set it back.
 
+### Longer runs (e.g. 80,000 steps)
+Measured on Kaggle for seed 0 at 50k: MACURA 1.95 h, MBPO 1.45 h, M2AC 1.45 h, SAC 0.2 h (+ ~0.5 h setup and
+videos). At 80k one seed of all four would take about 10 h (estimated, not measured: the model fit grows with
+the data), too close to the 12 h limit. Split each seed over two sessions with `ALGOS` in the first code cell:
+`ALGOS = "macura mbpo"` (~6.5 h) and `ALGOS = "m2ac sac"` (~3.5 h), same `SEED`; download both
+(`out_seed1a`, `out_seed1b`); `compare.py` and the simulator merge them. All seeds of a study need the same
+`STEPS`, so seed 0 (50k) would have to be run again at 80k. Kaggle gives about 30 GPU hours per week per account.
+
 Options (environment variables in the first code cell, before setup): `MACURA_ALGOS="macura mbpo"` (only some
 algorithms), `MACURA_EXPLORATION=equal` (the same pink noise for all four), `MACURA_XI=1`, `MBPO_HORIZON=5`,
 `MBPO_UTD=16` (control run: MBPO with MACURA's maximum update budget).
@@ -77,7 +85,8 @@ It finds every `logs/<algo>_seed<n>.json` below the given folders (a seed found 
 | file | what |
 |---|---|
 | `results/summary.md` | scores per algorithm (IQM over seeds with 95% bootstrap CI), per seed, trust numbers, autopilot reference |
-| `plots/learning_curves.png` | return (IQM + CI), crash rate, laps per flight, drones broken while learning (paper Fig. 4) |
+| `plots/learning_curves.png` | return (IQM + CI), crash rate, success, drones broken while learning (paper Fig. 4); rolling mean over 5 evaluations, raw values faint |
+| `plots/summary_table.png` | the results table as a figure (IQM and 95% CI per score) |
 | `plots/scores.png` | the six scores: bars = IQM, whiskers = 95% CI, dots = seeds |
 | `plots/model_trust.png` | how much of its imagination each method trusts; MACURA in fast descents vs normal flight |
 | `plots/kappa.png` | MACURA's threshold κ over training (paper Fig. 8) |
@@ -127,12 +136,18 @@ is printed in the terminal.
 ## What the results mean
 
 - **Main scores (fixed before the runs)**: average return while learning (how fast each method learns to race)
-  and drones broken after the warm-up (real crashes while learning). Then final test return, crash rate and laps
-  per 10 s flight of the best checkpoint on 30 fresh scenarios.
+  and drones broken after the warm-up (real crashes while learning). Then, for the best checkpoint on 30 fresh
+  scenarios: final test return, **success** and crash rate.
+- **Success** = how much of a full lap (24.3 m) a drone flies in its 10 s flight, 0-100% (a crash ends the flight,
+  so it counts how far it got). The earlier yes/no score, "a full lap inside one flight", needs more than 2.4 m/s
+  on average and stayed 0 for every learner, so it could not tell them apart. Seed 0: MACURA 27%, M2AC 21%,
+  MBPO 19%, SAC 6%; the autopilot 54% (1.5 m/s) and 95% (3 m/s).
+- One evaluation is 20 flights, so single points are noisy: the curves show a rolling mean over 5 evaluations
+  with the raw values faint behind. Every score is computed from the raw values.
 - With 3 seeds every score is an IQM with a 95% bootstrap confidence interval. Overlapping intervals mean the
   seeds cannot tell the methods apart; say so rather than picking a winner.
-- Reference: the hand-written autopilot flies 0.53 laps per flight at 1.5 m/s and 0.93 at 3 m/s without crashes
-  (return 673 / 1172 on the selection scenarios).
+- Reference: the hand-written autopilot scores a return of 673 (1.5 m/s) and 1172 (3 m/s) on the selection
+  scenarios, without crashes.
 - **MACURA does not trust its model 100%**: `model_trust.png`, `kappa.png`, `model_check.png` and the trust panel
   in the videos and the simulator show where it stops imagining and whether the model is really more wrong there.
 - Known confound (as in the paper): MACURA explores with pink noise, MBPO and M2AC deterministically. Details and

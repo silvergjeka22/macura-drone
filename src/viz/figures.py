@@ -33,33 +33,46 @@ def _warmup(runs):
     return min(starts) if starts else None
 
 
-def _curve_panel(ax, runs, key, stat, ylabel, title, refs=None, ref_key=None):
+def _curve_panel(ax, runs, key, stat, ylabel, title, refs=None, ref_key=None, fn=None, window=1):
+    """Center + 95% CI across seeds; with `window` > 1 each seed is smoothed first and the raw center is
+    drawn faintly behind. `fn` transforms the values (and the reference lines)."""
+    fn = fn or (lambda v: v)
     for a, rs in R.by_algo(runs).items():
         steps, mat = R.curves(rs, key)
         if steps is None:
             continue
+        mat, col = fn(mat), COLORS.get(a)
+        if window > 1:
+            ax.plot(steps, R.band(mat, stat)[0], color=col, lw=0.8, alpha=0.3)
+            mat = np.array([R.smooth(row, window) for row in mat])
         c, lo, hi = R.band(mat, stat)
-        ax.plot(steps, c, color=COLORS.get(a), lw=2, label=f"{_name(a)} ({len(rs)})")
-        ax.fill_between(steps, lo, hi, color=COLORS.get(a), alpha=0.18)
+        ax.plot(steps, c, color=col, lw=2, label=f"{_name(a)} ({len(rs)})")
+        ax.fill_between(steps, lo, hi, color=col, alpha=0.18)
     for name, ref in (refs or {}).items():
         if ref_key in ref:
-            ax.axhline(ref[ref_key], color="k", lw=1.1, ls=REF_STYLE.get(name, ":"), alpha=0.7, label=name)
+            ax.axhline(fn(np.asarray(ref[ref_key])), color="k", lw=1.1, ls=REF_STYLE.get(name, ":"), alpha=0.7,
+                       label=name)
     ax.set_xlabel("real environment steps"); ax.set_ylabel(ylabel); ax.set_title(title)
     ax.grid(alpha=0.3)
 
 
-def plot_learning_curves(runs, refs=None, save_path=None):
-    """Paper Fig. 4 for this task: IQM return with 95% CI, plus crash rate, laps and real crashes while
-    learning. `refs` = autopilot_reference() (a hand-written controller, not a learned one)."""
+def plot_learning_curves(runs, refs=None, save_path=None, window=R.SMOOTH):
+    """Paper Fig. 4 for this task: IQM return with 95% CI, crash rate, success (% of a lap per flight) and
+    real crashes while learning. `refs` = autopilot_reference() (a hand-written controller, not learned).
+    A-C are smoothed over `window` evaluations (faint = raw); the scores always use the raw values."""
     n = max(len(rs) for rs in R.by_algo(runs).values())
+    pct = (lambda m: 100.0 * np.asarray(m, dtype=float))
     fig, ax = plt.subplots(2, 2, figsize=(14, 9.5))
     _curve_panel(ax[0, 0], runs, "eval_return", "iqm", "evaluation return (IQM)",
-                 "A. Return while learning", refs, "return")
-    _curve_panel(ax[0, 1], runs, "eval_failure_rate", "mean", "crash rate", "B. Crash rate in the evaluations")
-    ax[0, 1].set_ylim(-0.02, 1.02)
-    _curve_panel(ax[1, 0], runs, "eval_laps", "mean", "laps per 10 s flight", "C. Laps per flight", refs, "laps")
+                 "A. Return while learning", refs, "return", window=window)
+    _curve_panel(ax[0, 1], runs, "eval_failure_rate", "mean", "crash rate (%)", "B. Crashes in the evaluations",
+                 fn=pct, window=window)
+    _curve_panel(ax[1, 0], runs, "eval_laps", "mean", "success: % of a lap per 10 s flight",
+                 "C. Success (how far each 10 s flight gets)", refs, "laps",
+                 fn=lambda m: 100.0 * R.success(m), window=window)
     _curve_panel(ax[1, 1], runs, "train_crashes", "mean", "real crashes so far",
                  "D. Drones broken while learning (training flights)")
+    ax[0, 1].set_ylim(-2, 102); ax[1, 0].set_ylim(-2, 102)
     w = _warmup(runs)
     for a in ax.flat:
         if w:
@@ -67,8 +80,42 @@ def plot_learning_curves(runs, refs=None, save_path=None):
         a.set_xlim(left=0)
         a.legend(fontsize=8, loc="best")
     band = "IQM / mean over seeds, shaded = 95% bootstrap CI" if n >= 3 else "one seed per algorithm: no CI yet"
-    fig.suptitle(f"MACURA vs MBPO vs M2AC vs SAC  ({band}; grey = random warm-up; (n) = seeds)", fontsize=13)
+    smooth = f"; A-C: rolling mean over {window} evaluations, faint = raw" if window > 1 else ""
+    fig.suptitle(f"MACURA vs MBPO vs M2AC vs SAC  ({band}{smooth}; grey = random warm-up; (n) = seeds)",
+                 fontsize=12)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
+    return _save(fig, save_path)
+
+
+def plot_summary_table(runs, save_path=None):
+    """The results table: one row per algorithm, IQM over seeds (+ 95% CI with 3 or more seeds)."""
+    import textwrap
+    s = R.summary(runs)
+    head = ["algorithm", "seeds"] + [textwrap.fill(lbl, 16) for _, lbl, _, _ in R.SCORES]
+    rows, cols = [], []
+    for a, v in s.items():
+        cells = []
+        for k, _, _, fmt in R.SCORES:
+            c, lo, hi, _ = v[k]
+            txt = fmt.format(c) if np.isfinite(c) else "-"
+            if len(v["seeds"]) >= 3 and np.isfinite(c):
+                txt += f"\n[{fmt.format(lo)}, {fmt.format(hi)}]"
+            cells.append(txt)
+        rows.append([_name(a), str(len(v["seeds"]))] + cells)
+        cols.append(COLORS.get(a))
+    many = any(len(v["seeds"]) >= 3 for v in s.values())
+    fig, ax = plt.subplots(figsize=(15, 1.2 + (0.75 if many else 0.5) * len(rows)))
+    ax.axis("off")
+    tbl = ax.table(cellText=rows, colLabels=head, cellLoc="center", loc="center")
+    tbl.auto_set_font_size(False); tbl.set_fontsize(11); tbl.scale(1, 2.6 if many else 1.8)
+    for j in range(len(head)):
+        tbl[0, j].set_text_props(weight="bold"); tbl[0, j].set_height(tbl[0, j].get_height() * 1.5)
+    for i, c in enumerate(cols, start=1):
+        if c:
+            tbl[i, 0].set_facecolor(c); tbl[i, 0].set_text_props(color="white", weight="bold")
+    note = "IQM over seeds, [95% bootstrap CI]" if many else "fewer than 3 seeds: no confidence interval"
+    ax.set_title(f"Results ({note}). Success = share of a full lap flown per 10 s test flight "
+                 "(autopilot: 54% at 1.5 m/s, 95% at 3 m/s)", pad=14, fontsize=11)
     return _save(fig, save_path)
 
 
@@ -87,6 +134,9 @@ def plot_scores(runs, save_path=None):
             ax.annotate(fmt.format(c), (i, c), textcoords="offset points", xytext=(0, 4 if c >= 0 else -12),
                         ha="center", fontsize=9)
         ax.axhline(0, color="k", lw=0.6)
+        if "%" in fmt:
+            from matplotlib.ticker import PercentFormatter
+            ax.yaxis.set_major_formatter(PercentFormatter(1.0)); ax.set_ylim(0, 1.05)
         ax.set_xticks(range(len(algos))); ax.set_xticklabels([_name(a) for a in algos])
         ax.set_title(f"{label} ({'higher' if hib else 'lower'} = better)", fontsize=11)
         ax.grid(alpha=0.3, axis="y")
@@ -95,19 +145,26 @@ def plot_scores(runs, save_path=None):
     return _save(fig, save_path)
 
 
-def plot_algo(runs, refs=None, save_path=None):
-    """Quick look at one algorithm: return and crash rate of each seed."""
+def plot_algo(runs, refs=None, save_path=None, window=R.SMOOTH):
+    """Quick look at one algorithm: return and success of each seed (rolling mean, faint = raw)."""
     a = runs[0]["algo"]
     fig, ax = plt.subplots(1, 2, figsize=(13, 4.2))
-    for r in runs:
-        ax[0].plot(r["steps"], r["eval_return"], lw=1.8, label=f"seed {r['seed']}")
-        ax[1].plot(r["steps"], r["eval_failure_rate"], lw=1.8, label=f"seed {r['seed']}")
+    for i, r in enumerate(runs):
+        c = f"C{i}"
+        for x, y in ((ax[0], np.asarray(r["eval_return"], float)),
+                     (ax[1], 100.0 * R.success(r.get("eval_laps") or np.zeros(len(r["steps"]))))):
+            x.plot(r["steps"], y, color=c, lw=0.8, alpha=0.3)
+            x.plot(r["steps"], R.smooth(y, window), color=c, lw=2, label=f"seed {r['seed']}")
     for name, ref in (refs or {}).items():
-        ax[0].axhline(ref["return"], color="k", lw=1.1, ls=REF_STYLE.get(name, ":"), alpha=0.7, label=name)
-    ax[0].set_ylabel("evaluation return"); ax[1].set_ylabel("crash rate"); ax[1].set_ylim(-0.02, 1.02)
+        ls = REF_STYLE.get(name, ":")
+        ax[0].axhline(ref["return"], color="k", lw=1.1, ls=ls, alpha=0.7, label=name)
+        ax[1].axhline(100.0 * R.success(ref["laps"]), color="k", lw=1.1, ls=ls, alpha=0.7, label=name)
+    ax[0].set_ylabel("evaluation return"); ax[1].set_ylabel("success: % of a lap per 10 s flight")
+    ax[1].set_ylim(-2, 102)
     for x in ax:
         x.set_xlabel("real environment steps"); x.grid(alpha=0.3); x.legend(fontsize=8)
-    fig.suptitle(f"{_name(a)}: learning curve per seed", fontsize=12)
+    fig.suptitle(f"{_name(a)}: learning curve per seed (rolling mean over {window} evaluations, faint = raw)",
+                 fontsize=12)
     fig.tight_layout(rect=(0, 0, 1, 0.93))
     return _save(fig, save_path)
 

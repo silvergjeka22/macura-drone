@@ -103,9 +103,11 @@ so MACURA gets fewer updates when it trusts its model less (paper App. D.5).
 | return, last 10 evals | **196** | 141 | 102 | -475 |
 | final test return (30 fresh scenarios) | **284** | 111 | 163 | -423 |
 | final test crash rate | **3%** | 13% | **3%** | 63% |
-| laps per 10 s flight (test) | **0.27** | 0.19 | 0.21 | 0.06 |
+| success: % of a lap per 10 s flight (test) | **27%** | 19% | 21% | 6% |
 | drones broken after warm-up | 28 | **20** | 33 | 202 |
 
+(Success replaces "a full lap within one flight", which was 0 for all four: a full lap in 10 s needs more than
+2.4 m/s on average; the autopilot reaches 54% / 95% at 1.5 / 3 m/s on the same test flights.)
 MACURA trusted 75% of a full 10-step imagination on average: 79% of imagined steps in fast descents, 96% in
 normal flight. No policy reached the chute trap: the fastest descents stayed ≤ 1.4 m/s (lift loss starts at 1.2,
 full at 2.2), so the lift loss rarely came into play. One seed shows a trend, not a result; seeds 1 and 2 give

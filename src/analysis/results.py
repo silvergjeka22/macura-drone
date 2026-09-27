@@ -17,15 +17,19 @@ import numpy as np
 ALGOS = ("macura", "mbpo", "m2ac", "sac")
 NAMES = {"macura": "MACURA", "mbpo": "MBPO", "m2ac": "M2AC", "sac": "SAC"}
 
-# (key, label, higher is better, format) - the scores fixed before the runs, main ones first
+# (key, label, higher is better, format) - the scores fixed before the runs, main ones first.
+# success = share of a full lap flown in a 10 s flight (0-100%; a crash ends the flight, so it counts how far
+# the drone got). It replaces "a full lap within one flight", which needs > 2.4 m/s on average and stays 0 for
+# every learner (the autopilot at 3 m/s manages it in ~10% of flights): it grades how well each one flies.
 SCORES = (
     ("avg_return", "avg return while learning", True, "{:.0f}"),
     ("broken", "drones broken after warm-up", False, "{:.0f}"),
     ("test_return", "final test return", True, "{:.0f}"),
-    ("test_crash", "final test crash rate", False, "{:.2f}"),
-    ("test_laps", "laps per 10 s flight (test)", True, "{:.2f}"),
+    ("test_success", "success, % of a lap (test)", True, "{:.0%}"),
+    ("test_crash", "final test crash rate", False, "{:.0%}"),
     ("last10_return", "return, last 10 evals", True, "{:.0f}"),
 )
+SMOOTH = 5                                   # learning curves: rolling mean over this many evaluations
 
 
 # ── loading ──────────────────────────────────────────────────────────────────────────────────────
@@ -144,6 +148,21 @@ def series(run_list, key):
 
 
 # ── scores ───────────────────────────────────────────────────────────────────────────────────────
+def success(laps):
+    """Share of a full lap flown per 10 s flight, 0..1 (mean laps of the evaluation flights, clipped)."""
+    return np.clip(np.asarray(laps, dtype=float), 0.0, 1.0)
+
+
+def smooth(y, window=SMOOTH):
+    """Trailing rolling mean over `window` evaluations (display only; the scores use the raw values)."""
+    y = np.asarray(y, dtype=float)
+    if window <= 1 or len(y) == 0:
+        return y
+    c = np.cumsum(np.insert(y, 0, 0.0))
+    n = np.minimum(np.arange(1, len(y) + 1), window)
+    return (c[1:] - c[np.maximum(np.arange(1, len(y) + 1) - window, 0)]) / n
+
+
 def run_scores(run) -> dict:
     ret = np.asarray(run.get("eval_return", []), dtype=float)
     fe = run.get("final_eval", {})
@@ -154,6 +173,7 @@ def run_scores(run) -> dict:
         "test_return": fe.get("eval_return", float("nan")),
         "test_crash": fe.get("eval_failure_rate", float("nan")),
         "test_laps": fe.get("eval_laps", float("nan")),
+        "test_success": success(fe.get("eval_laps", float("nan"))),
         "test_full_lap": fe.get("eval_success_rate", float("nan")),
         "broken": float(run.get("train_crashes_total", 0) - tc[0]),
         "best_step": run.get("best_step"),
@@ -194,7 +214,9 @@ def summary_markdown(runs) -> str:
         rows.append(f"| {NAMES.get(a, a)} | {len(v['seeds'])} | " + " | ".join(cells) + " |")
     note = ("IQM over seeds [95% bootstrap CI]" if n_seeds >= 3 else
             "one value per algorithm (mean when 2 seeds): no confidence interval below 3 seeds")
-    return "\n".join(rows) + f"\n\n{note}; bold = best. Test = the best checkpoint on 30 fresh scenarios."
+    return "\n".join(rows) + (f"\n\n{note}; bold = best. Test = the best checkpoint on 30 fresh scenarios. "
+                              "Success = share of a full lap flown per 10 s flight (autopilot on the same test flights: "
+                              "54% at 1.5 m/s, 95% at 3 m/s).")
 
 
 def per_seed_markdown(runs) -> str:

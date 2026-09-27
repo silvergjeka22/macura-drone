@@ -19,6 +19,8 @@ import numpy as np
 COLORS = {"MACURA": (0.12, 0.47, 0.71), "MBPO": (0.84, 0.15, 0.16), "M2AC": (0.17, 0.63, 0.17),
           "SAC": (0.50, 0.50, 0.50)}
 EXTRA_COLORS = [(0.58, 0.40, 0.74), (0.55, 0.34, 0.29), (0.89, 0.47, 0.76), (0.74, 0.74, 0.13)]
+COLOR_NAMES = {"MACURA": "blue", "MBPO": "red", "M2AC": "green", "SAC": "grey"}
+EXTRA_NAMES = ["purple", "brown", "pink", "olive"]
 _SCALE = 2.0          # drones drawn 2x larger so they stay visible over the whole course
 _KEY_SPACE, _KEY_N, _KEY_R = 32, 78, 82
 
@@ -65,14 +67,16 @@ class Pilot:
         self.done = term or self.t >= max_steps
 
     def status(self):
+        """[(left column, right column)] rows for the text panel."""
         e, o = self.env, self.obs
         state = "CRASHED" if self.crashed else ("done" if self.done else "flying")
-        line = (f"laps {self.laps:4.2f}  speed {np.linalg.norm(o[8:11]):3.1f} m/s  sink {max(-o[10], 0):3.1f} m/s  "
-                f"lift {100 * e.thrust_eff:3.0f}%  {state}")
+        rows = [(f"{self.label} ({self.color})",
+                 f"laps {self.laps:4.2f}   {np.linalg.norm(o[8:11]):3.1f} m/s   sink {max(-o[10], 0):3.1f}   "
+                 f"lift {100 * e.thrust_eff:3.0f}%   {state}")]
         if self.check and self.n_checked:
-            verdict = "agree -> trusted" if self.ok else "DISAGREE -> would stop imagining"
-            line += f"\n      world model: {verdict}  ({100 * self.trusted / self.n_checked:.0f}% of steps trusted)"
-        return line
+            verdict = "agree: trusted" if self.ok else "DISAGREE: stops imagining"
+            rows.append(("   its world model", f"{verdict}  ({100 * self.trusted / self.n_checked:.0f}% trusted)"))
+        return rows
 
 
 def _scaled(geom, s):
@@ -119,6 +123,8 @@ def run(cfg, pilots, scenarios=(1000, 1001, 1002), seconds=None, speed=1.0, trus
     trust = trust or {}
     fleet = [Pilot(k, cfg, p, trust.get(k), device) for k, p in pilots.items()]
     labels = [p.label for p in fleet]
+    for i, p in enumerate(fleet):
+        p.color = COLOR_NAMES.get(p.label.split()[0].upper(), EXTRA_NAMES[i % len(EXTRA_NAMES)])
     model, data = display_scene(fleet[0].env.mjcf_xml, labels)
     ids = scenery.scenery_ids(model)
     mocap = {mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, b): int(model.body_mocapid[b])
@@ -166,9 +172,10 @@ def run(cfg, pilots, scenarios=(1000, 1001, 1002), seconds=None, speed=1.0, trus
     def show_text(viewer, scenario):          # set_texts takes the viewer lock itself: call it outside
         if not hasattr(viewer, "set_texts"):
             return
-        head = f"scenario {scenario}   t = {max(p.t for p in fleet) * dt:4.1f} s{'   PAUSED' if keys['pause'] else ''}"
-        body = "\n".join(f"{p.label:9s} {p.status()}" for p in fleet)
-        viewer.set_texts([(None, mujoco.mjtGridPos.mjGRID_TOPLEFT, head + "\n" + body, None),
+        rows = [(f"scenario {scenario}", f"t = {max(p.t for p in fleet) * dt:4.1f} s{'   PAUSED' if keys['pause'] else ''}")]
+        rows += [r for p in fleet for r in p.status()]
+        viewer.set_texts([(None, mujoco.mjtGridPos.mjGRID_TOPLEFT, "\n".join(a for a, _ in rows),
+                           "\n".join(b for _, b in rows)),
                           (None, mujoco.mjtGridPos.mjGRID_BOTTOMLEFT, "SPACE pause   N next scenario   R restart", None)])
 
     def set_camera(cam):
@@ -218,7 +225,8 @@ def run(cfg, pilots, scenarios=(1000, 1001, 1002), seconds=None, speed=1.0, trus
                         break
                 time.sleep(max(0.0, dt / speed - (time.perf_counter() - tick)))
             for p in fleet:
-                print(f"  {p.label:9s} " + p.status().replace("\n", "\n  "))
+                for a, b in p.status():
+                    print(f"  {a:26s} {b}")
             if not keys["restart"]:
                 k += 1
     for p in fleet:

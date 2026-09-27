@@ -25,6 +25,7 @@ def build(runs, cfg, out_dir, check=True, videos=False, close=False, device="cpu
                                       episodes=cfg["selection"]["final_eval_episodes"],
                                       cache=os.path.join(out_dir, "autopilot_reference_test.json"))
     figs = [("learning_curves", lambda p: F.plot_learning_curves(runs, refs, p)),
+            ("summary_table", lambda p: F.plot_summary_table(runs, p)),
             ("scores", lambda p: F.plot_scores(runs, p)),
             ("model_trust", lambda p: F.plot_model_trust(runs, p)),
             ("kappa", lambda p: F.plot_kappa(runs, p) if any(r["algo"] == "macura" for r in runs) else None),
