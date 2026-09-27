@@ -1,33 +1,9 @@
-"""Probabilistic ensemble (PE) dynamics model — self-contained PyTorch.
+"""Probabilistic ensemble world model shared by MACURA, MBPO and M2AC.
 
-A small ensemble of Gaussian MLPs predicting the next-state DELTA distribution,
-shared by every model-based algorithm (MACURA, MBPO, M2AC). This replaces the
-mbrl-lib dependency (unmaintained, hard to install on modern Python) with
-a compact, modern implementation. The math the algorithms rely on — per-member
-predictive Gaussians for the GJS uncertainty — is exposed by `member_gaussians`.
-
-Pure-function library: builders + helpers only.
-
-Public functions:
-    build_ensemble(cfg, obs_dim, act_dim, device) -> ens
-    train_ensemble(ens, data, cfg)                 -> metrics
-    predict(ens, obs, act)                         -> next_obs
-    member_gaussians(ens, obs, act)                -> (means, variances)
-
-`ens` is a dict: {model, optimizer, normalizer, device}. `data` is a dict of
-numpy arrays {obs, act, next_obs}.
-
-Note on the uncertainty: we predict the next-state DELTA (next_obs - obs). The
-GJS divergence between members is invariant to the shared +obs shift, so
-computing it on deltas equals computing it on next-states.
-
-Normalization: BOTH the inputs (obs, act) AND the delta targets are normalized to
-zero mean / unit std of the real data. The members
-therefore predict in NORMALIZED delta space, and `member_gaussians` returns
-normalized-space Gaussians by default — so the GJS uncertainty sums comparable,
-scale-balanced per-dimension terms instead of being dominated by whichever obs
-dims happen to have the largest physical magnitude (position vs angular
-velocity). `predict` un-normalizes internally, so rollouts are unaffected.
+Gaussian MLP members predict the normalised next-state delta; each member trains on its own bootstrap
+resample. Paper setup (holdout_ratio > 0): validation split, early stopping and the best `num_elites`
+members used for rollouts and uncertainty. member_gaussians returns the per-member Gaussians in
+normalised delta space, so every observation dimension weighs equally in the GJS disagreement.
 """
 
 from __future__ import annotations
@@ -42,7 +18,6 @@ except ImportError:
     nn = None
 
 
-# ── network ───────────────────────────────────────────────────────────────────
 def _make_mlp(in_dim, out_dim, hidden, num_layers, activation):
     act = {"silu": nn.SiLU, "relu": nn.ReLU, "tanh": nn.Tanh, "elu": nn.ELU}.get(
         activation.lower(), nn.SiLU
@@ -51,7 +26,7 @@ def _make_mlp(in_dim, out_dim, hidden, num_layers, activation):
     for _ in range(num_layers - 1):
         layers += [nn.Linear(d, hidden), act()]
         d = hidden
-    layers += [nn.Linear(d, 2 * out_dim)]  # mean and logvar heads
+    layers += [nn.Linear(d, 2 * out_dim)]
     return nn.Sequential(*layers)
 
 
@@ -59,8 +34,6 @@ _Base = nn.Module if nn is not None else object
 
 
 class GaussianEnsemble(_Base):
-    """Ensemble of independent Gaussian MLPs (mean + bounded log-variance)."""
-
     def __init__(self, in_dim, out_dim, cfg):
         super().__init__()
         self.out_dim = out_dim
@@ -76,12 +49,11 @@ class GaussianEnsemble(_Base):
         self.max_logvar = nn.Parameter(torch.full((out_dim,), float(hi)), requires_grad=False)
 
     def forward(self, x):
-        """x: (B, in_dim). Returns means, logvars each (E, B, out_dim)."""
+        """x: (B, in_dim) -> means, logvars (E, B, out_dim)."""
         means, logvars = [], []
         for m in self.members:
             out = m(x)
             mean, logvar = out[..., : self.out_dim], out[..., self.out_dim:]
-            # soft-bound the log-variance for numerically stable uncertainty
             logvar = self.max_logvar - nn.functional.softplus(self.max_logvar - logvar)
             logvar = self.min_logvar + nn.functional.softplus(logvar - self.min_logvar)
             means.append(mean)
@@ -89,7 +61,6 @@ class GaussianEnsemble(_Base):
         return torch.stack(means, 0), torch.stack(logvars, 0)
 
 
-# ── running input normalizer ──────────────────────────────────────────────────
 class _Normalizer:
     def __init__(self, dim, device):
         self.mean = torch.zeros(dim, device=device)
@@ -103,9 +74,8 @@ class _Normalizer:
         return (x - self.mean) / self.std
 
 
-# ── builders / helpers ────────────────────────────────────────────────────────
 def build_ensemble(cfg: dict, obs_dim: int, act_dim: int, device: str = "cuda"):
-    """`cfg` is the `ensemble:` sub-config. Returns the `ens` dict."""
+    """cfg = the `ensemble` sub-config."""
     if torch is None:
         raise ImportError("torch is required for the ensemble")
     device = device if torch.cuda.is_available() else "cpu"
@@ -117,19 +87,18 @@ def build_ensemble(cfg: dict, obs_dim: int, act_dim: int, device: str = "cuda"):
         "model": model,
         "optimizer": optim,
         "normalizer": _Normalizer(obs_dim + act_dim, device),
-        # delta targets are normalized too (scale-balanced GJS)
         "target_normalizer": _Normalizer(obs_dim, device),
         "device": device,
         "cfg": cfg,
-        "elites": None,        # indices of the members used for rollouts/uncertainty (None = all)
+        "elites": None,
     }
 
 
 def _train_epoch(model, optim, xn, yn, bs, device):
-    """One pass over (xn, yn): every member on its own bootstrap resample. Returns the last batch loss."""
+    """One epoch, every member on its own bootstrap resample. Returns the last batch loss."""
     n, E = xn.shape[0], len(model.members)
     last_nll = 0.0
-    boot = [torch.randint(0, n, (n,), device=device) for _ in range(E)]   # per-member bootstrap indices
+    boot = [torch.randint(0, n, (n,), device=device) for _ in range(E)]
     perm = torch.randperm(n, device=device)
     for start in range(0, n, bs):
         idx = perm[start:start + bs]
@@ -149,10 +118,8 @@ def _train_epoch(model, optim, xn, yn, bs, device):
 
 
 def _train_with_holdout(ens, xn, yn, cfg):
-    """Paper-style model training (MBPO / M2AC / MACURA via mbrl-lib): hold out a validation split, train
-    with EARLY STOPPING (each member keeps its best weights on the held-out MSE; stop when no member has
-    improved by 1% for `patience` epochs), then keep the `num_elites` best members as the ELITES that
-    rollouts and the uncertainty use."""
+    """Each member keeps its best weights on the held-out MSE; stop when no member improved by 1% for
+    `patience` epochs; the `num_elites` best members become the elites."""
     import copy
     model, optim, device = ens["model"], ens["optimizer"], ens["device"]
     n, E = xn.shape[0], len(model.members)
@@ -187,29 +154,22 @@ def _train_with_holdout(ens, xn, yn, cfg):
 
 
 def train_ensemble(ens: dict, data: dict, cfg: dict):
-    """Train the members on (s,a)->Δs, each on a bootstrap resample of the data (epistemic disagreement).
-
-    Default: `train_epochs_per_round` epochs on all data. With `holdout_ratio` > 0 (the paper setup):
-    validation split + early stopping + elite selection (see `_train_with_holdout`).
-    Returns {'nll': last training NLL, ...}.
-    """
+    """Fit (obs, act) -> next_obs - obs on all real data so far."""
     model, optim, device = ens["model"], ens["optimizer"], ens["device"]
     obs = torch.as_tensor(data["obs"], dtype=torch.float32, device=device)
     act = torch.as_tensor(data["act"], dtype=torch.float32, device=device)
     nxt = torch.as_tensor(data["next_obs"], dtype=torch.float32, device=device)
     x = torch.cat([obs, act], dim=-1)
-    y = nxt - obs                                   # predict the delta
+    y = nxt - obs
     ens["normalizer"].fit(x)
     xn = ens["normalizer"](x)
-    ens["target_normalizer"].fit(y)                 # normalize targets (scale-balanced GJS)
+    ens["target_normalizer"].fit(y)
     yn = ens["target_normalizer"](y)
-    # STATIC obs dims (never change within an episode, e.g. the delivery task's package weight) have no
-    # dynamics to predict: they are held fixed in rollouts and left out of the uncertainty, otherwise a
-    # zero-variance target turns tiny mean wiggles into a huge, meaningless GJS. None in the other tasks.
+    # static dims (payload, steady wind) are held fixed in rollouts and left out of the uncertainty
     dyn = y.std(0) > 0.0
     ens["dynamic"] = None if bool(dyn.all()) else dyn
 
-    if float(cfg.get("holdout_ratio", 0.0)) > 0.0:          # paper setup: early stopping + elites
+    if float(cfg.get("holdout_ratio", 0.0)) > 0.0:
         return _train_with_holdout(ens, xn, yn, cfg)
     bs = min(cfg["batch_size"], xn.shape[0])
     last_nll = 0.0
@@ -219,27 +179,26 @@ def train_ensemble(ens: dict, data: dict, cfg: dict):
 
 
 def predict(ens: dict, obs: np.ndarray, act: np.ndarray, return_pick: bool = False):
-    """Sample next_obs from a random (elite) member per row. Returns numpy (B, obs_dim), plus the index
-    of the member each row used (into the elite list) when `return_pick` (M2AC needs it)."""
+    """Sample next_obs from a random (elite) member per row; `return_pick` also returns that member."""
     model, device = ens["model"], ens["device"]
     obs_t = torch.as_tensor(np.atleast_2d(obs), dtype=torch.float32, device=device)
     act_t = torch.as_tensor(np.atleast_2d(act), dtype=torch.float32, device=device)
     x = ens["normalizer"](torch.cat([obs_t, act_t], dim=-1))
     with torch.no_grad():
-        means, logvars = model(x)                   # (E, B, D)
+        means, logvars = model(x)
         el = ens.get("elites")
-        if el is not None:                          # paper setup: only the elite members
+        if el is not None:
             means, logvars = means[el], logvars[el]
     E, B, _ = means.shape
     pick = torch.randint(0, E, (B,), device=device)
-    rows = torch.arange(B, device=device)           # index on the model's device (CUDA-safe)
+    rows = torch.arange(B, device=device)
     mean = means[pick, rows]
     std = torch.exp(0.5 * logvars[pick, rows])
-    delta_n = mean + std * torch.randn_like(std)    # sample in normalized target space
+    delta_n = mean + std * torch.randn_like(std)
     tn = ens["target_normalizer"]
-    next_obs = obs_t + (tn.mean + tn.std * delta_n)  # un-normalize the delta
+    next_obs = obs_t + (tn.mean + tn.std * delta_n)
     dyn = ens.get("dynamic")
-    if dyn is not None:                             # static dims stay exactly as they are
+    if dyn is not None:
         next_obs[:, ~dyn] = obs_t[:, ~dyn]
     if return_pick:
         return next_obs.cpu().numpy(), pick.cpu().numpy()
@@ -248,15 +207,7 @@ def predict(ens: dict, obs: np.ndarray, act: np.ndarray, return_pick: bool = Fal
 
 def member_gaussians(ens: dict, obs: np.ndarray, act: np.ndarray,
                      denormalize: bool = False):
-    """Per-member predictive Gaussians (means, variances), each (E, B, obs_dim).
-
-    By default returned in NORMALIZED delta space — every obs dim contributes on
-    a comparable scale, so the GJS uncertainty in algorithms/macura.py is
-    scale-balanced instead of dominated by large-magnitude
-    dims. GJS itself is shift-invariant, so the normalization offset is
-    irrelevant; the per-dim rescaling is exactly the point of the fix.
-    Pass denormalize=True to get raw physical-delta Gaussians (for plotting).
-    """
+    """Per-member (means, variances), each (E, B, D), in normalised delta space (denormalize=True: physical)."""
     model, device = ens["model"], ens["device"]
     obs_t = torch.as_tensor(np.atleast_2d(obs), dtype=torch.float32, device=device)
     act_t = torch.as_tensor(np.atleast_2d(act), dtype=torch.float32, device=device)
@@ -264,21 +215,20 @@ def member_gaussians(ens: dict, obs: np.ndarray, act: np.ndarray,
     with torch.no_grad():
         means, logvars = model(x)
         el = ens.get("elites")
-        if el is not None:                          # paper setup: only the elite members
+        if el is not None:
             means, logvars = means[el], logvars[el]
         if denormalize:
             tn = ens["target_normalizer"]
             means = tn.mean + tn.std * means
             logvars = logvars + 2.0 * torch.log(tn.std)
         dyn = ens.get("dynamic")
-        if dyn is not None:                         # uncertainty only over dims that actually evolve
+        if dyn is not None:
             means, logvars = means[..., dyn], logvars[..., dyn]
     return means.cpu().numpy(), np.exp(logvars.cpu().numpy())
 
 
 def save_ensemble(ens: dict, path: str):
-    """Persist the ensemble for a best checkpoint: member weights + the input normalizer
-    statistics (needed at predict time). No logic change — just serialization."""
+    """Member weights + normaliser statistics + dynamic mask + elites."""
     model, norm, tnorm = ens["model"], ens["normalizer"], ens["target_normalizer"]
     torch.save(
         {
@@ -296,12 +246,11 @@ def save_ensemble(ens: dict, path: str):
 
 
 def load_ensemble(ens: dict, path: str):
-    """Reload weights + normalizer stats saved by `save_ensemble` into an existing `ens` dict."""
     ckpt = torch.load(path, map_location=ens["device"])
     ens["model"].load_state_dict(ckpt["model"])
     ens["normalizer"].mean = ckpt["norm_mean"].to(ens["device"])
     ens["normalizer"].std = ckpt["norm_std"].to(ens["device"])
-    if "tnorm_mean" in ckpt:                        # older checkpoints: identity target norm
+    if "tnorm_mean" in ckpt:
         ens["target_normalizer"].mean = ckpt["tnorm_mean"].to(ens["device"])
         ens["target_normalizer"].std = ckpt["tnorm_std"].to(ens["device"])
     if ckpt.get("dynamic") is not None:

@@ -1,13 +1,5 @@
-"""Video decorations for the delivery task - VISUAL ONLY (never touches the physics or the observation).
-
-Imports only numpy + mujoco, so the headless render subprocess can use it without torch/SB3.
-
-Public functions:
-    scenery_ids(model)                     -> ids of the windsock + drone body geoms (and their colors)
-    decorate(model, data, ids, wind, eff)  point the sock along the gust, tint the drone by lift loss
-    trail_color(eff)                       RGBA for one trail dot (green = full thrust, red = losing it)
-    add_trail(scene, points, colors)       draw the flight trail as small spheres (after update_scene)
-"""
+"""Visual-only decorations for videos and the simulator: windsock along the wind, drone tinted and
+trail coloured by lift loss (green = full lift, red = losing it). numpy + mujoco only."""
 
 from __future__ import annotations
 

@@ -1,13 +1,10 @@
-# Python deps installed ON the Kaggle kernel (and on your Mac for the live viewer).
-# Kaggle preinstalls numpy/scipy/torch CUDA-matched - do NOT reinstall them here.
-# The drone body ships in the repo (src/envs/assets/drone.xml), nothing external to fetch.
-# NOTE: the `kaggle` CLI you use to PUSH the job is a separate LOCAL tool, not listed here
-# (`pip install kaggle` on your own machine - see README).
+# Kaggle: installed by the notebook (numpy and torch come preinstalled there).
+# Your computer (compare.py, simulate.py): pip install -r requirements.txt torch
 
 mujoco>=3.1                # MuJoCo physics (runs the drone model; native viewer on macOS)
 gymnasium>=0.29            # env API
-stable-baselines3>=2.3   # SAC learner (shared by all four algorithms)
+stable-baselines3>=2.3    # SAC learner (shared by all four algorithms)
 matplotlib>=3.7           # figures
 imageio>=2.31             # save videos
 imageio-ffmpeg>=0.4       # mp4 encoding
-pillow>=9.0               # labels on the stitched demo reel
+pillow>=9.0               # captions in the videos
