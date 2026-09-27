@@ -47,5 +47,5 @@ case "${1:-help}" in
         *) echo "   $n: not finished ($s)";;
       esac
     done;;
-  *) sed -n '2,11p' "$0";;
+  *) sed -n '2,10p' "$0";;
 esac
