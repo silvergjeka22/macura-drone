@@ -87,6 +87,75 @@ Everything is saved in `results/`.
 
 Keys: Space = pause, N = next scenario, R = restart.
 
+## One by one, by hand (instead of steps 2-5)
+
+Use the same Terminal window from start to end. Before you start, go to the folder and pack the current code into
+the notebooks:
+
+    cd ~/Desktop/macura-drone
+    python3 training/build_notebooks.py
+
+### Account 1: nouradon (the main key, `~/.kaggle/kaggle.json`)
+
+Check which account the Terminal is using (this prints only the username):
+
+    unset KAGGLE_CONFIG_DIR
+    python3 -c "import json; print(json.load(open('$HOME/.kaggle/kaggle.json'))['username'])"
+
+It must print `nouradon`. Then start the first notebook and check it:
+
+    kaggle kernels push -p training/macura_mbpo_seeds45
+    kaggle kernels status nouradon/train-macura-mbpo-seeds45
+
+Wait 2-3 minutes and run the `status` line again. If it says RUNNING, start the second notebook:
+
+    kaggle kernels push -p training/m2ac_sac_seeds45
+    kaggle kernels status nouradon/train-m2ac-sac-seeds45
+
+If you want only one notebook running at a time, wait until the first says COMPLETE before you push the second one.
+
+### Change to account 2: silvergjeka01
+
+    export KAGGLE_CONFIG_DIR=~/.kaggle/silvergjeka01
+    python3 -c "import json; print(json.load(open('$KAGGLE_CONFIG_DIR/kaggle.json'))['username'])"
+
+It must print `silvergjeka01`. From now on, every `kaggle` command in this Terminal window uses silvergjeka01. A new
+Terminal window starts again on nouradon.
+
+    kaggle kernels push -p training/macura_mbpo_seeds67
+    kaggle kernels status silvergjeka01/train-macura-mbpo-seeds67
+
+When it says RUNNING (or COMPLETE, for one at a time):
+
+    kaggle kernels push -p training/m2ac_sac_seeds67
+    kaggle kernels status silvergjeka01/train-m2ac-sac-seeds67
+
+### Back to account 1
+
+    unset KAGGLE_CONFIG_DIR
+
+### Download one by one (when a notebook says COMPLETE)
+
+Use the account of the notebook, as above:
+
+    unset KAGGLE_CONFIG_DIR
+    kaggle kernels output nouradon/train-macura-mbpo-seeds45 -p downloads/macura_mbpo_seeds45
+    kaggle kernels output nouradon/train-m2ac-sac-seeds45 -p downloads/m2ac_sac_seeds45
+
+    export KAGGLE_CONFIG_DIR=~/.kaggle/silvergjeka01
+    kaggle kernels output silvergjeka01/train-macura-mbpo-seeds67 -p downloads/macura_mbpo_seeds67
+    kaggle kernels output silvergjeka01/train-m2ac-sac-seeds67 -p downloads/m2ac_sac_seeds67
+
+Then continue with step 6.
+
+### The same with kaggle.sh (it picks the account by itself)
+
+    ./kaggle.sh push macura_mbpo_seeds45
+    ./kaggle.sh push m2ac_sac_seeds45
+    ./kaggle.sh push macura_mbpo_seeds67
+    ./kaggle.sh push m2ac_sac_seeds67
+    ./kaggle.sh status
+
 ## Kaggle accounts: how they work and how to change them
 
 ### How the script knows which account to use

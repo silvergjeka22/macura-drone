@@ -40,15 +40,14 @@ os.environ.update({{
     "MACURA_STEPS": str(STEPS), "MACURA_SEEDS": " ".join(map(str, SEEDS)),
     "MACURA_ALGOS": " ".join(ALGOS), "MBPO_UTD": str(UPDATES), "M2AC_UTD": str(UPDATES),
     "MACURA_OUTPUT_ROOT": OUT, "MACURA_DEADLINE": str(DEADLINE),
-}})
-
-sys.path.insert(0, ROOT)'''
+}})'''
 
 # the project code (src/ and requirements.txt) is packed into the notebook, so Kaggle needs no GitHub access
 UNPACK = '''import base64, io, tarfile
 CODE_VERSION = "{version}"
 CODE = "{code}"
 tarfile.open(fileobj=io.BytesIO(base64.b64decode(CODE))).extractall(ROOT)
+sys.path.insert(0, ROOT)
 print("code:", CODE_VERSION)'''
 
 
