@@ -89,6 +89,73 @@ Everything is saved in `results/`.
 
 Keys: Space = pause, N = next scenario, R = restart.
 
+## Kaggle accounts: how they work and how to change them
+
+### How the script knows which account to use
+
+A notebook's account is the first part of `"id"` in `training/<name>/kernel-metadata.json`, for example:
+
+    "id": "silvergjeka01/train-macura-mbpo-seeds67"      -> account silvergjeka01
+
+`./kaggle.sh` then uses that account's key:
+
+- `~/.kaggle/<account>/kaggle.json` if that file exists (e.g. `~/.kaggle/silvergjeka01/kaggle.json`);
+- otherwise `~/.kaggle/kaggle.json` (the main key, now nouradon).
+
+To see which account a key belongs to (this prints only the username, never the key):
+
+    python3 -c "import json; print(json.load(open('$HOME/.kaggle/kaggle.json'))['username'])"
+    python3 -c "import json; print(json.load(open('$HOME/.kaggle/silvergjeka01/kaggle.json'))['username'])"
+
+### Add a new account (or renew a key)
+
+1. Open kaggle.com in a **private / incognito window** and log in with the account. Your normal window stays on the
+   other account.
+2. The account must have a **verified phone number** (Settings -> Phone verification), otherwise no GPU and no Internet.
+3. Settings -> **API -> Create New Token**. A `kaggle.json` file is downloaded.
+4. Put it in a folder named after the account (here `myaccount` stands for the Kaggle username):
+
+       mkdir -p ~/.kaggle/myaccount
+       mv ~/Downloads/kaggle.json ~/.kaggle/myaccount/kaggle.json
+       chmod 600 ~/.kaggle/myaccount/kaggle.json
+
+5. Check it works:
+
+       KAGGLE_CONFIG_DIR=~/.kaggle/myaccount kaggle datasets list --mine
+
+6. In the same browser window, the account also needs the **GITHUB_TOKEN** secret (step 3 above), once per notebook.
+
+### Move notebooks to another account
+
+1. Open `training/build_notebooks.py` and change the account in the `NOTEBOOKS` list:
+
+       ("macura_mbpo_seeds67", "myaccount", [6, 7], ["macura", "mbpo"]),
+
+   The seeds and algorithms can be changed in the same line. If you change the seeds, change the name too
+   (e.g. `macura_mbpo_seeds89` with `[8, 9]`), and update the list `NOTEBOOKS=` in `kaggle.sh` to match.
+2. Rebuild the notebooks:
+
+       python3 training/build_notebooks.py
+
+3. Push the change to GitHub. The notebooks download the code from GitHub, and `kaggle.sh` reads the new account
+   from the rebuilt files:
+
+       git add -A && git commit -m "notebooks on another account" && git push
+
+4. Start them: `./kaggle.sh push`. On the new account they are new notebooks, so do step 3 (GITHUB_TOKEN secret, GPU,
+   Internet) once, then `./kaggle.sh push` again.
+
+### Which account am I looking at on kaggle.com?
+
+Top right: click your picture. The username is shown there. Use **one browser window per account**: a normal window
+for nouradon and a private window for silvergjeka01. Then you never change a notebook on the wrong account.
+
+### GPU hours
+
+Each account has about 30 GPU hours per week. It resets every week; the remaining hours are shown on kaggle.com ->
+your picture -> Settings (Quotas), or at the top of the notebook editor. The 2 notebooks of one account together
+use about 8-10 hours.
+
 ## If something goes wrong
 
 | problem | fix |

@@ -1,5 +1,7 @@
 #!/bin/bash
-# The 4 training notebooks on 2 Kaggle accounts (see training/ and HOW_TO_RUN.md):
+# The 4 training notebooks on 2 Kaggle accounts (see training/ and HOW_TO_RUN.md). The account of a notebook is the
+# first part of "id" in training/<name>/kernel-metadata.json; its key is ~/.kaggle/<account>/kaggle.json if that
+# file exists, otherwise ~/.kaggle/kaggle.json.
 #   nouradon      (key ~/.kaggle/kaggle.json):              macura_mbpo_seeds45, m2ac_sac_seeds45
 #   silvergjeka01 (key ~/.kaggle/silvergjeka01/kaggle.json): macura_mbpo_seeds67, m2ac_sac_seeds67
 #
@@ -13,7 +15,7 @@ cd "$(dirname "$0")"
 NOTEBOOKS="macura_mbpo_seeds45 m2ac_sac_seeds45 macura_mbpo_seeds67 m2ac_sac_seeds67"
 
 kernel() { python3 -c "import json; print(json.load(open('training/$1/kernel-metadata.json'))['id'])"; }
-keys()   { case "$(kernel "$1")" in silvergjeka01/*) echo "$HOME/.kaggle/silvergjeka01";; *) echo "$HOME/.kaggle";; esac; }
+keys()   { a="$(kernel "$1")"; a="${a%%/*}"; if [ -f "$HOME/.kaggle/$a/kaggle.json" ]; then echo "$HOME/.kaggle/$a"; else echo "$HOME/.kaggle"; fi; }
 kg()     { KAGGLE_CONFIG_DIR="$(keys "$1")" kaggle "${@:2}"; }
 status() { kg "$1" kernels status "$(kernel "$1")" 2>&1 | tail -1; }
 fresh()  { if [ -e "$1" ]; then echo "$1_$(date +%Y%m%d_%H%M)"; else echo "$1"; fi; }
