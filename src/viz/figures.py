@@ -192,6 +192,52 @@ def plot_algo(runs, refs=None, save_path=None, window=R.SMOOTH):
     return _save(fig, save_path)
 
 
+def plot_best(runs, refs=None, save_path=None, tests=None, window=R.SMOOTH):
+    """The best seed of each algorithm (chosen on the selection scenarios, never on the test): its return and
+    lap progress while learning, the best checkpoint marked with a star, and its test return."""
+    best = {a: R.best_run(rs) for a, rs in R.by_algo(runs).items()}
+    fig, ax = plt.subplots(1, 3, figsize=(17, 4.6), gridspec_kw={"width_ratios": [2, 2, 1.2]})
+    for a, r in best.items():
+        col, label = COLORS.get(a), f"{_name(a)} seed {r['seed']}"
+        steps = np.asarray(r["steps"])
+        for x, y in ((ax[0], np.asarray(r["eval_return"], float)),
+                     (ax[1], 100.0 * R.success(r.get("eval_laps") or np.zeros(len(steps))))):
+            x.plot(steps, y, color=col, lw=0.8, alpha=0.3)
+            x.plot(steps, R.smooth(y, window), color=col, lw=2, label=label)
+            if r.get("best_step") in list(steps):
+                i = list(steps).index(r["best_step"])
+                x.plot(steps[i], y[i], "*", color=col, ms=15, mec="k")
+    for name, ref in (refs or {}).items():
+        ls = REF_STYLE.get(name, ":")
+        ax[0].axhline(ref["return"], color="k", lw=1.1, ls=ls, alpha=0.7, label=name)
+        ax[1].axhline(100.0 * R.success(ref["laps"]), color="k", lw=1.1, ls=ls, alpha=0.7, label=name)
+    ax[0].set_title("A. Return while learning"); ax[0].set_ylabel("evaluation return")
+    ax[1].set_title("B. Lap progress while learning"); ax[1].set_ylabel("% of a lap per 10 s flight")
+    ax[1].set_ylim(-2, 102)
+    for x in ax[:2]:
+        x.set_xlabel("real environment steps"); x.grid(alpha=0.3); x.legend(fontsize=8)
+
+    names, values, errors = [], [], []
+    for a, r in best.items():
+        test = next((t for t in tests or [] if t["algo"] == a and t["seed"] == r["seed"]), None)
+        if test:
+            v = np.array([e["return"] for e in test["episodes"]])
+            values.append(v.mean()); errors.append(v.std() / np.sqrt(len(v)))
+        else:
+            values.append(r.get("final_eval", {}).get("eval_return", np.nan)); errors.append(0)
+        names.append(f"{_name(a)}\nseed {r['seed']}")
+    ax[2].bar(names, values, yerr=errors, capsize=4, color=[COLORS.get(a) for a in best])
+    for i, v in enumerate(values):
+        ax[2].text(i, v, f"{v:.0f}", ha="center", va="bottom" if v >= 0 else "top", fontsize=9)
+    ax[2].axhline(0, color="k", lw=0.8)
+    ax[2].set_title("C. Test return of the best model" + (" (new scenarios)" if tests else ""))
+    ax[2].grid(alpha=0.3, axis="y")
+    fig.suptitle(f"Best seed of each algorithm (star = best checkpoint; rolling mean over {window} evaluations, "
+                 f"faint = raw)", fontsize=12)
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    return _save(fig, save_path)
+
+
 def _rolling(steps, vals, window):
     vals = np.asarray(vals, dtype=float)
     out = np.full(len(vals), np.nan)

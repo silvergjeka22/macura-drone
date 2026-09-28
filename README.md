@@ -16,15 +16,15 @@ drone; the learned world models are wrong there and disagree about it, which is 
 
 ```
 training/   4 identical Kaggle notebooks (built from one template), 2 per account, all running at the same time
-              macura_mbpo_seeds01   MACURA + MBPO, seeds 0 1   account nouradon
-              m2ac_sac_seeds01      M2AC + SAC,    seeds 0 1   account nouradon
-              macura_mbpo_seeds23   MACURA + MBPO, seeds 2 3   account silvergjeka01
-              m2ac_sac_seeds23      M2AC + SAC,    seeds 2 3   account silvergjeka01
+              macura_mbpo_seeds45   MACURA + MBPO, seeds 4 5   account nouradon
+              m2ac_sac_seeds45      M2AC + SAC,    seeds 4 5   account nouradon
+              macura_mbpo_seeds67   MACURA + MBPO, seeds 6 7   account silvergjeka01
+              m2ac_sac_seeds67      M2AC + SAC,    seeds 6 7   account silvergjeka01
             each one: training (live printout of every run), results, figures, MACURA's trust in its model,
             a 30 s video of each seed's best checkpoint, and one results file <name>.zip
 kaggle.sh   push / status / get for the 4 notebooks (get -> downloads/<name>, never overwrites)
 testing/    test.ipynb, on your computer: all training results together, a test of every model on 50 new
-            scenarios with plots and videos, the final comparison, a check that every model opens in the simulator
+            scenarios with plots and videos, the final comparison with the best results plot, a check that every model opens in the simulator
 simulate.py watch the trained drones race live in MuJoCo's 3-D viewer (macOS: mjpython)
 ```
 
@@ -40,7 +40,7 @@ mjpython simulate.py                              # watch them race
 
 ## Settings (decided before the runs)
 
-- race3, **50,000 real steps** per run (5,000 random warm-up + 45,000 learning), **seeds 0-3**, the MACURA paper's
+- race3, **50,000 real steps** per run (5,000 random warm-up + 45,000 learning), **seeds 4-7** (0-3 were the race3 test), the MACURA paper's
   protocol (7-network ensemble, 25,000 imagined trips every 250 steps, 95% imagined / 5% real data per SAC batch).
 - **Equal training updates**: MBPO and M2AC do 12 SAC updates per real step = MACURA's average (it adapts, up to 16).
 - Exploration as in the paper (disclosed): MACURA pink noise, MBPO and M2AC without noise, SAC samples its policy.

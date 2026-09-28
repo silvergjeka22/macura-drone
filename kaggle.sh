@@ -1,7 +1,7 @@
 #!/bin/bash
 # The 4 training notebooks on 2 Kaggle accounts (see training/ and HOW_TO_RUN.md):
-#   nouradon      (key ~/.kaggle/kaggle.json):              macura_mbpo_seeds01, m2ac_sac_seeds01
-#   silvergjeka01 (key ~/.kaggle/silvergjeka01/kaggle.json): macura_mbpo_seeds23, m2ac_sac_seeds23
+#   nouradon      (key ~/.kaggle/kaggle.json):              macura_mbpo_seeds45, m2ac_sac_seeds45
+#   silvergjeka01 (key ~/.kaggle/silvergjeka01/kaggle.json): macura_mbpo_seeds67, m2ac_sac_seeds67
 #
 #   ./kaggle.sh push [name ...]   start the training notebooks (all 4 if no name is given); a notebook that is still
 #                                 running is not started again, and a finished one's output is downloaded first
@@ -10,10 +10,10 @@
 #                                 if it already exists, so nothing is ever overwritten); then open testing/test.ipynb
 set -e
 cd "$(dirname "$0")"
-NOTEBOOKS="macura_mbpo_seeds01 m2ac_sac_seeds01 macura_mbpo_seeds23 m2ac_sac_seeds23"
+NOTEBOOKS="macura_mbpo_seeds45 m2ac_sac_seeds45 macura_mbpo_seeds67 m2ac_sac_seeds67"
 
-keys()   { case "$1" in *seeds01) echo "$HOME/.kaggle";; *) echo "$HOME/.kaggle/silvergjeka01";; esac; }
 kernel() { python3 -c "import json; print(json.load(open('training/$1/kernel-metadata.json'))['id'])"; }
+keys()   { case "$(kernel "$1")" in silvergjeka01/*) echo "$HOME/.kaggle/silvergjeka01";; *) echo "$HOME/.kaggle";; esac; }
 kg()     { KAGGLE_CONFIG_DIR="$(keys "$1")" kaggle "${@:2}"; }
 status() { kg "$1" kernels status "$(kernel "$1")" 2>&1 | tail -1; }
 fresh()  { if [ -e "$1" ]; then echo "$1_$(date +%Y%m%d_%H%M)"; else echo "$1"; fi; }

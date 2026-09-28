@@ -103,6 +103,7 @@ for algo in test:
                 f"{R.iqm([s['crash'] for s in t]):.0%} |")
 final_table = "\\n".join(rows)
 display(Markdown(final_table))
+F.plot_best(RUNS, REFS, f"{OUT}/plots/best_results.png", tests=TESTS, window=7); plt.show()
 
 summary = [final_table, R.summary_markdown(RUNS), R.per_seed_markdown(RUNS), tables["summary"], tables["per_seed"],
            *tables["paired"], R.where_table(RUNS)]

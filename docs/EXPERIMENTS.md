@@ -210,3 +210,22 @@ From here on the code contains only race3 (other tasks removed; last version wit
 Checked after removing them: race3 environment identical (observations, rewards, crashes, laps, lift, gusts,
 positions over 11,615 steps of random, autopilot and diving flights; imagined reward and crash functions; MuJoCo
 scene), and 5,600-step training logs of all four algorithms identical to the previous code.
+
+
+## Race3 test: final numbers (seeds 0-3, 50k, MBPO 12 updates per step)
+
+The decision rule passed on the complete logs: MACURA's average return while learning is higher in 3 of 4 seeds and
+on average.
+
+| MACURA - MBPO | seed 0 | seed 1 | seed 2 | seed 3 | mean |
+|---|---|---|---|---|---|
+| avg return while learning | +152 | -106 | +107 | +31 | +46 |
+| final test return | +175 | -122 | +195 | +55 | +76 |
+| drones broken after warm-up | +2 | +6 | +5 | +19 | +8 |
+
+- Test return: MACURA 495 / 121 / 438 / 252; MBPO 320 / 244 / 242 / 197.
+- Updates per real step: MACURA 12.05, MBPO 12.0.
+- MACURA's trust in its model: about 79% of imagined steps when sinking fast, 96% in normal flight.
+- SAC fails: test return -215 to -383.
+- With 4 seeds the difference is not significant (paired t about 0.8-1.0). The final study therefore uses new
+  seeds, 4-7.

@@ -10,10 +10,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 NOTEBOOKS = [
     # name,                 Kaggle account,  seeds,  algorithms
-    ("macura_mbpo_seeds01", "nouradon", [0, 1], ["macura", "mbpo"]),
-    ("m2ac_sac_seeds01", "nouradon", [0, 1], ["m2ac", "sac"]),
-    ("macura_mbpo_seeds23", "silvergjeka01", [2, 3], ["macura", "mbpo"]),
-    ("m2ac_sac_seeds23", "silvergjeka01", [2, 3], ["m2ac", "sac"]),
+    ("macura_mbpo_seeds45", "nouradon", [4, 5], ["macura", "mbpo"]),
+    ("m2ac_sac_seeds45", "nouradon", [4, 5], ["m2ac", "sac"]),
+    ("macura_mbpo_seeds67", "silvergjeka01", [6, 7], ["macura", "mbpo"]),
+    ("m2ac_sac_seeds67", "silvergjeka01", [6, 7], ["m2ac", "sac"]),
 ]
 
 SETUP = '''import os, sys, time, subprocess
@@ -81,6 +81,7 @@ CURVES = '''F.plot_learning_curves(RUNS, REFS, f"{OUT}/plots/learning_curves.png
 for algo in ALGOS:
     F.plot_algo([r for r in RUNS if r["algo"] == algo], REFS, f"{OUT}/plots/{algo}_per_seed.png"); plt.show()
 F.plot_scores(RUNS, f"{OUT}/plots/scores.png"); plt.show()
+F.plot_best(RUNS, REFS, f"{OUT}/plots/best_results.png"); plt.show()
 F.plot_crash_by_payload(RUNS, f"{OUT}/plots/crash_by_payload.png"); plt.show()'''
 
 TRUST = '''print(R.trust_summary(RUNS))

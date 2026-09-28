@@ -1,7 +1,7 @@
 {
-  "id": "nouradon/train-macura-mbpo-seeds01",
-  "title": "train-macura-mbpo-seeds01",
-  "code_file": "macura_mbpo_seeds01.ipynb",
+  "id": "nouradon/train-m2ac-sac-seeds45",
+  "title": "train-m2ac-sac-seeds45",
+  "code_file": "m2ac_sac_seeds45.ipynb",
   "language": "python",
   "kernel_type": "notebook",
   "is_private": true,

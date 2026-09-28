@@ -416,8 +416,9 @@ def chute_table(runs):
     return "\n".join(rows)
 
 
-def where_table(runs, seeds=(0, 1, 2, 3)):
+def where_table(runs, seeds=None):
     """Which folder every run comes from; 'missing' if not found."""
+    seeds = seeds or sorted({r["seed"] for r in runs})
     where = {(r["algo"], r["seed"]): os.path.basename(os.path.dirname(r["_root"].rstrip("/"))) for r in runs}
     rows = ["| algorithm | " + " | ".join(f"seed {s}" for s in seeds) + " |", "|---|" + "---|" * len(seeds)]
     for a in ALGOS:
