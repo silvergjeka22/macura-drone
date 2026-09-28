@@ -1,8 +1,13 @@
 """Builds the 4 training notebooks from one template (they differ only in name, seeds and algorithms).
 Run: python training/build_notebooks.py"""
 
+import base64
+import gzip
+import io
 import json
 import os
+import subprocess
+import tarfile
 
 import nbformat as nbf
 
@@ -24,7 +29,6 @@ ALGOS = {algos}
 STEPS = 50000
 UPDATES = 12            # SAC updates per real step for MBPO and M2AC
 VIDEO_SECONDS = 30
-REPO, BRANCH = "silvergjeka22/macura-drone", "main"
 ROOT = "/tmp/macura-drone"
 OUT = "/kaggle/working/runs"
 T0 = time.time()
@@ -38,13 +42,32 @@ os.environ.update({{
     "MACURA_OUTPUT_ROOT": OUT, "MACURA_DEADLINE": str(DEADLINE),
 }})
 
-token = os.environ.get("GITHUB_TOKEN")
-if not token:
-    from kaggle_secrets import UserSecretsClient
-    token = UserSecretsClient().get_secret("GITHUB_TOKEN")
-subprocess.run(["git", "clone", "--depth", "1", "--branch", BRANCH,
-                f"https://{{token}}@github.com/{{REPO}}.git", ROOT], check=True)
 sys.path.insert(0, ROOT)'''
+
+# the project code (src/ and requirements.txt) is packed into the notebook, so Kaggle needs no GitHub access
+UNPACK = '''import base64, io, tarfile
+CODE_VERSION = "{version}"
+CODE = "{code}"
+tarfile.open(fileobj=io.BytesIO(base64.b64decode(CODE))).extractall(ROOT)
+print("code:", CODE_VERSION)'''
+
+
+def pack_code():
+    """src/ and requirements.txt as a base64 tar.gz (the same bytes on every computer), and the git version of src/."""
+    repo = os.path.dirname(HERE)
+    files = ["requirements.txt"] + sorted(
+        os.path.relpath(os.path.join(d, f), repo) for d, _, fs in os.walk(os.path.join(repo, "src"))
+        for f in fs if "__pycache__" not in d and not f.endswith(".pyc") and not f.startswith("."))
+    buffer = io.BytesIO()
+    with gzip.GzipFile(fileobj=buffer, mode="wb", mtime=0) as gz, tarfile.open(fileobj=gz, mode="w") as tar:
+        for f in files:
+            info = tar.gettarinfo(os.path.join(repo, f), arcname=f)
+            info.mtime, info.uid, info.gid, info.uname, info.gname, info.mode = 0, 0, 0, "", "", 0o644
+            tar.addfile(info, open(os.path.join(repo, f), "rb"))
+    git = lambda *a: subprocess.run(["git", "-C", repo, *a], capture_output=True, text=True).stdout.strip()
+    version = git("log", "--oneline", "-1", "--", "src", "requirements.txt")
+    version += " (with local changes)" if git("status", "--porcelain", "src", "requirements.txt") else ""
+    return base64.b64encode(buffer.getvalue()).decode(), version.replace('"', "'")
 
 IMPORTS = '''from src.bootstrap import setup
 setup(root=ROOT)
@@ -116,7 +139,7 @@ print(zip_file, f"{os.path.getsize(zip_file) / 1e6:.0f} MB")
 print(f"total time {(time.time() - T0) / 3600:.1f} h")'''
 
 
-def build(name, account, seeds, algos):
+def build(name, account, seeds, algos, packed, version):
     algo_names = " + ".join(a.upper() for a in algos)
     md, code = nbf.v4.new_markdown_cell, nbf.v4.new_code_cell
     cells = [
@@ -125,6 +148,7 @@ def build(name, account, seeds, algos):
            f"Results are saved in `{name}.zip` for `testing/test.ipynb`."),
         md("## 1. Setup"),
         code(SETUP.format(name=name, seeds=seeds, algos=algos)),
+        code(UNPACK.format(version=version, code=packed)),
         code(IMPORTS),
         md("## 2. The task"),
         code(TASK_PLOTS),
@@ -144,6 +168,8 @@ def build(name, account, seeds, algos):
         "accelerator": "GPU",
         "kernelspec": {"display_name": "Python 3 (ipykernel)", "language": "python", "name": "python3"},
         "language_info": {"name": "python"}})
+    for i, cell in enumerate(notebook.cells):
+        cell.id = f"cell-{i}"    # fixed ids: rebuilding the same code gives the same file
     folder = os.path.join(HERE, name)
     os.makedirs(folder, exist_ok=True)
     nbf.write(notebook, os.path.join(folder, f"{name}.ipynb"))
@@ -157,5 +183,7 @@ def build(name, account, seeds, algos):
 
 
 if __name__ == "__main__":
+    packed, version = pack_code()
+    print("code:", version)
     for notebook in NOTEBOOKS:
-        build(*notebook)
+        build(*notebook, packed, version)

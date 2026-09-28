@@ -28,7 +28,7 @@ testing/    test.ipynb, on your computer: all training results together, a test 
 simulate.py watch the trained drones race live in MuJoCo's 3-D viewer (macOS: mjpython)
 ```
 
-Step by step (accounts, keys, the one-time Kaggle setup, troubleshooting): **[HOW_TO_RUN.md](HOW_TO_RUN.md)**.
+Step by step (accounts, keys, troubleshooting): **[HOW_TO_RUN.md](HOW_TO_RUN.md)**.
 
 ```bash
 ./kaggle.sh push                                  # start the 4 training notebooks

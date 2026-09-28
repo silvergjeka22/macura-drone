@@ -5,7 +5,8 @@
 #   nouradon      (key ~/.kaggle/kaggle.json):              macura_mbpo_seeds45, m2ac_sac_seeds45
 #   silvergjeka01 (key ~/.kaggle/silvergjeka01/kaggle.json): macura_mbpo_seeds67, m2ac_sac_seeds67
 #
-#   ./kaggle.sh push [name ...]   start the training notebooks (all 4 if no name is given); a notebook that is still
+#   ./kaggle.sh push [name ...]   pack the current code into the notebooks and start them (all 4 if no name is given);
+#                                 a notebook that is still
 #                                 running is not started again, and a finished one's output is downloaded first
 #   ./kaggle.sh status            the status of all 4
 #   ./kaggle.sh get               download every finished notebook into downloads/<name> (a new folder with the date
@@ -29,6 +30,7 @@ download() {   # $1 name, $2 folder
 case "${1:-help}" in
   push)
     shift; names="${*:-$NOTEBOOKS}"
+    python3 training/build_notebooks.py | head -1   # packs the current src/ into the notebooks
     for n in $names; do
       [ -d "training/$n" ] || { echo "unknown notebook: $n"; exit 1; }
       s=$(status "$n")

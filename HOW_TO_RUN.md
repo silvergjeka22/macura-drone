@@ -17,7 +17,8 @@ Never share or upload a `kaggle.json` file or your GitHub token.
 | `m2ac_sac_seeds67` | M2AC + SAC | 6, 7 | silvergjeka01 | `~/.kaggle/silvergjeka01/kaggle.json` |
 
 - All 4 run at the same time, 2 per account, about 4-5 hours each.
-- They download the code from GitHub (`silvergjeka22/macura-drone`, branch `main`).
+- The code (`src/`) is packed inside each notebook when you run `./kaggle.sh push`, so Kaggle needs no GitHub access
+  and no secret. A change in `src/` is used by the next `./kaggle.sh push`.
 - Seeds 0-3 were used in the race3 test (`docs/EXPERIMENTS.md`), so this study uses new seeds.
 
 ## 1. Check the keys (once)
@@ -31,25 +32,22 @@ Never share or upload a `kaggle.json` file or your GitHub token.
 
     ./kaggle.sh push
 
-## 3. First time only: switch on the GitHub secret
+## 3. Check they started
 
-The 4 notebooks are new on Kaggle, so their first run stops after a few seconds. For each notebook, log in to kaggle.com with its account:
+After 2-3 minutes:
 
-1. **Code -> Your Work -> train-...** (e.g. `train-macura-mbpo-seeds45`) -> **Edit**.
-2. **Add-ons -> Secrets**: switch **GITHUB_TOKEN** on.
-3. **Session options**: **Accelerator = GPU**, **Internet = On**.
-4. Close the editor (it saves by itself).
+    ./kaggle.sh status
 
-Then start them again:
-
-    ./kaggle.sh push
+All 4 should say RUNNING. If one says ERROR, open it on kaggle.com (logged in as its account) -> the latest
+version -> **Logs**, and see the table at the end of this file. The first time on an account, Kaggle may also need
+**Settings -> Phone verification** done, otherwise the notebook gets no GPU and no Internet.
 
 ## 4. Wait
 
     ./kaggle.sh status
 
 - RUNNING means it is training. COMPLETE means it is done.
-- ERROR means open the notebook on kaggle.com -> Logs. Most often, step 3 was missed.
+- ERROR means open the notebook on kaggle.com -> Logs (see the table at the end).
 - To watch live: open the notebook on kaggle.com -> the running version -> Logs. Every evaluation is printed there, with a progress plot every 30 minutes.
 - Your computer can be off meanwhile.
 
@@ -123,7 +121,6 @@ To see which account a key belongs to (this prints only the username, never the 
 
        KAGGLE_CONFIG_DIR=~/.kaggle/myaccount kaggle datasets list --mine
 
-6. In the same browser window, the account also needs the **GITHUB_TOKEN** secret (step 3 above), once per notebook.
 
 ### Move notebooks to another account
 
@@ -137,13 +134,9 @@ To see which account a key belongs to (this prints only the username, never the 
 
        python3 training/build_notebooks.py
 
-3. Push the change to GitHub. The notebooks download the code from GitHub, and `kaggle.sh` reads the new account
-   from the rebuilt files:
-
-       git add -A && git commit -m "notebooks on another account" && git push
-
-4. Start them: `./kaggle.sh push`. On the new account they are new notebooks, so do step 3 (GITHUB_TOKEN secret, GPU,
-   Internet) once, then `./kaggle.sh push` again.
+3. Start them: `./kaggle.sh push`. `kaggle.sh` reads the new account from the rebuilt files and uses that account's
+   key.
+4. Optional, to keep GitHub up to date: `git add -A && git commit -m "notebooks on another account" && git push`.
 
 ### Which account am I looking at on kaggle.com?
 
@@ -160,7 +153,7 @@ use about 8-10 hours.
 
 | problem | fix |
 |---|---|
-| ERROR a few seconds after the start | step 3 |
+| ERROR a few seconds after the start | open its Logs; "No GPU" / "Internet" -> verify the phone number on that account |
 | "Permission 'kernelSessions.enableInternet' was denied" | verify a phone number on that Kaggle account |
 | 401 / unauthorized | step 1 |
 | QUEUED for a long time / "no GPU quota" | the account used its ~30 GPU hours this week |
