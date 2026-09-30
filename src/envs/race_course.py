@@ -1,5 +1,4 @@
 """The race course: a closed 3-D loop through four gates with a near-vertical 3 m chute.
-
 project(course, pos) -> (nearest course point, distance); course["tangent"] is the racing direction.
 """
 
@@ -27,14 +26,14 @@ def build_course(cfg: dict) -> dict:
     """Dense course polyline (points, tangents, 3-D arc length) + a lookup table for fast projection."""
     c = course_params(cfg)
     a, n = c["a"], c["n"]
-    # 1) fine horizontal loop, clockwise from P1 (left): t = pi -> -pi
+    # fine horizontal loop, clockwise from P1 (left): t = pi -> -pi
     t = np.linspace(np.pi, -np.pi, 40001)[:-1]
     x = a * np.sign(np.cos(t)) * np.abs(np.cos(t)) ** (2.0 / n)
     y = a * np.sign(np.sin(t)) * np.abs(np.sin(t)) ** (2.0 / n)
     seg = np.hypot(np.diff(np.r_[x, x[0]]), np.diff(np.r_[y, y[0]]))
     u = np.r_[0.0, np.cumsum(seg)[:-1]] / seg.sum()               # lap fraction by horizontal distance
     perim = float(seg.sum())
-    # 2) height profile: smooth steps between the gate heights, plus the chute (a steep 3 m drop)
+    # height profile: smooth steps between the gate heights, plus the chute (a steep 3 m drop)
     h1, h2, h3, h4 = c["h"]
     cu, cl = c["chute_u"], c["chute_len"] / perim                # chute start / horizontal length (lap frac)
     z = np.where(u < 0.25, h1 + (h2 - h1) * _smooth(u / 0.25), h2)
@@ -42,7 +41,7 @@ def build_course(cfg: dict) -> dict:
     z = np.where(u >= 0.5, h3 + (h4 - h3) * _smooth((u - 0.5) / 0.25), z)
     z = np.where(u >= 0.75, h4 + (h1 - h4) * _smooth((u - 0.75) / 0.25), z)
     fine = np.stack([x, y, z], axis=1)
-    # 3) resample uniformly in 3-D arc length (so the vertical chute gets its fair share of points)
+    # resample uniformly in 3-D arc length (so the vertical chute gets its fair share of points)
     d3 = np.linalg.norm(np.diff(np.vstack([fine, fine[:1]]), axis=0), axis=1)
     s_fine = np.r_[0.0, np.cumsum(d3)[:-1]]
     length = float(d3.sum())
@@ -54,7 +53,7 @@ def build_course(cfg: dict) -> dict:
     tang /= np.linalg.norm(tang, axis=1, keepdims=True) + 1e-12
     u_pts = u[idx]
     chute = (u_pts >= cu) & (u_pts < cu + cl)
-    # 4) projection lookup: for each 1-degree bin of the horizontal angle, the course points within +-25 deg
+    # projection lookup: for each 1-degree bin of the horizontal angle, the course points within +-25 deg
     theta = np.degrees(np.arctan2(pts[:, 1], pts[:, 0]))
     cand = []
     for b in range(360):

@@ -28,7 +28,7 @@ PILLARS = 14
 WINDSOCK_AT = (0.9, 0.3)
 
 
-# ── reward and crashes: shared by real and imagined transitions ──────────────────────────────────────
+# reward and crashes: shared by real and imagined transitions
 def race_reward(obs, act, rw, course):
     """Speed along the course near the racing line, minus distance outside the tube, plus small terms."""
     obs = np.atleast_2d(np.asarray(obs, dtype=np.float64))
@@ -64,7 +64,7 @@ def termination_fn(cfg):
     return lambda obs: crashed(obs, cfg, course)
 
 
-# ── lift loss ───────────────────────────────────────────────────────────────────────────────────────
+# lift loss 
 def _smooth01(x):
     x = float(np.clip(x, 0.0, 1.0))
     return x * x * (3.0 - 2.0 * x)
@@ -90,7 +90,7 @@ def _quat_to_mat(quat):
                      [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)]])
 
 
-# ── scene decoration (visual only: no mass, no collisions) ───────────────────────────────────────────
+# scene decoration (visual only: no mass, no collisions)
 def _add_course(root, course):
     """Gate rings, racing-line dots (red = chute), a see-through chute column, red pillars."""
     world = root.find("worldbody")
@@ -204,7 +204,7 @@ class DroneRaceEnv(gym.Env):
         self._race_k = 0
         self.race_progress = 0.0
 
-    # ── observation ──────────────────────────────────────────────────────────────────────────────────
+    # observation
     def _get_obs(self):
         pos, quat, vel = self.data.qpos[0:3], self.data.qpos[3:7], self.data.qvel
         k = int(project(self.course, pos)[0][0])
@@ -216,7 +216,7 @@ class DroneRaceEnv(gym.Env):
         obs += [*(self.course["points"][k] - pos), *ahead]
         return np.array(obs, dtype=np.float32)
 
-    # ── gym API ──────────────────────────────────────────────────────────────────────────────────────
+    # gym API
     def reset(self, *, seed=None, options=None):
         """Random start on the course, package and steady wind (random draws kept in the original order)."""
         rng = self._rng = np.random.default_rng(seed) if seed is not None else self._rng
@@ -296,7 +296,7 @@ class DroneRaceEnv(gym.Env):
                 "payload": self.payload, "laps": self.race_progress / length}
         return obs, reward, crash, truncated, info
 
-    # ── on-board stabiliser ──────────────────────────────────────────────────────────────────────────
+    # on-board stabiliser
     def _init_stabiliser(self):
         m = self.model
         xy = np.array([m.site_pos[m.actuator_trnid[i, 0]][:2] for i in range(m.nu)])

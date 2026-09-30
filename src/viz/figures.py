@@ -387,7 +387,7 @@ def plot_crash_by_payload(runs, save_path=None):
     return _save(fig, save_path)
 
 
-# ── the task ──────────────────────────────────────────────────────────────────────────────────────
+# the task
 def plot_race_course(cfg, save_path=None):
     """The course from above (colour = height, red = the chute, gates, pillars) and its height along a lap."""
     from src.envs.race_course import build_course
