@@ -1,54 +1,38 @@
-# ── Python ────────────────────────────────────────────────────────────────
+# Python
 __pycache__/
 *.py[cod]
-*$py.class
 *.egg-info/
-.eggs/
-build/
-dist/
 .pytest_cache/
-.mypy_cache/
-.ruff_cache/
 
-# ── Notebooks ─────────────────────────────────────────────────────────────
+# Notebooks and environments
 .ipynb_checkpoints/
-
-# ── Virtual environments / tooling ────────────────────────────────────────
 .venv/
 venv/
-env/
-.python-version
-
-# ── Secrets (the GitHub token lives here; NEVER commit it) ─────────────────
-/private
 .env
 *.token
 
-# ── Training outputs (checkpoints, videos, plots, logs -> Drive or ./runs) ─
-# The notebook writes results to Google Drive; a local run writes to ./runs.
-runs/
+# Results: plots, videos and summaries are in git; checkpoints, logs and zips stay on this computer only
+downloads/*/*
+!downloads/*/runs/
+downloads/*/runs/*
+!downloads/*/runs/plots/
+!downloads/*/runs/videos/
+!downloads/*/runs/summary.md
+results/*
+!results/plots/
+!results/videos/
+!results/summary.md
 checkpoints/
 *.zip
 *.pt
 *.ckpt
-*.mp4
-*.gif
 
-# ── OS / editor cruft ─────────────────────────────────────────────────────
+# Other local files
+out_*/
+old_files/
+testing/test_run.ipynb
 .DS_Store
-*.swp
 .idea/
 .vscode/
-
-# downloaded Kaggle results and local comparisons
-out/
-out_seed*/
-out_*/
-results/
-results_*/
-downloads/
-old_files/
-.ipynb_checkpoints/
-# local Claude tooling (not part of the project)
 .claude/
 MUJOCO_LOG.TXT

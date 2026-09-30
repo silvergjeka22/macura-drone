@@ -229,3 +229,25 @@ on average.
 - SAC fails: test return -215 to -383.
 - With 4 seeds the difference is not significant (paired t about 0.8-1.0). The final study therefore uses new
   seeds, 4-7.
+
+## Final study: seeds 4-7 (all four algorithms)
+
+4 training notebooks on 2 Kaggle accounts (MACURA + MBPO, M2AC + SAC; seeds 4, 5 and 6, 7), 50k steps, MBPO and
+M2AC 12 updates per real step (MACURA averaged 10.9). Every best checkpoint tested on 50 new scenarios
+(3000-3049) in `testing/test.ipynb`; all numbers in `results/summary.md`.
+
+| algorithm | return while learning | drones broken | test return | test lap progress | test crash rate |
+|---|---|---|---|---|---|
+| MACURA | 69 | 28 | 333 | 31% | 4% |
+| M2AC | -28 | 26 | 267 | 24% | 6% |
+| MBPO | -59 | 28 | 158 | 22% | 2% |
+| SAC | -475 | 154 | -312 | 7% | 35% |
+
+- Test return, MACURA - MBPO: +238, +151, +62, +40 (4 of 4 seeds); MACURA - M2AC: 3 of 4 seeds (+57 on average).
+- Seeds 0-7 together, MACURA - MBPO: return while learning better in 7 of 8 seeds (+110, sign test p = 0.035
+  one-sided, paired t p = 0.068); final test return (1000-1029) better in 7 of 8 (+105, paired t p = 0.035).
+- MBPO seed 5 collapsed at about 25k steps (return +50 -> -550, 205 drones broken).
+- MACURA's trust: 94% of imagined steps in normal flight, 67% in fast descents.
+- Model check: steps MACURA does not trust have a somewhat higher real one-step error (MACURA s4: 0.24 vs 0.21;
+  MBPO s6's model: 0.34 vs 0.20).
+- Trained policies rarely reach the lift-loss speed in the test (fastest descent about 0.8 m/s, onset 1.2 m/s).
