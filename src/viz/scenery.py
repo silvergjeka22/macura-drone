@@ -1,5 +1,4 @@
-"""Visual-only decorations for videos and the simulator: windsock along the wind, drone tinted and
-trail coloured by lift loss (green = full lift, red = losing it). numpy + mujoco only."""
+"""Visual-only decorations: windsock along the wind, drone tinted red when it loses lift."""
 
 from __future__ import annotations
 
@@ -27,8 +26,7 @@ def _danger(eff) -> float:
 
 
 def decorate(model, data, ids, wind, eff):
-    """Point the windsock downwind (limp in calm air, straight out in a strong gust) and tint the drone
-    from its own colour to red as it loses thrust. Only rendering fields are written."""
+    """Point the windsock downwind and tint the drone by its lift loss (rendering only)."""
     if ids["sock"] >= 0:
         w = np.asarray(wind, dtype=float)[:2]
         mag = float(np.hypot(w[0], w[1]))

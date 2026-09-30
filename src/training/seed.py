@@ -9,12 +9,7 @@ except ImportError:
 
 
 def set_seed(seed=0, deterministic=True):
-    """
-    Seed every RNG the pipeline uses (Python, numpy, torch, cuDNN).
-
-    Call once after imports and again before each training run, so a result does not
-    depend on how many cells ran beforehand.
-    """
+    """Seed every random generator (Python, numpy, torch, cuDNN)."""
     os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
     np.random.seed(seed)

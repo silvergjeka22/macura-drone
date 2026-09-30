@@ -1,8 +1,4 @@
-"""Figures: the comparison (paper-style), MACURA's trust in its model, and the task itself.
-
-Every function takes run logs (or a model_check result / the config), optionally saves a PNG and
-returns the matplotlib Figure.
-"""
+"""Figures: the comparison, MACURA's trust in its model, and the task."""
 
 from __future__ import annotations
 
@@ -34,8 +30,7 @@ def _warmup(runs):
 
 
 def _curve_panel(ax, runs, key, stat, ylabel, title, refs=None, ref_key=None, fn=None, window=1):
-    """Center + 95% CI across seeds; with `window` > 1 each seed is smoothed first and the raw center is
-    drawn faintly behind. `fn` transforms the values (and the reference lines)."""
+    """Center and 95% CI across seeds; with `window` > 1 each seed is smoothed first."""
     fn = fn or (lambda v: v)
     for a, rs in R.by_algo(runs).items():
         steps, mat = R.curves(rs, key)
@@ -57,9 +52,7 @@ def _curve_panel(ax, runs, key, stat, ylabel, title, refs=None, ref_key=None, fn
 
 
 def plot_learning_curves(runs, refs=None, save_path=None, window=R.SMOOTH):
-    """Paper Fig. 4 for this task: IQM return with 95% CI, crash rate, success (% of a lap per flight) and
-    real crashes while learning. `refs` = autopilot_reference() (a hand-written controller, not learned).
-    A-C are smoothed over `window` evaluations (faint = raw); the scores always use the raw values."""
+    """Return, crash rate, lap progress and drones broken while learning (IQM over seeds, 95% CI)."""
     n = max(len(rs) for rs in R.by_algo(runs).values())
     pct = (lambda m: 100.0 * np.asarray(m, dtype=float))
     fig, ax = plt.subplots(2, 2, figsize=(14, 9.5))
@@ -89,8 +82,7 @@ def plot_learning_curves(runs, refs=None, save_path=None, window=R.SMOOTH):
 
 
 def plot_summary_table(runs, save_path=None):
-    """The results table: one row per algorithm, IQM over seeds (95% CI below it with 3 or more seeds),
-    the best value of each column in bold."""
+    """The results table: one row per algorithm, IQM over seeds, best value in bold."""
     import textwrap
     s = R.summary(runs)
     best = R.best_per_score(s)
@@ -193,8 +185,7 @@ def plot_algo(runs, refs=None, save_path=None, window=R.SMOOTH):
 
 
 def plot_best(runs, refs=None, save_path=None, tests=None, window=R.SMOOTH):
-    """The best seed of each algorithm (chosen on the selection scenarios, never on the test): its return and
-    lap progress while learning, the best checkpoint marked with a star, and its test return."""
+    """Best seed of each algorithm: return and lap progress while learning, and its test return."""
     best = {a: R.best_run(rs) for a, rs in R.by_algo(runs).items()}
     fig, ax = plt.subplots(1, 3, figsize=(17, 4.6), gridspec_kw={"width_ratios": [2, 2, 1.2]})
     for a, r in best.items():
@@ -249,9 +240,7 @@ def _rolling(steps, vals, window):
 
 
 def plot_model_trust(runs, save_path=None, smooth=8, t_max=10):
-    """Does MACURA trust its world model 100%? A: share of a full imagination each method trusts;
-    B: MACURA's trust in fast descents vs normal flight; C: imagined steps per trip; D: SAC updates per
-    real step (MACURA's follow its trust, Eq. 22). Mean over seeds, rolling mean over `smooth` rounds."""
+    """How much of its imagination each method trusts, where, how far ahead, and updates per step."""
     by = R.by_algo(runs)
     fig, axes = plt.subplots(1, 4, figsize=(20, 4.4))
     ax = axes[0]
@@ -300,8 +289,7 @@ def plot_model_trust(runs, save_path=None, smooth=8, t_max=10):
 
 
 def plot_kappa(runs, save_path=None):
-    """Paper Fig. 8: MACURA's threshold kappa and the zeta-quantile of first-step disagreement per model
-    round, and the resulting imagined trip length, per seed."""
+    """MACURA's threshold kappa, the first-step disagreement quantile and the trip length per seed."""
     rs = [r for r in runs if r["algo"] == "macura" and r.get("kappa")]
     fig, ax = plt.subplots(1, 2, figsize=(13, 4.4))
     for i, r in enumerate(rs):
@@ -322,9 +310,7 @@ def plot_kappa(runs, save_path=None):
 
 
 def plot_untrusted_data(runs, save_path=None, smooth=8):
-    """Imagined training data above MACURA's trust threshold (MBPO / M2AC measured with MACURA's rule;
-    MACURA trains on none of it, dashed = what it generated and dropped) and the share of imagined
-    training data that is a fast descent."""
+    """Imagined training data above MACURA's threshold, and the share of fast descents."""
     by = R.by_algo(runs)
     fig, ax = plt.subplots(1, 2, figsize=(13, 4.4))
     for a in ("mbpo", "m2ac"):
@@ -350,8 +336,7 @@ def plot_untrusted_data(runs, save_path=None, smooth=8):
 
 
 def plot_model_check(checks, save_path=None):
-    """Paper Fig. 10 on real flights: each step's ensemble disagreement (GJS) vs the model's actual one-step
-    error, with MACURA's threshold kappa. `checks` = model_check() results (one per run)."""
+    """Disagreement (GJS) vs real one-step model error on real flights, with kappa."""
     checks = [c for c in checks if c]
     fig, axes = plt.subplots(1, len(checks) + 1, figsize=(6.2 * (len(checks) + 1), 4.8), squeeze=False)
     axes = axes[0]

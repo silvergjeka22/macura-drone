@@ -1,8 +1,4 @@
-"""SAC learner shared by all four algorithms (Stable-Baselines3, driven step by step from train.py).
-
-SAC trains from real data only; the model-based agents train on batches of real_ratio real + the rest
-imagined transitions (sac_update_mixed).
-"""
+"""SAC learner shared by all four algorithms (Stable-Baselines3, driven step by step from train.py)."""
 
 from __future__ import annotations
 
@@ -60,8 +56,7 @@ def build_sac(obs_dim: int, act_dim: int, cfg: dict, device: str = "cuda", seed:
 
 
 def load_agent(path: str, obs_dim: int, act_dim: int, cfg: dict, device: str = "cpu"):
-    """A saved policy (.zip). SB3's own loader first; if the file was written with another numpy version (Kaggle
-    saves with numpy 2, a laptop may have numpy 1), rebuild the network and load only its weights (policy.pth)."""
+    """Load a saved policy; falls back to the weights only if the numpy version differs."""
     try:
         return SAC.load(path, device=device)
     except Exception:
@@ -112,9 +107,7 @@ def sac_update(agent, num_updates: int, batch_size: int):
 
 
 class _MixedReplaySampler:
-    """Stands in for agent.replay_buffer during agent.train(): each batch is real_ratio real + the rest
-    imagined. With `model_window`, imagined data is drawn only from the newest `model_window` entries
-    (imagined data expires after rollout.model_lifetime_rounds rounds, as in the MACURA reference code)."""
+    """Replay buffer for model-based SAC: each batch is real_ratio real + the rest imagined."""
 
     def __init__(self, real_buf, model_buf, real_ratio, model_window=None):
         self.real_buf = real_buf

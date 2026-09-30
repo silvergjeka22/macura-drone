@@ -21,8 +21,7 @@ def rollout_length(env_step: int, schedule) -> int:
 
 def mbpo_rollout(dynamics_model, agent, start_obs: np.ndarray,
                  reward_fn, done_fn, env_step: int, cfg: dict, diag_state: dict = None):
-    """With `diag_state`, also measures the share of MBPO's data that MACURA's rule would reject
-    (no effect on what MBPO keeps)."""
+    """Fixed-horizon rollouts. `diag_state` only measures what MACURA's rule would reject."""
     horizon = rollout_length(env_step, cfg["rollout"]["mbpo"]["rollout_schedule"])
 
     from src.algorithms.sac import select_actions

@@ -1,5 +1,4 @@
-"""One call that turns run logs into the full comparison: figures, summary.md and (optionally) videos.
-Used by the training notebooks (Kaggle) and by testing/test.ipynb (your computer)."""
+"""All comparison figures and summary.md from the run logs in one call."""
 
 from __future__ import annotations
 

@@ -1,14 +1,6 @@
-"""RACE task course: a closed 3-D loop the drone races around (numpy only - also used by the video child).
+"""The race course: a closed 3-D loop through four gates with a near-vertical 3 m chute.
 
-Top view: a rounded square (superellipse |x/a|^n + |y/a|^n = 1), flown CLOCKWISE through four gates:
-    P1 (left, 2 m) -> climb -> P2 (top, 4 m) -> the CHUTE: an almost vertical 3 m drop -> P3 (right, 1 m)
-    -> P4 (bottom, 1.5 m) -> back to P1.
-The course is fixed (the same every episode); the drone starts at a random point on it.
-
-Everything the reward needs is a pure function of the drone position + velocity (both in the obs), so real
-and imagined transitions are scored identically:
-    project(course, pos) -> (index of the nearest course point, distance to it)
-    course["tangent"][index] = the racing direction there (unit 3-D vector; ~straight down in the chute).
+project(course, pos) -> (nearest course point, distance); course["tangent"] is the racing direction.
 """
 
 from __future__ import annotations
@@ -79,14 +71,11 @@ def build_course(cfg: dict) -> dict:
             "gates": gates, "perimeter": perim, "params": c}
 
 
-_CACHE: dict = {}                        # the last few projections (reward, crash cost and done_fn ask for the
-                                         # SAME imagined batch 3 times per rollout step) - keyed on the content
+_CACHE: dict = {}                        # the last few projections (the same batch is asked for 3 times per step)
 
 
 def project(course: dict, pos, chunk: int = 8192):
-    """Nearest course point for each position. pos: (3,) or (B, 3). Returns (index (B,), distance (B,)).
-    Searches the course points within +-25 deg of the position's horizontal angle: exact within ~1 m of the
-    course (checked against brute force); farther away the distance can only be OVER-estimated."""
+    """Nearest course point for each position (3,) or (B, 3). Returns (index, distance)."""
     p = np.ascontiguousarray(np.atleast_2d(np.asarray(pos, dtype=np.float32)))
     key = (len(course["points32"]), course["length"], p.shape, hash(p.tobytes()))
     if key in _CACHE:

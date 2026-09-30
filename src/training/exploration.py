@@ -1,5 +1,4 @@
-"""Exploration while collecting real data: pink / white noise on the policy mean, deterministic,
-or sampling the SAC policy (stochastic)."""
+"""Exploration while collecting real data: pink / white noise, deterministic, or stochastic SAC."""
 
 from __future__ import annotations
 

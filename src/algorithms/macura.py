@@ -1,12 +1,4 @@
-"""MACURA: model-based rollouts truncated where the ensemble disagrees (Frauenknecht et al. 2024).
-
-    compute_gjs      geometric Jensen-Shannon disagreement between members (Eq. 15-19)
-    update_kappa     trust threshold kappa = xi x running mean of the zeta-quantile of first-step GJS (Eq. 21)
-    macura_rollout   branched rollouts that stop per sample once GJS >= kappa (Algorithm 2)
-    gradient_steps   SAC updates per real step scaled by the imagined-data fill level (Eq. 22)
-
-trust_threshold / fast_share are measurements only: the same rule applied to MBPO and M2AC rollouts.
-"""
+"""MACURA (Frauenknecht et al. 2024): imagined rollouts stop where the ensemble members disagree."""
 
 from __future__ import annotations
 
@@ -79,9 +71,7 @@ def fast_share(transitions, threshold: float) -> float:
 
 def macura_rollout(dynamics_model, agent, start_obs: np.ndarray,
                    reward_fn, done_fn, kappa_state: dict, cfg: dict):
-    """Branched rollouts from `start_obs`; each one stops at the first step whose GJS >= kappa.
-
-    Returns (transitions [(obs, act, rew, next_obs, done)], diag)."""
+    """Rollouts from `start_obs`; each stops at its first step with GJS >= kappa. Returns (transitions, diag)."""
     mcfg = cfg["rollout"]["macura"]
     t_max = int(mcfg["t_max"])
     zeta = float(mcfg["zeta"])

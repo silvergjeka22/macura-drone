@@ -1,14 +1,7 @@
-"""The race3 drone task in MuJoCo.
+"""The race3 drone task in MuJoCo: laps around a 3-D course with wind, gusts, a package and a chute.
 
-A quadrotor with an altitude-hold stabiliser flies laps around a fixed 3-D course (src/envs/race_course.py).
-Hidden process noise (gusts, rotor noise) acts only on the real dynamics. Sinking fast while upright and pushing
-loses lift (the chute trap). Reward and crashes are pure functions of (obs, action), so real and imagined
-transitions are scored by the same code (known_reward_fn / termination_fn).
-
-Observation (27): position relative to the course centre (3), height, quaternion (4), linear and angular velocity (6),
-pillars relative xy (2 x 2), package mass / drone mass, steady wind xy, vector to the racing line (3), racing
-direction 0.5 m ahead (3).
-Action (4): sideways acceleration x, y, climb rate, yaw rate, each in [-1, 1].
+Observation (27) and action (4: sideways acceleration x, y, climb rate, yaw rate in [-1, 1]).
+Reward and crashes depend only on (obs, action), so real and imagined steps are scored the same way.
 """
 
 from __future__ import annotations
@@ -37,8 +30,7 @@ WINDSOCK_AT = (0.9, 0.3)
 
 # ── reward and crashes: shared by real and imagined transitions ──────────────────────────────────────
 def race_reward(obs, act, rw, course):
-    """Speed along the racing direction while near the line, minus metres outside the course tube,
-    plus small upright / spin / effort terms."""
+    """Speed along the course near the racing line, minus distance outside the tube, plus small terms."""
     obs = np.atleast_2d(np.asarray(obs, dtype=np.float64))
     act = np.atleast_2d(np.asarray(act, dtype=np.float64))
     k, dist = project(course, -obs[:, POS])
@@ -79,8 +71,7 @@ def _smooth01(x):
 
 
 def lift_factor(vel, quat, thrust_ratio, loss, v_on, v_full, v_escape, up_on, thrust_on):
-    """Share of the thrust left: it drops (up to `loss`) when the drone sinks along its rotor axis faster than v_on,
-    is upright and the rotors push at least thrust_on x hover; flying across the rotor axis clears it."""
+    """Share of thrust left: drops (up to `loss`) when the upright drone sinks faster than v_on."""
     w, x, y, z = (float(q) for q in quat)
     axis = np.array([2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y)])
     v = np.asarray(vel, dtype=float)
@@ -227,8 +218,7 @@ class DroneRaceEnv(gym.Env):
 
     # ── gym API ──────────────────────────────────────────────────────────────────────────────────────
     def reset(self, *, seed=None, options=None):
-        """A random start point on the course, package, steady wind. (The order of the random draws is kept from the
-        earlier tasks so every scenario seed gives exactly the same flight as in all runs so far.)"""
+        """Random start on the course, package and steady wind (random draws kept in the original order)."""
         rng = self._rng = np.random.default_rng(seed) if seed is not None else self._rng
         cfg, noise = self.cfg, self.cfg["init_noise"]
         self.payload = float(options["payload"]) if options and "payload" in options else float(rng.uniform(0.0, self.payload_max))
@@ -319,8 +309,7 @@ class DroneRaceEnv(gym.Env):
         self.alt_vz_max, self.alt_kz = self.cfg["alt_vz_max"], self.cfg["alt_kz"]
 
     def attitude_to_rotors(self, action):
-        """[accel x, accel y, climb rate, yaw rate] in [-1, 1] -> rotor commands in [-1, 1]. Tilt is capped at
-        att_max_tilt_deg; the attitude torques get priority over the collective when a rotor saturates."""
+        """[accel x, accel y, climb rate, yaw rate] in [-1, 1] -> rotor commands in [-1, 1]."""
         a = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)
         mass = float(self.model.body_subtreemass[self._core_id])
         az = float(np.clip(self.alt_kz * (a[2] * self.alt_vz_max - float(self.data.qvel[2])) / self._g, -1.0, 1.0))

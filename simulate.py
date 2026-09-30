@@ -1,12 +1,7 @@
-"""Watch the trained drones race live in MuJoCo's 3-D viewer (macOS: run with mjpython).
+"""Watch the trained drones race live in MuJoCo's 3-D viewer (macOS: mjpython simulate.py).
 
-    mjpython simulate.py                                   # best seed of every algorithm, found under ./downloads
-    mjpython simulate.py --runs out_seed0 out_seed1 out_seed2 --algos macura mbpo
-    mjpython simulate.py --seed 1 --scenarios 1000 1001 --seconds 30 --autopilot
-    mjpython simulate.py --follow MACURA --speed 0.5
-
-Checkpoints come from the downloaded Kaggle outputs (folders holding runs/logs and runs/checkpoints).
-See README.md, section "Watch the drones on your Mac".
+    mjpython simulate.py
+    mjpython simulate.py --algos macura mbpo --seconds 30 --follow MACURA
 """
 
 import argparse

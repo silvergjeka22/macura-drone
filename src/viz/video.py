@@ -1,13 +1,6 @@
-"""Race videos: several pilots on the same scenarios, tiled, with a live trust panel for MACURA.
+"""Race videos: several pilots on the same scenarios, tiled, with MACURA's trust panel.
 
-The flights run here (no graphics); the frames are drawn in a mujoco-only subprocess, so software
-rendering never shares a process with torch (a known segfault on headless GPU boxes).
-
-    record_race(cfg, pilots, save_path, seeds, trust=..., notes=...)
-    pilots = {label: policy .zip | "autopilot:<max sink m/s>:<speed m/s>" (hand-written, not learned)}
-    trust  = {label: {"ensemble": <best_ensemble.pt>, "kappa": float}}: at every step the pilot's own saved
-             world model is asked whether its members agree about (obs, action), exactly MACURA's rule
-    notes  = {label: one line shown instead of the trust panel}
+Frames are drawn in a separate mujoco-only process (software rendering next to torch can crash).
 """
 
 from __future__ import annotations
@@ -29,8 +22,7 @@ WIDE_CAMERA = {"lookat": [0.3, 0.6, 2.0], "distance": 10.5, "elevation": -28.0, 
 
 def record_race(cfg, pilots, save_path, seeds=(1000, 1001), trust=None, notes=None, cols=None,
                 size=(480, 360), fps=25, frame_step=2, max_steps=None, device="cpu", camera=None):
-    """`frame_step`: draw every n-th control step (fps = 50 / frame_step plays in real time).
-    `max_steps`: fly longer than the 10 s episode (a demo, not a score). Returns save_path or None."""
+    """Record `pilots` on `seeds`; `frame_step` = draw every n-th step. Returns save_path or None."""
     trust, notes = trust or {}, {**NOTES, **(notes or {})}
     flights, xml = {}, None
     for label, pilot in pilots.items():

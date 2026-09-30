@@ -1,11 +1,6 @@
-"""Real-time 3-D simulator: the trained drones race together in MuJoCo's native viewer.
+"""Real-time 3-D simulator: the trained drones race together in MuJoCo's viewer.
 
-Every pilot flies its own copy of the environment (the exact training physics, same scenario seed, so the
-same package, wind and gusts). A separate display scene holds one drone per pilot as a mocap body, colour
-coded, and copies each pilot's pose into it every control step (50 Hz). MACURA's panel line shows its own
-saved world model's verdict on every step, exactly its trust rule (GJS < kappa).
-
-Keys in the viewer window: SPACE pause/resume, N next scenario, R restart the scenario.
+Keys: SPACE pause, N next scenario, R restart.
 """
 
 from __future__ import annotations
@@ -26,8 +21,7 @@ _KEY_SPACE, _KEY_N, _KEY_R = 32, 78, 82
 
 
 class Pilot:
-    """One drone: its own environment, a policy (SB3 .zip or the hand-written autopilot) and an optional
-    trust check {"ensemble": path, "kappa": float}."""
+    """One drone: its own environment, a policy (.zip or autopilot) and an optional trust check."""
 
     def __init__(self, label, cfg, policy, trust=None, device="cpu"):
         from src.envs import drone_env
@@ -88,8 +82,7 @@ def _scaled(geom, s):
 
 
 def display_scene(env_xml, labels):
-    """The env's scene (course, gates, pillars, windsock) without the physical drone and its motors, plus one
-    mocap drone per pilot in the pilot's colour."""
+    """The course scene without the physical drone, plus one coloured mocap drone per pilot."""
     import mujoco
     root = ET.fromstring(env_xml)
     wb = root.find("worldbody")
@@ -114,8 +107,7 @@ def display_scene(env_xml, labels):
 
 def run(cfg, pilots, scenarios=(1000, 1001, 1002), seconds=None, speed=1.0, trust=None, device="cpu",
         trail=True, follow=None):
-    """Fly `pilots` ({label: .zip | "autopilot:<sink>:<speed>"}) together in a live viewer, one scenario after
-    another (loops). `seconds`: flight length (default = the 10 s training episode)."""
+    """Fly `pilots` together in a live viewer, one scenario after another."""
     import mujoco
     import mujoco.viewer
     from src.viz import scenery

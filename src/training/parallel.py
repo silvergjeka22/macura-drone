@@ -44,8 +44,7 @@ def plot_progress(out, t0):
 
 
 def run_parallel(jobs, out, root, deadline, n_jobs=4, plot_every=1800):
-    """jobs = [(algo, seed), ...]. Every printed line of every run is shown, tagged [algo seedN];
-    a progress plot every `plot_every` seconds."""
+    """Run jobs [(algo, seed), ...] in parallel; print every run's lines and a progress plot."""
     os.makedirs(f"{out}/joblogs", exist_ok=True)
     t0 = time.time()
     n_gpu = _gpu_count()

@@ -1,5 +1,4 @@
-"""Figures of the test on new scenarios (results of src.analysis.testing.test_all). Each returns the Figure and
-optionally saves a PNG."""
+"""Figures of the test on new scenarios (results of testing.test_all)."""
 
 from __future__ import annotations
 
@@ -34,8 +33,7 @@ def _best(rs):
 
 
 def plot_test_scores(results, save_path=None):
-    """Test return of every flight (box, all seeds together; dots = each seed's mean), crash rate and lap progress
-    (bar = mean over seeds, dots = seeds)."""
+    """Test return, crash rate and lap progress per algorithm (dots = seeds)."""
     by = _by_algo(results)
     names = [R.NAMES[a] for a in by]
     fig, ax = plt.subplots(1, 3, figsize=(17, 4.6))
@@ -84,8 +82,7 @@ def plot_test_conditions(results, save_path=None):
 
 
 def plot_test_flights(results, cfg, trace=0, save_path=None):
-    """The same test flight for every algorithm's best seed: path from above on the course, height, sink speed (the
-    lift loss starts at 1.2 m/s) and lift available."""
+    """The same test flight for every algorithm's best seed: path, height, sink speed and lift."""
     from src.envs.race_course import build_course
     by = _by_algo(results)
     c = build_course(cfg["env"])
@@ -123,8 +120,7 @@ def plot_test_flights(results, cfg, trace=0, save_path=None):
 
 
 def plot_test_noise(results, trace=0, save_path=None):
-    """What the drones fly through in a test flight: the hidden gusts (3 axes), the steady wind (visible to the drone)
-    and the package; the same for every algorithm in the same scenario."""
+    """The hidden gusts, steady wind and package of one test flight."""
     r = next((x for x in results if len(x["traces"]) > trace), None)
     if r is None:
         return None
@@ -146,8 +142,7 @@ def plot_test_noise(results, trace=0, save_path=None):
 
 
 def plot_test_trust(results, save_path=None):
-    """MACURA's world model during its test flights: disagreement (GJS) at every step against its trust threshold
-    kappa (above = MACURA would stop imagining there), coloured by sink speed; and the share of trusted steps per seed."""
+    """MACURA's disagreement vs kappa during its test flights, and the share of trusted steps."""
     mac = [r for r in results if r["algo"] == "macura" and r.get("kappa") and r["traces"] and "gjs" in r["traces"][0]]
     if not mac:
         return None

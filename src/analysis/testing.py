@@ -1,10 +1,4 @@
-"""Testing the trained models on NEW scenarios: seeds 3000+, never used for training, for choosing the best
-checkpoint (100-119) or for the training notebooks' own test (1000-1029).
-
-    test_all(runs, cfg, episodes=50)   every run's best checkpoint flies the same new scenarios
-                                       -> [{algo, seed, episodes: [per-flight numbers], traces: [per-step records]}]
-    test_tables(results)               markdown tables: per algorithm (IQM over seeds), per seed, MACURA vs each method
-"""
+"""Test every trained model on new scenarios (seeds 3000+, never used before)."""
 
 from __future__ import annotations
 
@@ -18,8 +12,7 @@ TEST_SEED_BASE = 3000
 
 
 def test_model(run, cfg, episodes=50, seed_base=TEST_SEED_BASE, traces=3, device="cpu") -> dict:
-    """Fly one run's best checkpoint on `episodes` new scenarios. The first `traces` flights are recorded step by step
-    (position, speed, sink, lift, gusts, reward; for model-based runs also the world model's disagreement)."""
+    """Fly one run's best checkpoint on `episodes` new scenarios; the first `traces` flights are recorded."""
     import torch
     from src.envs import drone_env
     from src.algorithms.sac import load_agent
@@ -143,3 +136,32 @@ def test_tables(results) -> dict:
                          f"{sum((x > 0) if hib else (x < 0) for x in d)} of {len(d)} |")
             paired.append(f"#### Test: MACURA vs {R.NAMES[other]}\n\n" + "\n".join(t))
     return {"summary": summary, "per_seed": "\n".join(per), "paired": paired}
+
+
+def final_table(runs, results) -> str:
+    """One row per algorithm: learning (IQM over seeds) and the new test (IQM over seeds)."""
+    train = R.summary(runs)
+    test = {}
+    for res in results:
+        test.setdefault(res["algo"], []).append(seed_scores(res))
+    rows = ["| algorithm | avg return while learning | drones broken | test return | test lap progress | test crash rate |",
+            "|---|---|---|---|---|---|"]
+    for algo, t in test.items():
+        rows.append(f"| {R.NAMES[algo]} | {train[algo]['avg_return'][0]:.0f} | {train[algo]['broken'][0]:.0f} | "
+                    f"{R.iqm([s['return'] for s in t]):.0f} | {R.iqm([s['lap'] for s in t]):.0%} | "
+                    f"{R.iqm([s['crash'] for s in t]):.0%} |")
+    return "\n".join(rows)
+
+
+def wins(results) -> str:
+    """In how many seeds MACURA's test return beats each other method (same seeds, same scenarios)."""
+    by = {}
+    for res in results:
+        by.setdefault(res["algo"], {})[res["seed"]] = seed_scores(res)["return"]
+    lines = []
+    for other in [x for x in ("mbpo", "m2ac", "sac") if x in by and "macura" in by]:
+        seeds = sorted(set(by["macura"]) & set(by[other]))
+        d = [by["macura"][s] - by[other][s] for s in seeds]
+        lines.append(f"- MACURA vs {R.NAMES[other]}: better in {sum(x > 0 for x in d)} of {len(d)} seeds, "
+                     f"test return {np.mean(d):+.0f} on average")
+    return "\n".join(lines)

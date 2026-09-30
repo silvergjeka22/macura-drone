@@ -1,9 +1,4 @@
-"""Kaggle kernel setup: install the requirements, pin a torch-safe render backend, make the output folders.
-
-The training kernel keeps MUJOCO_GL=disable: software OpenGL (OSMesa) loaded next to torch and
-stable-baselines3 segfaults the kernel. Videos are drawn in a separate mujoco-only process that
-switches to OSMesa itself (src/viz/video.py), so libosmesa6 is installed for that process only.
-"""
+"""Kaggle setup: install the requirements, choose a safe render backend, make the output folders."""
 
 import os
 import subprocess

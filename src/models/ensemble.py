@@ -1,10 +1,4 @@
-"""Probabilistic ensemble world model shared by MACURA, MBPO and M2AC.
-
-Gaussian MLP members predict the normalised next-state delta; each member trains on its own bootstrap
-resample. Paper setup (holdout_ratio > 0): validation split, early stopping and the best `num_elites`
-members used for rollouts and uncertainty. member_gaussians returns the per-member Gaussians in
-normalised delta space, so every observation dimension weighs equally in the GJS disagreement.
-"""
+"""Probabilistic ensemble world model shared by MACURA, MBPO and M2AC."""
 
 from __future__ import annotations
 
@@ -118,8 +112,7 @@ def _train_epoch(model, optim, xn, yn, bs, device):
 
 
 def _train_with_holdout(ens, xn, yn, cfg):
-    """Each member keeps its best weights on the held-out MSE; stop when no member improved by 1% for
-    `patience` epochs; the `num_elites` best members become the elites."""
+    """Train with a holdout set and early stopping; the best `num_elites` members become the elites."""
     import copy
     model, optim, device = ens["model"], ens["optimizer"], ens["device"]
     n, E = xn.shape[0], len(model.members)

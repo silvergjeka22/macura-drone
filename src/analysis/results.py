@@ -1,9 +1,4 @@
-"""Run logs -> scores, confidence intervals, tables and trust numbers (numpy only; plots live in src/viz).
-
-A run is the JSON log written by train_one (logs/<algo>_seed<seed>.json). Logs from several sessions
-(one seed each) are merged with load_runs(dir0, dir1, ...). Across seeds every score is the IQM with a
-95% bootstrap confidence interval (Agarwal et al. 2021), as recommended for few-seed RL comparisons.
-"""
+"""Run logs -> scores, IQM with 95% bootstrap CI, tables and trust numbers."""
 
 from __future__ import annotations
 
@@ -17,10 +12,7 @@ import numpy as np
 ALGOS = ("macura", "mbpo", "m2ac", "sac")
 NAMES = {"macura": "MACURA", "mbpo": "MBPO", "m2ac": "M2AC", "sac": "SAC"}
 
-# (key, label, higher is better, format) - the scores fixed before the runs, main ones first.
-# success = share of a full lap flown in a 10 s flight (0-100%; a crash ends the flight, so it counts how far
-# the drone got). It replaces "a full lap within one flight", which needs > 2.4 m/s on average and stays 0 for
-# every learner (the autopilot at 3 m/s manages it in ~10% of flights): it grades how well each one flies.
+# (key, label, higher is better, format); success = share of a lap flown in a 10 s flight
 SCORES = (
     ("avg_return", "avg return while learning", True, "{:.0f}"),
     ("broken", "drones broken after warm-up", False, "{:.0f}"),
@@ -45,9 +37,7 @@ def run_length(run) -> int:
 
 
 def load_runs(*paths, algorithms=None, verbose=True, same_length=True) -> list:
-    """Merge the run logs found under `paths` (output roots, or any folder above them). A duplicate
-    (algo, seed) keeps the first one found. Each run gets `_root`, its output folder. With `same_length`
-    only the runs of the longest planned length are kept (curves of different lengths do not mix)."""
+    """Merge the run logs found under `paths`; each run gets `_root`, its output folder."""
     found = []
     for p in paths:
         for root in run_roots(p):
@@ -122,8 +112,7 @@ def iqm(vals) -> float:
 
 
 def ci(vals, stat="iqm", n_boot=2000, alpha=0.05, seed=0):
-    """(center, lo, hi): IQM or mean over seeds with a percentile-bootstrap CI (lo = hi = center below 3 seeds;
-    with 2 seeds the IQM is their mean)."""
+    """(center, lo, hi): IQM or mean over seeds with a percentile-bootstrap CI."""
     vals = np.asarray([v for v in vals if v is not None and np.isfinite(v)], dtype=float)
     if len(vals) == 0:
         return float("nan"), float("nan"), float("nan")
@@ -323,11 +312,7 @@ def autopilot_reference(env_cfg, seed_base=100, episodes=20, pilots=None, cache=
 
 
 def model_check(run, cfg, episodes=10, seed_base=1000, device="cpu") -> dict:
-    """Fly a model-based run's best policy in the real simulator and, at every step, compare its saved
-    world model's disagreement (GJS) with the model's actual one-step error (paper App. C.4 / Fig. 10).
-
-    Returns per-step arrays: gjs, error (RMS over dims, normalised units), fast (sinking faster than the
-    lift-loss onset), plus kappa (MACURA's threshold at that checkpoint) and the share of steps trusted."""
+    """Fly the best policy and compare its world model's disagreement (GJS) with its real one-step error."""
     import torch
     from src.envs import drone_env
     from src.algorithms.sac import load_agent

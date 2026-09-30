@@ -1,8 +1,4 @@
-"""A hand-written AUTOPILOT for the race (not learned): shows the task is solvable and flies the demo videos.
-
-It follows the racing line at `speed` m/s and sinks at most `descent` m/s in the chute, through the same
-stabiliser interface as the learning agents (sideways acceleration, climb rate).
-"""
+"""A hand-written autopilot for the race (not learned): follows the racing line at `speed` m/s."""
 
 import numpy as np
 
@@ -26,8 +22,7 @@ class Autopilot:
         return np.clip([a[0] / env.att_acc_h, a[1] / env.att_acc_h, climb / env.alt_vz_max, 0.0], -1.0, 1.0).astype(np.float32)
 
     def _desired_acceleration(self, p, v):
-        """Fly along the course direction 0.5 m ahead at `speed` (slower in steep descents), pulled back onto the
-        racing line; the steady wind is visible, so it is cancelled."""
+        """Head along the course 0.5 m ahead at `speed`, pulled back onto the racing line."""
         course = self.env.course
         k = int(project(course, p)[0][0])
         direction = course["tangent"][(k + int(round(0.5 / course["params"]["spacing"]))) % len(course["points"])]

@@ -1,13 +1,8 @@
-"""Dyna training loop shared by MACURA, MBPO, M2AC and SAC, plus the evaluation protocol.
+"""Training loop shared by MACURA, MBPO, M2AC and SAC, and the evaluation.
 
-All four use the same SAC learner, ensemble, evaluation scenarios and real/imagined batch mix; only the
-rollout function differs (SAC has none). Every `eval_every` steps the greedy policy flies the fixed
-selection scenarios (seeds 100..119); a new best return saves policy + ensemble. At the end the best
-checkpoint flies fresh test scenarios (seeds 1000..1029) for the run summary.
-
-    train_algo(algo, cfg, output_dir, seeds)  -> [run]   (reloads a seed whose log already exists)
-    train_one(algo, cfg, output_dir, seed)    -> run     (logs/<algo>_seed<seed>.json, checkpoints/...)
-    evaluate(agent, env, episodes, seeds)     -> metrics
+    train_algo(algo, cfg, output_dir, seeds) -> [run]
+    train_one(algo, cfg, output_dir, seed)   -> run
+    evaluate(agent, env, episodes, seeds)    -> metrics
 """
 
 from __future__ import annotations

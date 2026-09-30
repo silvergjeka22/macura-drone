@@ -1,8 +1,4 @@
-"""M2AC: fixed-horizon rollouts that keep only the least uncertain imagined steps (Pan et al. 2020, non-stop mode).
-
-At step h, the (H - h) / (2 (H + 1)) share of samples with the lowest one-vs-rest KL of the member that made the
-prediction is kept (25% of all steps overall); stored reward r - alpha * u; every rollout continues to the horizon.
-"""
+"""M2AC (Pan et al. 2020): fixed-horizon rollouts that keep only the least uncertain imagined steps."""
 
 import numpy as np
 

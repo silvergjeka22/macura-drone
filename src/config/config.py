@@ -1,9 +1,7 @@
-"""All settings of the study (the race3 drone task, the MACURA paper protocol).
+"""All settings of the study (race3 task, MACURA paper protocol).
 
-Environment variables (set before this module is imported) change the run size or a single setting:
-    MACURA_STEPS, MACURA_SEEDS ("0 1"), MACURA_ALGOS ("macura mbpo"), MACURA_OUTPUT_ROOT, MACURA_DEADLINE (unix time),
-    MBPO_UTD, M2AC_UTD (SAC updates per real step), MACURA_XI, MBPO_HORIZON, MACURA_EXPLORATION=equal
-Why each value was chosen: docs/EXPERIMENTS.md.
+Environment variables change a run: MACURA_STEPS, MACURA_SEEDS, MACURA_ALGOS, MACURA_OUTPUT_ROOT, MACURA_DEADLINE,
+MBPO_UTD, M2AC_UTD, MACURA_XI, MBPO_HORIZON, MACURA_EXPLORATION=equal.
 """
 
 import os
