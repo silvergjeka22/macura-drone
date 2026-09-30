@@ -10,7 +10,7 @@ git pull
 | step | where | time |
 |---|---|---|
 | 1. once: keys and Python | your computer | 5 min |
-| 2. pack the code into the notebooks | your computer | seconds |
+| 2. put code changes on GitHub | your computer | seconds |
 | 3. train: 4 notebooks on 2 Kaggle accounts | Kaggle (GPU) | about 4-5 h, all at the same time |
 | 4. download the results | your computer | 1 min |
 | 5. test all models together | your computer (`testing/test.ipynb`) | about 30-60 min |
@@ -62,16 +62,18 @@ Next time only `source .venv/bin/activate`.
 
 ---
 
-## 2. Pack the code into the notebooks
+## 2. Put code changes on GitHub
 
-Kaggle cannot read the (private) GitHub repository, so the code of `src/` travels inside each notebook, in a
-hidden cell. After any change in `src/`:
+The notebooks download the code from GitHub (`silvergjeka22/macura-drone`, branch `main`) when they start, so a
+change in `src/` must be on GitHub first:
 
 ```bash
-./kaggle.sh pack
+git add src
+git commit -m "what you changed"
+git push
 ```
 
-(`./kaggle.sh push` does this by itself.)
+(Nothing changed in `src/`? Skip this step. `./kaggle.sh push` warns if `src/` is not on GitHub yet.)
 
 ---
 
@@ -181,10 +183,10 @@ git push
 
 ## Shortcut: kaggle.sh
 
-`kaggle.sh` does steps 2-4 for both accounts and picks each notebook's key by itself:
+`kaggle.sh` does steps 3-4 for both accounts and picks each notebook's key by itself:
 
 ```bash
-./kaggle.sh push      # pack and start all 4 (a running one is not started again)
+./kaggle.sh push      # start all 4 (a running one is not started again)
 ./kaggle.sh status    # the status of all 4
 ./kaggle.sh get       # download the finished ones into downloads/<name>
 ```

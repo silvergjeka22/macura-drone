@@ -123,7 +123,7 @@ training/     4 Kaggle notebooks, 2 per account, all running at the same time (a
                 macura_mbpo_seeds67   MACURA + MBPO, seeds 6 7   account silvergjeka01
                 m2ac_sac_seeds67      M2AC + SAC,    seeds 6 7   account silvergjeka01
               each: training with live progress, results, plots, trust, 30 s videos, a recap and <name>.zip
-kaggle.sh     pack the code into the notebooks, start them, check them, download them
+kaggle.sh     start the notebooks, check them, download them (they download the code from GitHub)
 downloads/    the 4 downloaded notebooks (plots and videos in git; checkpoints and logs stay local)
 testing/      test.ipynb on your computer: all results together, a test of every model on 50 new scenarios,
               test plots and videos, the final comparison and a recap -> results/
