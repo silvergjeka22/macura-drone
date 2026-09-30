@@ -13,6 +13,9 @@ number of real flights, and are compared on new scenarios they have never seen:
 
 > Paper: *Trust the Model Where It Trusts Itself: Model-Based Actor-Critic with Uncertainty-Aware Rollout
 > Adaption*, Frauenknecht et al., ICML 2024 ([`paper/2405.19014v3.pdf`](paper/2405.19014v3.pdf)).
+>
+> Presentation (the paper, then this project): [`paper/presentation/macura_presentation.pdf`](paper/presentation/macura_presentation.pdf),
+> LaTeX source in [`paper/presentation/`](paper/presentation/).
 
 ![MACURA vs MBPO on a new test scenario](docs/media/macura_vs_mbpo.gif)
 

@@ -1,0 +1,1056 @@
+% MACURA: the paper and my racing-drone project
+% Build:  latexmk -pdf macura_presentation.tex      (or: pdflatex macura_presentation.tex twice)
+% figures/paper:   cropped from the paper (arXiv:2405.19014v3)
+% figures/project: plots and video frames from the project (github.com/silvergjeka22/macura-drone)
+\documentclass[aspectratio=169,10pt]{beamer}
+
+% ── edit these ────────────────────────────────────────────────────────────────────────────────────
+\newcommand{\presenter}{Silver Gjeka}
+\newcommand{\course}{}                       % e.g. \renewcommand{\course}{Reinforcement Learning -- }
+\newcommand{\talkdate}{\today}
+
+% ── packages ──────────────────────────────────────────────────────────────────────────────────────
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{graphicx}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,calc}
+
+% ── look ──────────────────────────────────────────────────────────────────────────────────────────
+\definecolor{navy}{HTML}{1B2F5E}
+\definecolor{mygreen}{HTML}{2E7D32}
+\definecolor{myred}{HTML}{C62828}
+\definecolor{myorange}{HTML}{EF6C00}
+\definecolor{myblue}{HTML}{1565C0}
+\definecolor{lightgray}{HTML}{EEEEEE}
+\setbeamertemplate{navigation symbols}{}
+\setbeamercolor{title}{fg=navy}
+\setbeamercolor{subtitle}{fg=navy}
+\setbeamercolor{frametitle}{fg=navy}
+\setbeamercolor{structure}{fg=navy}
+\setbeamercolor{normal text}{fg=black}
+\setbeamercolor{itemize item}{fg=black}
+\setbeamercolor{itemize subitem}{fg=black}
+\setbeamercolor{enumerate item}{fg=black}
+\setbeamercolor{caption name}{fg=navy}
+\setbeamerfont{title}{series=\bfseries,size=\LARGE}
+\setbeamerfont{subtitle}{series=\bfseries,size=\normalsize}
+\setbeamerfont{frametitle}{series=\bfseries,size=\Large}
+\setbeamerfont{caption}{size=\scriptsize}
+\setbeamertemplate{itemize items}[circle]
+\setbeamertemplate{itemize subitem}[circle]
+\setbeamertemplate{enumerate items}[default]
+\setbeamertemplate{frametitle}{%
+  \vspace*{0.55em}\insertframetitle\par\vspace{0.1em}%
+  {\color{navy}\rule{\linewidth}{0.5pt}}\vspace{-0.3em}}
+\setbeamertemplate{footline}{%
+  \hfill\scriptsize\insertframenumber\,/\,\inserttotalframenumber\hspace*{1.3em}\vspace*{0.7em}}
+\setbeamertemplate{caption}{\centering\insertcaption\par}
+
+% a part divider: "Part N" + title + what it covers
+\newcommand{\partslide}[3]{%
+  \begin{frame}[plain]
+    \vfill\centering
+    {\large Part #1}\par\vspace{1.0em}
+    {\usebeamerfont{title}\color{navy}#2\par}\vspace{1.0em}
+    {\normalsize #3\par}
+    \vfill
+  \end{frame}}
+
+% ── notation ──────────────────────────────────────────────────────────────────────────────────────
+\newcommand{\Denv}{\mathcal{D}_{\mathrm{env}}}
+\newcommand{\Dmod}{\mathcal{D}_{\mathrm{mod}}}
+\newcommand{\E}{\mathcal{E}}
+\newcommand{\ugjs}{u_{\mathrm{GJS}}}
+\newcommand{\ptil}{\tilde{p}}
+\algrenewcommand\algorithmicrequire{\textbf{Given:}}
+
+% ── TikZ styles ───────────────────────────────────────────────────────────────────────────────────
+\tikzset{
+  box/.style={draw, rounded corners=3pt, thick, align=center, minimum height=0.9cm, fill=lightgray,
+              font=\small, inner sep=4pt},
+  bluebox/.style={box, fill=myblue!12, draw=myblue},
+  greenbox/.style={box, fill=mygreen!12, draw=mygreen},
+  orangebox/.style={box, fill=myorange!14, draw=myorange},
+  redbox/.style={box, fill=myred!10, draw=myred},
+  arr/.style={-{Stealth[length=2.4mm]}, thick},
+  lab/.style={font=\scriptsize, align=center},
+}
+
+\title{Trust the Model Where It Trusts Itself}
+\subtitle{MACURA: the paper, and my project on a racing drone}
+\author{\presenter}
+\institute{\small Department of Computer Science\\ Master's Degree in Artificial Intelligence\\ University of Verona}
+\date{\small \course\talkdate\\[0.8em]\scriptsize Paper: B.~Frauenknecht, A.~Eisele, D.~Subhasish, F.~Solowjow, S.~Trimpe
+      (RWTH Aachen), ICML 2024, arXiv:2405.19014\\ Project code: github.com/silvergjeka22/macura-drone}
+
+\begin{document}
+
+\begin{frame}[plain]
+  \titlepage
+\end{frame}
+
+\begin{frame}{Outline}
+  \begin{columns}[T]
+    \begin{column}{0.47\textwidth}
+      {\large\bfseries\color{navy} Part I -- The paper}
+      \begin{enumerate}
+        \item The problem: when and where to trust a model
+        \item Background: SAC, ensembles, MBPO and M2AC
+        \item MACURA: uncertainty-aware rollouts
+        \item The four algorithms side by side
+        \item Noise: exploration and the environment
+        \item Results on MuJoCo
+      \end{enumerate}
+    \end{column}
+    \begin{column}{0.49\textwidth}
+      {\large\bfseries\color{navy} Part II -- My project}
+      \begin{enumerate}\setcounter{enumi}{6}
+        \item The task: a racing drone with wind and a chute
+        \item Implementation and a fair protocol
+        \item Results: learning, testing, trust
+        \item The experiments I ran
+        \item Limitations, lessons and conclusion
+      \end{enumerate}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% ════════════════════════════════════════════════════════════════════════════════════════════════
+\partslide{I}{The Paper}{How MACURA decides \emph{where} to trust its learned model}
+\section{The paper}
+
+\begin{frame}{The Problem: When and Where to Trust a Model}
+  \begin{itemize}
+    \item Deep RL needs \textbf{millions of interactions}; on real systems (robots, drones) each one is slow,
+          expensive or risky.
+    \item \textbf{Model-based RL (MBRL)} learns a model of the environment and \textbf{imagines} extra experience
+          with it.
+    \item But the model is never perfect: training on its \textbf{wrong predictions} misleads the agent.
+  \end{itemize}
+  \vspace{0.3em}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{MBPO: \emph{when} to trust the model}
+        Imagined rollouts get longer during training, following a \textbf{hand-designed schedule}, and the model is
+        trusted \textbf{equally everywhere}.
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{MACURA: \emph{where} to trust the model}
+        Accuracy is \textbf{local}: every imagined rollout \textbf{stops where the model itself becomes uncertain}.
+      \end{block}
+    \end{column}
+  \end{columns}
+  \vspace{0.4em}
+  \small\textbf{Contributions}: a monotonic-improvement guarantee on a set $\E$ of accurate states; a cheap uncertainty
+  measure (GJS) to build $\E$; adaptive rollouts with essentially \textbf{one hyperparameter} $\xi$; better results than
+  MBPO and M2AC on MuJoCo.
+\end{frame}
+
+\begin{frame}{Background: SAC and Probabilistic Ensembles}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \textbf{Soft Actor-Critic (SAC)}: the learner inside every method
+      \begin{itemize}\small
+        \item Off-policy actor-critic: learns from a \textbf{replay buffer}.
+        \item \textbf{Maximum entropy}: reward plus randomness, so it keeps exploring:
+              \[ J(\pi)=\textstyle\sum_t \mathbb{E}\big[r(s_t,a_t)+\alpha\,\mathcal{H}(\pi(\cdot\mid s_t))\big] \]
+        \item Twin critics $Q_{\theta_1},Q_{\theta_2}$ (take the smaller), a Gaussian actor $\pi_\phi$, automatic
+              temperature $\alpha$.
+        \item One real step $\Rightarrow$ $G$ gradient updates (the \textbf{update-to-data ratio}).
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \textbf{Probabilistic ensemble (PE)}: the learned model
+      \begin{itemize}\small
+        \item $E=7$ neural networks, each trained on its own bootstrap sample of the real data.
+        \item Each predicts a \textbf{Gaussian}: $\ptil_{\theta_e}(s'\mid s,a)=\mathcal{N}(\mu_{\theta_e},\Sigma_{\theta_e})$.
+        \item \textbf{Aleatoric} uncertainty (noise of the world) $\Rightarrow$ wide $\Sigma_{\theta_e}$.
+        \item \textbf{Epistemic} uncertainty (too little data) $\Rightarrow$ the members \textbf{disagree}.
+        \item In a rollout, each step uses a \textbf{random member}.
+      \end{itemize}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Dyna-Style MBRL: Imagined Rollouts}
+  \begin{columns}[T]
+    \begin{column}{0.44\textwidth}
+      \begin{figure}
+        \includegraphics[width=\linewidth]{figures/paper/fig1_dyna.png}
+        \caption{Dyna-style MBRL (paper, Fig.~1).}
+      \end{figure}
+    \end{column}
+    \begin{column}{0.54\textwidth}
+      \small
+      \begin{itemize}
+        \item The agent acts in the real world $\Rightarrow$ real buffer $\Denv$; the model $\ptil$ learns from $\Denv$
+              (supervised learning).
+        \item \textbf{Branched rollouts}: start from real states $s_0\in\Denv$ and imagine a few steps with $\pi$ and
+              $\ptil$ $\Rightarrow$ model buffer $\Dmod$.
+        \item SAC trains mostly on $\Dmod$ (95\% imagined + 5\% real), with many updates per real step.
+      \end{itemize}
+      \textbf{Why it helps}: much more training data per real step, and it follows the \textbf{current} policy.\\[0.3em]
+      \textbf{The risk}: longer rollouts drift away from the real data and errors add up; the agent learns to exploit
+      the model's mistakes (\textbf{model exploitation}).\\[0.3em]
+      $\Rightarrow$ The methods differ in \textbf{how many imagined steps they keep, and which}.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{MBPO and M2AC: Two Earlier Answers}
+  \begin{columns}[T]
+    \begin{column}{0.38\textwidth}
+      \textbf{MBPO} (Janner et al., 2019)
+      \begin{itemize}\small
+        \item Every rollout has the \textbf{same length} $k$, which grows during training by a \textbf{schedule}
+              chosen by hand per task (Humanoid $1\to25$, Walker 1).
+        \item \textbf{Every} imagined step is used: no check of the model.
+        \item A \textbf{fixed} number $G$ of SAC updates per real step.
+      \end{itemize}
+      $\Rightarrow$ answers \emph{when}, not \emph{where}.
+    \end{column}
+    \begin{column}{0.6\textwidth}
+      \textbf{M2AC} (Pan et al., 2020): masking by uncertainty
+      \begin{itemize}\small
+        \item \textbf{One-vs-rest (OvR)} uncertainty: KL divergence between the member that made the prediction and a
+              Gaussian fitted to the other members.
+        \item All rollouts run the full horizon $H$; at step $h$ only the share $\frac{H-h}{2(H+1)}$ with the
+              \textbf{lowest} uncertainty is kept ($\approx 25\%$ overall for $H=10$).
+        \item \textbf{Rank-based}: a fixed share is kept even when all data are bad, or thrown away when all are good.
+        \item \textbf{Reward penalty}: stored reward $r-\alpha\,u$ pushes the agent away from uncertain regions, which
+              can also slow exploration.
+      \end{itemize}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Where to Trust Your Model?}
+  \begin{columns}[T]
+    \begin{column}{0.4\textwidth}
+      \begin{figure}
+        \includegraphics[width=\linewidth]{figures/paper/fig2_where.png}
+        \caption{The real data define a set $\E$ where the model is accurate (paper, Fig.~2).}
+      \end{figure}
+    \end{column}
+    \begin{column}{0.58\textwidth}
+      \small
+      \begin{itemize}
+        \item Inside $\E$ longer rollouts are useful; once a rollout \textbf{leaves} $\E$ its data are harmful.
+        \item Some rollouts stay in $\E$ for long, others leave it at once: \textbf{a fixed length cannot fit both}.
+      \end{itemize}
+      \textbf{Theorem 4.1} (simplified): rollouts cut when they leave $\E$ give
+      \[ \eta[\pi]\;\ge\;\tilde\eta[\pi]-C,\qquad
+         C=2r_{\max}\textstyle\sum_{t}\gamma^t\sum_{\tau\le t}\Delta p_{\E}[\pi], \]
+      $\Delta p_{\E}$ = the largest model error \textbf{inside} $\E$. If the policy improves in the model by more than
+      $C$, it improves in the real world.
+      \vspace{0.3em}
+
+      \textbf{In practice}: the true error is unknown, so $\E$ is built from the model's own uncertainty:
+      \[ \E=\{\,s\mid u(s,a)<\kappa,\ a\sim\pi(\cdot\mid s)\,\}. \]
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{GJS Uncertainty: Do the Members Agree?}
+  \small
+  Average disagreement over all \textbf{pairs} of members ($\mathcal{N}_e$ = member $e$'s Gaussian):
+  \[
+    \ugjs(s,a)=\frac{2}{E(E-1)}\sum_{e<f} D_{\mathrm{GJS}}(\mathcal{N}_e\|\mathcal{N}_f),\qquad
+    D_{\mathrm{GJS}}=\tfrac12 D_{\mathrm{KL}}(\mathcal{N}_e\|\mathcal{N}_{ef})+\tfrac12 D_{\mathrm{KL}}(\mathcal{N}_f\|\mathcal{N}_{ef}),
+  \]
+  with $\mathcal{N}_{ef}$ the \textbf{geometric mean} of the two Gaussians (again a Gaussian).
+  \begin{itemize}
+    \item \textbf{Closed form} and symmetric: cheap enough for \textbf{every imagined step}.
+    \item Large when two members are \textbf{confident but predict different things}.
+  \end{itemize}
+  \vspace{-0.3em}
+  \begin{figure}
+    \includegraphics[width=0.62\linewidth]{figures/paper/fig3_toy.png}
+    \caption{Pendulum (paper, Fig.~3): (a) data, (b) true model error, (c) $\ugjs$, (d) the set $\E$.
+             $\ugjs$ is low exactly where the real error is low.}
+  \end{figure}
+\end{frame}
+
+\begin{frame}{Why a New Measure? GJS (MACURA) vs OvR (M2AC)}
+  \begin{columns}[T]
+    \begin{column}{0.52\textwidth}
+      \begin{figure}
+        \includegraphics[width=\linewidth]{figures/paper/fig10_gjs_ovr.png}
+        \caption{Top: GJS. Bottom: OvR. On the pendulum data (paper, Fig.~10).}
+      \end{figure}
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \small
+      \begin{itemize}
+        \item \textbf{GJS} (b) is smooth and follows the data; its set $\E$ (c) has a clear border and matches the
+              regions of \textbf{low real error} (d).
+        \item \textbf{OvR} (f) is \textbf{noisy} and \textbf{over-confident}: low uncertainty in the centre, where the
+              real error is high (e). Its set (g) does not match the accurate region (h).
+        \item OvR looks at \textbf{one} member against the rest; GJS averages over \textbf{all pairs}, so one lucky
+              member cannot hide the disagreement.
+      \end{itemize}
+      $\Rightarrow$ A reliable uncertainty is essential for deciding \textbf{where} to stop.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Uncertainty-Aware Rollouts}
+  \begin{columns}[T]
+    \begin{column}{0.45\textwidth}
+      \scriptsize
+      \begin{algorithmic}
+        \Require $\Denv,\Dmod,\ptil_{\theta_{1..E}},\pi,\zeta,\xi,T_{\max}$
+        \State $s_0\sim\mathcal{U}(\Denv)$
+        \For{$t=0,\dots,T_{\max}-1$}
+          \State $e_t\sim\mathcal{U}(1..E)$,\ $a_t\sim\pi(\cdot\mid s_t)$
+          \State $s_{t+1}\sim\ptil_{\theta_{e_t}}(\cdot\mid s_t,a_t)$,\ $r_{t+1}=r(s_t,a_t)$
+          \State compute $\ugjs(s_t,a_t)$;\ \textbf{if} $t=0$: update $\kappa$
+          \If{$\ugjs(s_t,a_t)<\kappa$}
+            \State $\Dmod\gets\Dmod\cup\{(s_t,a_t,r_{t+1},s_{t+1})\}$
+          \Else
+            \State \textbf{break} \Comment{stop here, discard}
+          \EndIf
+        \EndFor
+      \end{algorithmic}
+      \vspace{0.2em}
+      \centering\textcolor{navy}{Algorithm 2:} MACURA's rollout
+    \end{column}
+    \begin{column}{0.53\textwidth}
+      \small
+      \textbf{A self-tuning threshold $\kappa$}
+      \begin{itemize}
+        \item Each round, the $\zeta$-quantile ($\zeta=95\%$) of the \textbf{first-step} uncertainties
+              $=$ ``what counts as certain now'';
+              \ $\kappa=\frac{\xi}{K}\sum_{k=1}^{K}\hat u_{\mathrm{GJS},k}$.
+        \item $T_{\max}=10$ and $\zeta$ are fixed; only $\xi$ is tuned per task.
+      \end{itemize}
+      \textbf{Updates follow the trusted data}
+      \[ G=\Big\lfloor G_{\max}\,\tfrac{|\Dmod|}{|\Dmod|_{\max}}\Big\rceil \]
+      Short rollouts (poor model) $\Rightarrow$ few updates; longer ones $\Rightarrow$ more.
+
+      \textbf{Exploration} with \textbf{pink noise} (correlated in time) collects informative data and grows $\E$.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{MACURA Architecture}
+  \centering
+  \begin{tikzpicture}
+    \node[box, minimum width=2.4cm] (env) at (0,2.8) {Environment $\mathcal{M}$};
+    \node[greenbox, minimum width=2.4cm] (pi) at (10.0,2.8) {Policy $\pi$ (SAC)};
+    \node[bluebox, minimum width=1.9cm] (denv) at (0,0) {$\Denv$\\real data};
+    \node[box, minimum width=2.2cm] (model) at (3.4,0) {Ensemble $\ptil$\\7 networks};
+    \node[orangebox, minimum width=2.6cm] (roll) at (6.9,0) {Rollouts that\\\textbf{stop at} $\ugjs\ge\kappa$};
+    \node[bluebox, minimum width=1.9cm] (dmod) at (10.0,0) {$\Dmod$\\trusted data};
+    \node[redbox, minimum width=2.6cm] (kappa) at (6.9,-1.95) {$\kappa=\frac{\xi}{K}\sum_k\hat u_{\mathrm{GJS},k}$};
+    \draw[arr, myorange] ([yshift=5pt]pi.west) -- node[lab, above] {action $a_t$ + \textbf{pink noise}} ([yshift=5pt]env.east);
+    \draw[arr] ([yshift=-5pt]env.east) -- node[lab, below] {next state $s_{t+1}$, reward $r_t$} ([yshift=-5pt]pi.west);
+    \draw[arr] (env) -- node[lab, right] {$(s,a,r,s')$} (denv);
+    \draw[arr] (denv) -- node[lab, above] {train every\\$R$ steps} (model);
+    \draw[arr] (model) -- node[lab, above] {$\mu_e,\Sigma_e$} (roll);
+    \draw[arr] (roll) -- (dmod);
+    \draw[arr, rounded corners] (denv.south) -- ++(0,-0.7) -| node[lab, below, pos=0.25] {start states $s_0$} ([xshift=-1.0cm]roll.south);
+    \draw[arr, myred] ([xshift=0.1cm]roll.south) -- ([xshift=0.1cm]kappa.north);
+    \draw[arr, myred] ([xshift=0.6cm]kappa.north) -- node[lab, right, text=myred] {first-step $u$ $\to$ $\kappa$} ([xshift=0.6cm]roll.south);
+    \draw[arr, myorange] (dmod) -- node[lab, right, align=left, text=myorange] {$G\propto|\Dmod|$\\SAC updates} (pi);
+    \draw[arr, dashed] (pi.south west) -- node[lab, left, pos=0.45] {actions in\\imagination} (roll.north east);
+  \end{tikzpicture}
+
+  \footnotesize The loop is MBPO's. New in MACURA (\textcolor{myorange}{\textbf{orange}}/\textcolor{myred}{\textbf{red}}):
+  rollouts stop where the model is uncertain, a self-tuning $\kappa$, adaptive updates $G$, pink-noise exploration.
+\end{frame}
+
+\begin{frame}{Which Imagined Data Are Kept?}
+  \centering
+  \begin{tikzpicture}[scale=0.95,
+      pt/.style={circle, fill=black, inner sep=1.3pt},
+      good/.style={thick, mygreen},
+      bad/.style={thick, myred},
+      cut/.style={myred, very thick}]
+    \foreach \x/\name/\sub in {0/MBPO/fixed length, 5.2/M2AC/fixed length + masking, 10.4/MACURA/stop at the border of $\mathcal{E}$} {
+      \begin{scope}[xshift=\x cm]
+        \fill[mygreen!15] (2,1.5) ellipse (1.55cm and 1.15cm);
+        \draw[mygreen!60!black, dashed] (2,1.5) ellipse (1.55cm and 1.15cm);
+        \node[font=\scriptsize, text=mygreen!50!black] at (2,0.05) {$\mathcal{E}$: model accurate};
+        \node[font=\small\bfseries, text=navy] at (2,3.35) {\name};
+        \node[font=\scriptsize] at (2,-0.4) {\sub};
+      \end{scope}
+    }
+    \begin{scope}
+      \draw[good] (1.3,1.3) -- (1.7,1.8) -- (2.2,1.9) -- (2.6,1.6) -- (2.8,1.2);
+      \draw[good] (2.3,1.2) -- (2.9,1.5) -- (3.3,1.9);
+      \draw[bad]  (3.3,1.9) -- (3.8,2.3) -- (4.2,2.4);
+      \foreach \p in {(1.3,1.3),(1.7,1.8),(2.2,1.9),(2.6,1.6),(2.8,1.2),(2.3,1.2),(2.9,1.5),(3.3,1.9)} \node[pt] at \p {};
+      \foreach \p in {(3.8,2.3),(4.2,2.4)} \node[pt, fill=myred] at \p {};
+    \end{scope}
+    \begin{scope}[xshift=5.2cm]
+      \draw[good] (1.3,1.3) -- (1.7,1.8) -- (2.2,1.9) -- (2.6,1.6) -- (2.8,1.2);
+      \draw[good] (2.3,1.2) -- (2.9,1.5) -- (3.3,1.9);
+      \draw[bad]  (3.3,1.9) -- (3.8,2.3) -- (4.2,2.4);
+      \foreach \p in {(1.3,1.3),(1.7,1.8),(2.6,1.6),(2.3,1.2),(2.9,1.5),(3.3,1.9)} \node[pt] at \p {};
+      \node[pt, fill=myred] at (3.8,2.3) {};
+      \foreach \p in {(2.2,1.9),(2.8,1.2),(4.2,2.4)} \node[cut] at \p {\large$\times$};
+    \end{scope}
+    \begin{scope}[xshift=10.4cm]
+      \draw[good] (1.3,1.3) -- (1.7,1.8) -- (2.2,1.9) -- (2.6,1.6) -- (2.8,1.2);
+      \draw[good] (2.3,1.2) -- (2.9,1.5) -- (3.3,1.9);
+      \draw[bad, dashed] (3.3,1.9) -- (3.8,2.3);
+      \foreach \p in {(1.3,1.3),(1.7,1.8),(2.2,1.9),(2.6,1.6),(2.8,1.2),(2.3,1.2),(2.9,1.5),(3.3,1.9)} \node[pt] at \p {};
+      \node[cut] at (3.8,2.3) {\large$\times$};
+      \node[font=\scriptsize, text=myred, align=center] at (4.15,2.85) {stop\\here};
+    \end{scope}
+  \end{tikzpicture}
+  \vspace{0.5em}
+  \begin{itemize}\small
+    \item \textbf{MBPO}: same length for every rollout; imagined steps \textbf{outside} $\E$ (\textcolor{myred}{red}) are used.
+    \item \textbf{M2AC}: fixed length, then a \textbf{fixed share} of the most uncertain steps is removed ($\times$), wherever they are.
+    \item \textbf{MACURA}: each rollout \textbf{stops at its first uncertain step}: long inside $\E$, nothing outside.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{The Four Algorithms Side by Side}
+  \centering
+  \footnotesize
+  \renewcommand{\arraystretch}{1.15}\setlength{\tabcolsep}{4pt}
+  \begin{tabular}{>{\raggedright\arraybackslash\bfseries}p{2.2cm}*{3}{>{\raggedright\arraybackslash}p{2.35cm}}>{\raggedright\arraybackslash}p{3.2cm}}
+    \toprule
+    & \textbf{SAC} & \textbf{MBPO} & \textbf{M2AC} & \textbf{MACURA} \\
+    \midrule
+    world model & none & 7-network ensemble & same & same \\
+    rollout length & -- & fixed $k$, schedule by hand & fixed horizon $H$ & \textbf{adaptive}: until $\ugjs\ge\kappa$ ($\le T_{\max}$) \\
+    imagined data used & -- & all of it & a fixed share, least uncertain & only steps \textbf{inside} $\E$ \\
+    uncertainty & -- & none & OvR (one member vs rest) & GJS (all pairs) \\
+    stored reward & $r$ & $r$ & $r-\alpha u$ & $r$ \\
+    SAC updates per real step & fixed & fixed $G$ & fixed $G$ & $G\propto|\Dmod|$ (adaptive) \\
+    exploration (paper) & samples its policy & deterministic & deterministic & \textbf{pink noise} \\
+    tuned per task & -- & the length schedule & masking, penalty $\alpha$ & only $\xi$ \\
+    \bottomrule
+  \end{tabular}
+  \vspace{0.4em}
+
+  \small All three model-based methods share the SAC learner, the ensemble and the 95\%/5\% data mix:
+  they differ \textbf{only in which imagined data reach the learner}.
+\end{frame}
+
+\begin{frame}{How Long Are the Imagined Trips in Practice?}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{figure}
+        \includegraphics[width=0.92\linewidth]{figures/paper/fig17_rollout_len.png}
+        \caption{Average rollout length on Walker (paper, Fig.~17).}
+      \end{figure}
+    \end{column}
+    \begin{column}{0.5\textwidth}
+      \small
+      \begin{itemize}
+        \item \textbf{MBPO}: length 1 all training long (its tuned schedule for Walker).
+        \item \textbf{M2AC}: a \textbf{constant} average, because a fixed share is always kept.
+        \item \textbf{MACURA}: \textbf{short} while the model is poor (even below 1: it can drop the first step), then
+              growing to about 7 as the model improves.
+      \end{itemize}
+      \vspace{0.3em}
+      MACURA's updates follow the same curve: few at first, then more than MBPO's fixed number.
+      The paper checks that \textbf{more updates alone} do not explain the gain: MBPO and M2AC with 40 updates per step
+      stay behind.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Noise 1: Exploration Noise}
+  \begin{columns}[T]
+    \begin{column}{0.5\textwidth}
+      \begin{figure}
+        \includegraphics[width=\linewidth]{figures/project/noise_types.png}
+        \caption{Three kinds of noise added to the actions (same scale).}
+      \end{figure}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \small
+      \begin{itemize}
+        \item \textbf{Deterministic}: the policy's mean action, no noise (MBPO and M2AC in the paper).
+        \item \textbf{SAC's own}: samples its Gaussian policy, like white noise with a learned width.
+        \item \textbf{White noise}: independent every step; the pushes cancel out, so the agent barely leaves the
+              states it already knows.
+        \item \textbf{Pink noise} ($1/f$): \textbf{correlated in time}, it pushes in one direction for a while and
+              reaches \textbf{new states}, without drifting away like a random walk (Eberhard et al., 2023).
+      \end{itemize}
+      \textbf{Why it matters for MACURA}: new real data at the border of $\E$ make the model accurate there
+      $\Rightarrow$ $\E$ grows $\Rightarrow$ longer trusted rollouts.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Noise 2: Noise in the Environment}
+  \begin{columns}[T]
+    \begin{column}{0.55\textwidth}
+      \begin{figure}
+        \includegraphics[width=\linewidth]{figures/paper/fig16_noise.png}
+        \caption{HalfCheetah with hidden action noise $\sigma\in\{0.05,0.1,0.2\}$ (paper, Fig.~16).}
+      \end{figure}
+    \end{column}
+    \begin{column}{0.43\textwidth}
+      \small
+      \begin{itemize}
+        \item \textbf{Process noise}: the world itself is random. The paper adds Gaussian noise to every action, and the
+              agent does not see it.
+        \item A model can learn noise only as a \textbf{spread}: each member predicts a wide Gaussian
+              (\textbf{aleatoric}).
+        \item GJS compares members: if all predict the \textbf{same} wide Gaussian, $\ugjs\approx0$ and the step is
+              still trusted. MACURA stops for \textbf{disagreement} (epistemic), not for noise.
+        \item MACURA stays ahead of MBPO and M2AC at all three noise levels; the gap shrinks as the noise grows.
+      \end{itemize}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Results on MuJoCo}
+  \begin{figure}
+    \includegraphics[width=0.7\linewidth]{figures/paper/fig4_mujoco.png}
+    \caption{Return while learning on five MuJoCo tasks; mean of 5 seeds with 95\% CI (paper, Fig.~4).}
+  \end{figure}
+  \vspace{-0.3em}
+  \begin{itemize}\small
+    \item MACURA learns \textbf{faster} and ends \textbf{higher} than MBPO and M2AC, most clearly on Humanoid and Ant.
+    \item It often reaches model-free SAC's final return with a fraction of the real data.
+    \item Why: long rollouts where the model is reliable, none where it is not $\Rightarrow$ \textbf{more and cleaner} data.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Exploration Changes the Results}
+  \begin{columns}[T]
+    \begin{column}{0.5\textwidth}
+      \begin{figure}
+        \includegraphics[width=\linewidth]{figures/paper/fig5_exploration.png}
+        \caption{Humanoid: deterministic (D), white noise (WN) and pink noise (PN) exploration (paper, Fig.~5).}
+      \end{figure}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \small
+      \begin{itemize}
+        \item \textbf{Deterministic}: limited but \textbf{stable}, for both methods.
+        \item \textbf{White noise}: can be very strong for MACURA, but it \textbf{destabilises} MBPO.
+        \item \textbf{Pink noise}: the best balance of performance and stability.
+        \item MACURA gains the most from better exploration: new data grow $\E$, exactly where it uses the model.
+        \item With deterministic interaction for \textbf{all} methods, MACURA is still the strongest on most tasks
+              (paper appendix).
+      \end{itemize}
+      \vspace{0.3em}
+      \footnotesize Note: the main comparison gives pink noise only to MACURA; I kept this protocol in my project.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{What Matters? Ablations and the Threshold}
+  \begin{columns}[T]
+    \begin{column}{0.47\textwidth}
+      \begin{figure}
+        \includegraphics[width=0.85\linewidth]{figures/paper/fig7_ablation.png}
+        \caption{Humanoid, one building block changed (paper, Fig.~7).}
+      \end{figure}
+      \vspace{-0.8em}
+      \begin{figure}
+        \includegraphics[width=0.42\linewidth]{figures/paper/fig8_kappa.png}
+        \caption{$\kappa$ during training (paper, Fig.~8).}
+      \end{figure}
+    \end{column}
+    \begin{column}{0.51\textwidth}
+      \small
+      \begin{itemize}
+        \item \textbf{Rank-based} masking (M2AC's rule) instead of a threshold: much worse.
+        \item \textbf{OvR} uncertainty instead of GJS: \textbf{diverges}, unreliable data get through.
+        \item A \textbf{fixed} $\kappa$: unstable at some stage of training. The adaptive $\kappa$ starts high (rough data
+              are enough at first) and then drops (precise data are needed later): a schedule that \textbf{emerges by itself}.
+        \item A \textbf{fixed} number of updates: a moderate loss.
+        \item $\xi$ works over a \textbf{wide range}; too large exploits model errors, too small overfits.
+      \end{itemize}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{The Paper in Short}
+  \begin{columns}[T]
+    \begin{column}{0.5\textwidth}
+      \textbf{Takeaways}
+      \begin{itemize}\small
+        \item Change the question from \emph{when} to \emph{where} to trust the model.
+        \item Rollouts inside a set $\E$ of accurate states $\Rightarrow$ monotonic improvement.
+        \item GJS: a cheap, closed-form, reliable measure of disagreement (not of noise).
+        \item Rollouts stop at the first uncertain step; $\kappa$ and the updates $G$ tune themselves.
+        \item One knob, $\xi$; better data efficiency than MBPO and M2AC.
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \textbf{Limits}
+      \begin{itemize}\small
+        \item $\xi$ still differs a lot between tasks (0.3 to 30).
+        \item Very long training destabilises MBPO and MACURA alike.
+        \item The main comparison uses \textbf{different exploration} (pink noise vs deterministic).
+        \item Only simulated locomotion tasks.
+      \end{itemize}
+    \end{column}
+  \end{columns}
+  \vspace{1em}
+  \centering
+  \colorbox{myblue!10}{\parbox{0.9\linewidth}{\centering\small
+    \textbf{My question}: does MACURA's advantage hold on a \textbf{new task I built myself}, with the same compute
+    for every method, and does it really trust its model less \textbf{where the model is wrong}?}}
+\end{frame}
+
+% ════════════════════════════════════════════════════════════════════════════════════════════════
+\partslide{II}{My Project: MACURA Races a Drone}{A new task, four algorithms, a fair comparison}
+\section{My project}
+
+\begin{frame}{The Project}
+  \begin{columns}[T]
+    \begin{column}{0.52\textwidth}
+      \textbf{Goal}: I compare the four algorithms of the paper on a task where I \textbf{know} where a learned model
+      will be wrong.
+      \begin{itemize}\small
+        \item \textbf{Why a drone}: real flights are costly and a crash breaks it $\Rightarrow$ data efficiency matters.
+        \item \textbf{Same for all}: SAC learner, ensemble, data mix, number of real steps, evaluation scenarios.
+              \textbf{Only the rollout rule differs}.
+        \item \textbf{MACURA} vs \textbf{MBPO} (the method it builds on), \textbf{M2AC} (the closest one) and
+              \textbf{SAC} (no model).
+      \end{itemize}
+      \textbf{Expectation}
+      \begin{itemize}\small
+        \item MACURA learns faster with the same compute.
+        \item It trusts its model \textbf{less} where the model is wrong.
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \begin{figure}
+        \includegraphics[height=0.62\textheight]{figures/project/frame_all_four.png}
+        \caption{The four trained drones on the same new scenario.}
+      \end{figure}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{The Task: Race3}
+  \begin{figure}
+    \includegraphics[width=0.66\linewidth]{figures/project/task_course.png}
+    \caption{The course from above and its height profile. Red: the chute, a steep 3 m drop.}
+  \end{figure}
+  \vspace{-0.4em}
+  \begin{columns}[T]
+    \begin{column}{0.49\textwidth}
+      \begin{itemize}\small
+        \item A quadrotor (MuJoCo) flies laps through \textbf{4 gates} (2, 4, 1, 1.5 m high) around \textbf{2 pillars}.
+        \item One lap = 24.3 m; a flight lasts \textbf{10 s}.
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.49\textwidth}
+      \begin{itemize}\small
+        \item \textbf{4 actions} at 50 Hz (sideways acceleration x, y, climb, turn); \textbf{27 observations}.
+        \item \textbf{Reward}: speed along the racing line; a crash costs 500 and ends the flight.
+      \end{itemize}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{The Noises in My Task}
+  \begin{columns}[T]
+    \begin{column}{0.52\textwidth}
+      \begin{figure}
+        \includegraphics[width=\linewidth]{figures/project/task_wind.png}
+        \caption{Hidden gusts: three samples over 5 s, and their strength.}
+      \end{figure}
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \small
+      \textbf{Environment noise} (like the paper's noisy HalfCheetah)
+      \begin{itemize}
+        \item \textbf{Hidden gusts}: random, correlated in time, typically 10--20\% of the hover thrust.
+        \item \textbf{Rotor noise}: each rotor's thrust varies by 4\%.
+        \item \textbf{Visible}: a steady wind and a package (0--0.2 kg).
+      \end{itemize}
+      \textbf{Exploration noise} (as in the paper)
+      \begin{itemize}
+        \item MACURA: \textbf{pink noise} on its actions; MBPO and M2AC: none; SAC: samples its policy.
+      \end{itemize}
+      The gusts make every prediction a little uncertain (aleatoric): MACURA should \textbf{not} stop for that,
+      only where its members \textbf{disagree}.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{The Chute Trap: Where the Model Should Disagree}
+  \begin{columns}[T]
+    \begin{column}{0.52\textwidth}
+      \begin{figure}
+        \includegraphics[width=\linewidth]{figures/project/task_lift_loss.png}
+        \caption{Sinking fast while pushing loses lift; a heavy package leaves less to brake with.}
+      \end{figure}
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \small
+      \begin{itemize}
+        \item In the chute the drone must drop 3 m almost vertically.
+        \item Sinking faster than \textbf{1.2 m/s} while upright and pushing loses up to \textbf{50\%} of the lift
+              (fully lost at 2.2 m/s) $\Rightarrow$ it cannot brake and crashes.
+        \item This is \textbf{rare} in the data and \textbf{hard to predict} $\Rightarrow$ the members should
+              \textbf{disagree} there (epistemic).
+        \item Exactly where MACURA should \textbf{stop imagining}, and where MBPO would keep learning from wrong
+              predictions.
+      \end{itemize}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Implementation}
+  \centering
+  \resizebox{\linewidth}{!}{%
+  \begin{tikzpicture}[font=\small]
+    \node[box, minimum width=2.3cm] (env) at (0,2.4) {MuJoCo drone\\\scriptsize\texttt{drone\_env.py}};
+    \node[bluebox, minimum width=1.6cm] (denv) at (2.75,2.4) {real data\\$\Denv$};
+    \node[box, minimum width=2.4cm] (ens) at (5.5,2.4) {7-network ensemble\\\scriptsize\texttt{ensemble.py}};
+    \node[orangebox, text width=2.4cm] (roll) at (8.75,2.4) {\textbf{rollout rule}\\\scriptsize MACURA, MBPO\\or M2AC (SAC: none)};
+    \node[greenbox, text width=2.4cm] (sac) at (12.2,2.4) {SAC learner\\\scriptsize 95\% imagined\\+ 5\% real data};
+    \draw[arr] (env) -- (denv);
+    \draw[arr] (denv) -- (ens);
+    \draw[arr] (ens) -- (roll);
+    \draw[arr] (roll) -- (sac);
+    \draw[arr, rounded corners] (sac.north) -- ++(0,0.5) -| node[lab, above, pos=0.25] {actions (policy)} (env.north);
+    \node[font=\scriptsize, text=gray] at (6.1,1.3) {the same training loop for all four algorithms (\texttt{train.py})};
+
+    \node[bluebox, minimum width=3.1cm, text width=3.0cm] (kag) at (0.7,-0.3)
+      {\textbf{4 Kaggle notebooks}\\\scriptsize 2 accounts, 2 algorithms\\$\times$ 2 seeds in parallel, $\approx$4 h};
+    \node[box, minimum width=2.6cm, text width=2.5cm] (dl) at (4.4,-0.3) {\textbf{download}\\\scriptsize logs, best models,\\plots, videos};
+    \node[bluebox, minimum width=3.1cm, text width=3.0cm] (test) at (8.1,-0.3)
+      {\textbf{testing notebook}\\\scriptsize 50 new scenarios,\\comparison, videos};
+    \node[box, minimum width=2.5cm, text width=2.4cm] (sim) at (11.7,-0.3) {\textbf{3-D simulator}\\\scriptsize the drones race live};
+    \draw[arr] (kag) -- (dl);
+    \draw[arr] (dl) -- (test);
+    \draw[arr] (test) -- (sim);
+  \end{tikzpicture}}
+  \vspace{0.3em}
+  \begin{itemize}\small
+    \item Python, PyTorch, MuJoCo, Stable-Baselines3; every setting in one file (\texttt{config.py}).
+    \item The notebooks download the code from GitHub; \texttt{kaggle.sh} starts, checks and downloads all four.
+    \item Runs are \textbf{deterministic} for a given seed: every result can be reproduced.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{A Fair Protocol (Fixed Before the Runs)}
+  \small
+  \begin{columns}[T]
+    \begin{column}{0.54\textwidth}
+      \centering\footnotesize
+      \begin{tabular}{ll}
+        \toprule
+        \textbf{setting} & \textbf{value} \\
+        \midrule
+        real steps per run & 50,000 (first 5,000 random) \\
+        imagined trips & 25,000 every 250 steps, $\le$10 steps \\
+        SAC batch & 95\% imagined + 5\% real \\
+        MACURA & $\xi=0.5$, $\zeta=0.95$, $G_{\max}=16$ \\
+        MBPO & length $1\to10$, 12 updates/step \\
+        M2AC & paper rule, 12 updates/step \\
+        seeds & 4, 5, 6, 7 (new) \\
+        test & 50 new scenarios (3000--3049) \\
+        \bottomrule
+      \end{tabular}
+    \end{column}
+    \begin{column}{0.44\textwidth}
+      \begin{itemize}
+        \item \textbf{Equal compute}: MBPO and M2AC get 12 SAC updates per real step; MACURA adapts its own and
+              averaged \textbf{10.9}.
+        \item The best checkpoint is chosen on other scenarios (100--119): \textbf{nothing is tuned on the test}.
+        \item Scores: IQM over seeds, and \textbf{seed-by-seed} comparisons (same scenarios, wind and gusts).
+        \item Exploration as in the paper: MACURA pink noise, MBPO and M2AC none, SAC samples its policy.
+      \end{itemize}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{How I Arrived at This Task}
+  \small
+  \centering
+  \begin{tabular}{lp{10.2cm}}
+    \toprule
+    \textbf{task} & \textbf{what happened} \\
+    \midrule
+    cage, delivery & landing tasks: the models were \textbf{not} more uncertain where it mattered, or the drones just hovered \\
+    race & laps with a chute: nobody learned to fly in a 10k-step test \\
+    race2 & + altitude-hold stabiliser and a racing-line sensor: learnable, but MACURA $\approx$ MBPO \\
+    \textbf{race3} & race2 with a \textbf{deadlier chute} (50\% lift loss instead of 35\%) \\
+    \bottomrule
+  \end{tabular}
+  \vspace{0.8em}
+  \begin{itemize}
+    \item \textbf{Rule fixed before the test}: keep race3 only if MACURA beats MBPO while learning in at least 3 of 4
+          seeds (0--3). It passed: 3 of 4.
+    \item Then the \textbf{final study on new seeds} (4--7), which played no part in choosing the task.
+    \item Lesson: a task separates the methods only if the model is uncertain \textbf{where it matters}.
+  \end{itemize}
+\end{frame}
+
+\section{Results}
+
+\begin{frame}{Learning Curves}
+  \begin{columns}[T]
+    \begin{column}{0.64\textwidth}
+      \begin{figure}
+        \includegraphics[width=\linewidth]{figures/project/learning_curves_smooth.png}
+      \end{figure}
+    \end{column}
+    \begin{column}{0.34\textwidth}
+      \small
+      \begin{itemize}
+        \item \textbf{A}: MACURA is ahead from about 17k steps and stays ahead.
+        \item \textbf{B}: its crash rate falls to about 5\% (like M2AC); \textbf{MBPO's rises} again after 30k (one seed collapsed).
+        \item \textbf{C}: it flies the largest share of a lap.
+        \item \textbf{D}: SAC (no model) breaks by far the most drones.
+      \end{itemize}
+      \vspace{0.3em}
+      \scriptsize IQM over 4 seeds, 95\% CI shaded; dotted lines: a hand-written autopilot.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Test on 50 New Scenarios}
+  \centering
+  \small
+  \begin{tabular}{lccccc}
+    \toprule
+    & \textbf{return while learning} & \textbf{drones broken} & \textbf{test return} & \textbf{lap progress} & \textbf{crash rate} \\
+    \midrule
+    \textbf{MACURA} & \textbf{69} & 28 & \textbf{333} & \textbf{31\%} & 4\% \\
+    M2AC & $-28$ & 26 & 267 & 24\% & 6\% \\
+    MBPO & $-59$ & 28 & 158 & 22\% & \textbf{2\%} \\
+    SAC & $-475$ & 154 & $-312$ & 7\% & 35\% \\
+    \bottomrule
+  \end{tabular}
+  \vspace{-0.2em}
+  \begin{figure}
+    \includegraphics[width=0.86\linewidth]{figures/project/test_scores.png}
+    \caption{Each seed's best model on the same 50 new scenarios (dots = seeds). IQM over seeds 4--7.}
+  \end{figure}
+\end{frame}
+
+\begin{frame}{Seed by Seed}
+  \centering
+  \small
+  \begin{tabular}{lccccc}
+    \toprule
+    \textbf{test return} & \textbf{seed 4} & \textbf{seed 5} & \textbf{seed 6} & \textbf{seed 7} & \textbf{MACURA better in} \\
+    \midrule
+    MACURA $-$ MBPO & $+238$ & $+151$ & $+62$ & $+40$ & \textbf{4 of 4} (mean $+123$) \\
+    MACURA $-$ M2AC & $+142$ & $-4$ & $+34$ & $+56$ & \textbf{3 of 4} (mean $+57$) \\
+    MACURA $-$ SAC & $+807$ & $+492$ & $+731$ & $+483$ & \textbf{4 of 4} (mean $+628$) \\
+    \bottomrule
+  \end{tabular}
+  \vspace{1em}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{All 8 seeds, MACURA vs MBPO}
+        Seeds 0--3 (the race3 test) + 4--7:
+        \begin{itemize}\small
+          \item better while learning in \textbf{7 of 8} seeds (mean $+110$; one-sided sign test $p=0.035$);
+          \item better on the final test flights in \textbf{7 of 8} (mean $+105$; paired $t$-test $p=0.035$).
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{itemize}\small
+        \item Same seed = same scenarios, wind and gusts: a \textbf{paired} comparison.
+        \item \textbf{MBPO seed 5 collapsed} at about 25k steps (return $+50\to-550$, 205 drones broken): it trusts all of
+              its imagination. MACURA had no such collapse.
+        \item M2AC is the strongest baseline: close to MACURA in seed 5.
+      \end{itemize}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Does MACURA Trust Its Model Where It Should?}
+  \begin{figure}
+    \includegraphics[width=\linewidth]{figures/project/model_trust.png}
+  \end{figure}
+  \vspace{-0.4em}
+  \begin{columns}[T]
+    \begin{column}{0.49\textwidth}
+      \begin{itemize}\small
+        \item \textbf{A}: MACURA trusts about 70\% of a full imagination; MBPO 100\%, M2AC a fixed 25\%.
+        \item \textbf{B}: in normal flight it trusts \textbf{94\%} of imagined steps, in fast descents only \textbf{67\%}.
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.49\textwidth}
+      \begin{itemize}\small
+        \item \textbf{C}: its trips grow from 4 to about 8 steps as the model improves.
+        \item \textbf{D}: its updates follow its trust (Eq.~22).
+        \item 13\% of MBPO's imagined data would have failed MACURA's check.
+      \end{itemize}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Is the Disagreement Right?}
+  \begin{figure}
+    \includegraphics[width=\linewidth]{figures/project/model_check.png}
+  \end{figure}
+  \vspace{-0.4em}
+  \begin{itemize}\small
+    \item On real flights I compare each step's disagreement with the model's \textbf{real} one-step error (like the
+          paper's Fig.~10).
+    \item Steps that are not trusted have a \textbf{higher real error} (MBPO's ensemble: 0.34 vs 0.20; MACURA's: 0.24 vs
+          0.21): the signal works, but it is \textbf{noisy}.
+    \item The trained drones rarely sink faster than 1.2 m/s in the test: MACURA wins by \textbf{learning faster and
+          flying further}, not by surviving the chute better.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{In Flight}
+  \begin{columns}[T]
+    \begin{column}{0.6\textwidth}
+      \begin{figure}
+        \includegraphics[width=\linewidth]{figures/project/frame_macura_mbpo_9.png}
+        \caption{The best MACURA and MBPO models on a new scenario, 9 s into the flight.}
+      \end{figure}
+    \end{column}
+    \begin{column}{0.38\textwidth}
+      \small
+      \begin{itemize}
+        \item MACURA (left) is already at the chute; MBPO (right) has only reached the top gate.
+        \item MACURA's panel: at every step, would its own model \textbf{trust itself} here?
+              (green: members agree; orange: stop imagining).
+        \item Best seeds on the test: MACURA 422, M2AC 383, MBPO 355.
+        \item Videos of every model and a live 3-D simulator are in the repository.
+      \end{itemize}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\section{Experiments and limitations}
+
+\begin{frame}{The Experiments I Ran}
+  \centering
+  \footnotesize
+  \renewcommand{\arraystretch}{1.1}\setlength{\tabcolsep}{3pt}
+  \begin{tabular}{*{4}{>{\raggedright\arraybackslash}p{2.15cm}}>{\raggedright\arraybackslash}p{4.3cm}}
+    \toprule
+    \textbf{experiment} & \textbf{task} & \textbf{algorithms} & \textbf{seeds $\times$ steps} & \textbf{what I learned} \\
+    \midrule
+    task screening & cage, delivery, race & mostly MACURA, MBPO & short pilots & the task decides: these could not separate the methods \\
+    race2 pilot & race2 & all four & seed 0 $\times$ 50k & MACURA best (test 284 vs MBPO 111), but one seed \\
+    quick check & race2, race3 & MACURA, MBPO & seed 0 $\times$ 10k & pipeline works; runs are exactly reproducible \\
+    race3 test & race3 & MACURA, MBPO, SAC & seeds 0--3 $\times$ 50k & decision rule passed: 3 of 4 seeds \\
+    \textbf{final study} & race3 & \textbf{all four} & \textbf{seeds 4--7} $\times$ \textbf{50k} & the results in this talk \\
+    new-scenario test & race3 & 16 trained models & 50 scenarios each & test tables, trust, videos \\
+    \bottomrule
+  \end{tabular}
+  \vspace{0.8em}
+  \begin{itemize}\small
+    \item \textbf{Compute}: 4 Kaggle GPU notebooks on 2 accounts at once, about 4 h each; the test: 11 min on my laptop.
+    \item \textbf{Equal updates} fixed after the race2 pilot: 12 per step for MBPO, MACURA's average there.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Limitations (1/2): Training Budget and Statistics}
+  \begin{columns}[T]
+    \begin{column}{0.49\textwidth}
+      \textbf{Few training steps}
+      \begin{itemize}\small
+        \item Only \textbf{50,000 real steps} per run (5,000 of them random); the paper uses 125k--400k.
+        \item The curves are \textbf{still rising} at the end: I compare \textbf{early learning}, not final performance.
+        \item The task is \textbf{not solved}: 31\% of a lap per 10 s, against 54\% for a simple autopilot at
+              1.5 m/s.
+        \item Kaggle limits (12 h per session, about 30 GPU h per week and account) did not allow longer runs.
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.47\textwidth}
+      \textbf{Few seeds}
+      \begin{itemize}\small
+        \item 4 seeds per algorithm in the final study (8 for MACURA vs MBPO).
+        \item 7 of 8 is \textbf{consistent}, but only at the edge of statistical significance ($p\approx0.035$).
+        \item The confidence intervals are wide; M2AC and MACURA overlap.
+        \item \textbf{No hyperparameter search}: $\xi=0.5$, MBPO's length $1\to10$ and M2AC's penalty were set once,
+              not tuned per method.
+      \end{itemize}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Limitations (2/2): Fairness and the Task}
+  \begin{columns}[T]
+    \begin{column}{0.49\textwidth}
+      \textbf{Fairness}
+      \begin{itemize}\small
+        \item \textbf{Exploration differs}: only MACURA uses pink noise (the paper's protocol). Part of its gain may come
+              from exploration; the paper shows pink noise helps MBPO too.
+        \item MBPO and M2AC use the paper's rules as they are; the paper tunes MBPO's length schedule per task, I did
+              not.
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.47\textwidth}
+      \textbf{The task}
+      \begin{itemize}\small
+        \item \textbf{One task}, designed and changed by me five times: a risk of picking a task that suits MACURA
+              (mitigated by rules fixed in advance and new seeds).
+        \item The trained drones \textbf{rarely reach the chute trap}, so the ``where'' mechanism was tested less than
+              planned.
+        \item The disagreement predicts the real model error only \textbf{weakly} here.
+        \item \textbf{Simulation only}: nothing was flown on a real drone.
+      \end{itemize}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\section{Conclusion}
+
+\begin{frame}{Lessons and Next Steps}
+  \begin{columns}[T]
+    \begin{column}{0.49\textwidth}
+      \textbf{Lessons}
+      \begin{itemize}\small
+        \item The task decides everything: MACURA only helps if the model is uncertain \textbf{where it matters}.
+        \item Fix the decision rules \textbf{before} the runs, and confirm on \textbf{new seeds}.
+        \item Give every method the \textbf{same compute} (updates per step), or the comparison says nothing.
+        \item Separate the two noises: exploration noise changes the data, environment noise the model.
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.47\textwidth}
+      \textbf{Next steps}
+      \begin{itemize}\small
+        \item Train \textbf{longer} (100k--200k steps), so the drones fly the chute fast and the trap matters.
+        \item \textbf{More seeds} (10 or more) for clear statistics.
+        \item The \textbf{same exploration} for all methods (already possible in the code).
+        \item Tune $\xi$, and compare with the paper's settings.
+        \item Test the best policies on a \textbf{real drone}.
+      \end{itemize}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Conclusion}
+  \begin{itemize}
+    \item \textbf{The paper}: MACURA trusts its learned model only \textbf{where it trusts itself}. Rollouts stop at the
+          first uncertain step (GJS $\ge\kappa$), $\kappa$ and the updates tune themselves, and one knob ($\xi$) is left.
+          GJS reacts to disagreement, not to noise.
+    \item \textbf{My project}: on a racing drone with wind, gusts, a package and a chute, with the same compute for all:
+      \begin{itemize}
+        \item MACURA had the \textbf{best test return} (333 vs 267 M2AC, 158 MBPO, $-312$ SAC);
+        \item it beat MBPO in \textbf{7 of 8 seeds} and M2AC in 3 of 4, with no collapse;
+        \item it trusted its model \textbf{less in fast descents} (67\%) than in normal flight (94\%).
+      \end{itemize}
+    \item With only 50k steps and few seeds this is \textbf{early-learning evidence}: consistent, but not yet proof.
+    \item Model-based RL is far more data-efficient than model-free SAC here, and MACURA was the strongest of the three
+          model-based methods on this task.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}[plain]
+  \vfill\centering
+  {\usebeamerfont{title}\color{black}Thank you for your attention!\par}
+  \vspace{1em}
+  {\small Code, results and videos: \texttt{github.com/silvergjeka22/macura-drone}}
+  \vfill
+\end{frame}
+
+\end{document}

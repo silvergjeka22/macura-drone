@@ -27,6 +27,16 @@ checkpoints/
 *.pt
 *.ckpt
 
+# LaTeX build files of the presentation
+paper/presentation/*.aux
+paper/presentation/*.fdb_latexmk
+paper/presentation/*.fls
+paper/presentation/*.log
+paper/presentation/*.nav
+paper/presentation/*.out
+paper/presentation/*.snm
+paper/presentation/*.toc
+
 # Other local files
 out_*/
 old_files/
