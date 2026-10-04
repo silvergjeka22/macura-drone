@@ -18,7 +18,7 @@ def _env_list(name, default, cast):
 
 TASK = "race3"
 
-# ── experiment ────────────────────────────────────────────────────────────────────────────────────────
+# experiment
 SEED = 0
 SEEDS = _env_list("MACURA_SEEDS", [0], int)
 ALGORITHMS = _env_list("MACURA_ALGOS", ["macura", "mbpo", "m2ac", "sac"], lambda x: x.strip().lower())
@@ -32,7 +32,7 @@ DEADLINE = float(_env("MACURA_DEADLINE", 0)) or None
 # the best checkpoint (highest evaluation return) is tested on fresh scenarios 1000..1029
 SELECTION = {"start_step": 1000, "eval_every": 1000, "final_eval_episodes": 30, "final_eval_seed_base": 1000}
 
-# ── environment: laps around a 3-D course with a chute ────────────────────────────────────────────────
+# environment: laps around a 3-D course with a chute
 REWARD = {
     "w_prog": 1.0,                     # speed along the course, only near it
     "w_track": 1.0,                    # minus metres outside the course tube
@@ -65,7 +65,7 @@ ENV = {
     "reward": REWARD,
 }
 
-# ── learning: the same for all four algorithms ────────────────────────────────────────────────────────
+# learning: the same for all four algorithms
 ENSEMBLE = {
     "num_members": 7, "num_elites": 5, "hidden_size": 200, "num_layers": 4, "activation": "silu",
     "learning_rate": 1.0e-3, "weight_decay": 1.0e-5, "batch_size": 256, "train_epochs_per_round": 8,
