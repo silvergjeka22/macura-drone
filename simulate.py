@@ -1,5 +1,5 @@
 """Watch the trained drones race live in MuJoCo's 3-D viewer (macOS: mjpython simulate.py).
-
+    3010,3040,1004
     mjpython simulate.py
     mjpython simulate.py --algos macura mbpo m2ac sac --scenarios 1002 --seconds 35
 """

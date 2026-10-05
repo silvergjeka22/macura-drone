@@ -1,4 +1,4 @@
-% MACURA: the paper and my racing-drone project (35 pages: Part I 18 slides, Part II 12 slides)
+% MACURA: the paper and my racing-drone project (36 pages: Part I 19 slides, Part II 12 slides)
 % Build:  latexmk -pdf macura_presentation.tex      (or: pdflatex macura_presentation.tex twice)
 % figures/paper:   cropped from the paper (arXiv:2405.19014v3)
 % figures/project: plots and video frames from the project (python3 paper/presentation/make_figures.py)
@@ -70,6 +70,7 @@
 \newcommand{\ptil}{\tilde{p}}
 \newcommand{\chg}[1]{{\color{myorange}\bfseries #1}}                 % the line where a method differs
 \newcommand{\code}[1]{{\scriptsize\color{gray}\texttt{#1}}}          % where it is in my code
+\newcommand{\mtag}[2]{{\setlength{\fboxsep}{1.2pt}\colorbox{#1}{\makebox[1.2cm]{\textcolor{white}{\scriptsize\bfseries #2}}}}}  % method tag
 \algrenewcommand\algorithmicrequire{\textbf{Given:}}
 \algrenewcommand\algorithmiccomment[1]{\hfill{\color{gray}\(\triangleright\) #1}}
 
@@ -83,6 +84,19 @@
   redbox/.style={box, fill=myred!10, draw=myred},
   arr/.style={-{Stealth[length=2.4mm]}, thick},
   lab/.style={font=\scriptsize, align=center},
+}
+
+\tikzset{
+  tag/.style={rounded corners=2pt, font=\scriptsize\bfseries, text=white, minimum width=1.3cm,
+              minimum height=0.45cm, inner sep=1pt},
+  mb/.style={draw, rounded corners=2pt, fill=white, font=\scriptsize, inner sep=2.5pt, minimum height=0.45cm},
+  nnd/.pic={
+    \foreach \a in {0,...,5} \foreach \b in {0,...,3} \draw[black!70, line width=0.2pt] (-0.4,{-0.3+0.12*\a}) -- (0,{-0.18+0.12*\b});
+    \foreach \b in {0,...,3} \foreach \c in {0,...,2} \draw[black!70, line width=0.2pt] (0,{-0.18+0.12*\b}) -- (0.35,{-0.12+0.12*\c});
+    \foreach \a in {0,...,5} \filldraw[fill=white, draw=black, line width=0.3pt] (-0.4,{-0.3+0.12*\a}) circle (0.04);
+    \foreach \b in {0,...,3} \filldraw[fill=white, draw=black, line width=0.3pt] (0,{-0.18+0.12*\b}) circle (0.04);
+    \foreach \c in {0,...,2} \filldraw[fill=white, draw=black, line width=0.3pt] (0.35,{-0.12+0.12*\c}) circle (0.04);
+  },
 }
 
 \title{Trust the Model Where It Trusts Itself}
@@ -136,23 +150,65 @@
   \end{itemize}
   \vspace{0.3em}
   \begin{columns}[T]
-    \begin{column}{0.48\textwidth}
-      \begin{block}{MBPO: \emph{when} to trust the model}
-        Imagined trips get longer during training by a \textbf{hand-made schedule}, and the model is trusted
+    \begin{column}{0.32\textwidth}
+      \begin{block}{MBPO: \emph{when} to trust}
+        \small Imagined trips get longer during training by a \textbf{hand-made schedule}, and the model is trusted
         \textbf{equally everywhere}.
       \end{block}
     \end{column}
-    \begin{column}{0.48\textwidth}
-      \begin{block}{MACURA: \emph{where} to trust the model}
-        A model is accurate in some places and not in others, so every imagined trip \textbf{stops where the model
-        itself becomes uncertain}.
+    \begin{column}{0.32\textwidth}
+      \begin{block}{M2AC: \emph{how much} to trust}
+        \small Every trip runs the full length, then only a \textbf{fixed share} ($\approx$25\%) of the least uncertain
+        steps is kept, whatever their quality.
+      \end{block}
+    \end{column}
+    \begin{column}{0.32\textwidth}
+      \begin{block}{MACURA: \emph{where} to trust}
+        \small A model is accurate in some places and not in others, so every imagined trip \textbf{stops where the
+        model itself becomes uncertain}.
       \end{block}
     \end{column}
   \end{columns}
-  \vspace{0.4em}
-  \small\textbf{Contributions of the paper}: (1) a guarantee of improvement inside a set $\E$ of accurate states;
-  (2) a cheap uncertainty measure (GJS) to find $\E$; (3) adaptive imagined trips with essentially \textbf{one
-  hyperparameter} $\xi$; (4) better results than MBPO and M2AC on MuJoCo.
+\end{frame}
+
+% ── I.1b ──────────────────────────────────────────────────────────────────────────────────────────
+\begin{frame}{What the Paper Does}
+  \footnotesize
+  \begin{columns}[T]
+    \begin{column}{0.49\textwidth}
+      \textbf{1. Theory: where imagination is safe}
+      \begin{itemize}
+        \item A set $\E$ of states where the model is accurate.
+        \item Theorem 4.1: if imagined trips \textbf{stop when they leave} $\E$, improving in the model also improves
+              the real return, up to a small error $C$.
+      \end{itemize}
+      \textbf{2. A measure to find $\E$: GJS}
+      \begin{itemize}
+        \item Disagreement over \textbf{all pairs} of networks, in closed form: cheap at every step.
+        \item On a pendulum it matches the real model error; M2AC's one-vs-rest does not.
+      \end{itemize}
+      \textbf{3. The algorithm: MACURA}
+      \begin{itemize}
+        \item Trips stop at the first uncertain step; $\kappa$ and $G$ tune themselves; pink-noise exploration.
+        \item Only \textbf{one} hyperparameter, $\xi$.
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.47\textwidth}
+      \textbf{4. Experiments}
+      \begin{itemize}
+        \item Five MuJoCo tasks (HalfCheetah, Walker, Hopper, Ant, Humanoid) against \textbf{MBPO}, \textbf{M2AC}
+              and model-free \textbf{SAC}, 5 seeds each.
+        \item MACURA learns faster and ends higher, most clearly on Humanoid and Ant.
+      \end{itemize}
+      \textbf{5. Analyses: why it works}
+      \begin{itemize}
+        \item Trip lengths and updates per step of each method.
+        \item Robustness to \textbf{environment noise}.
+        \item The effect of \textbf{exploration}: deterministic, white, pink noise.
+        \item \textbf{Ablations}: rank rule, OvR, fixed $\kappa$, fixed $G$; how $\kappa$ evolves; sensitivity to $\xi$.
+      \end{itemize}
+    \end{column}
+  \end{columns}
 \end{frame}
 
 % ── I.2 ───────────────────────────────────────────────────────────────────────────────────────────
@@ -220,21 +276,23 @@
 % ── I.4 ───────────────────────────────────────────────────────────────────────────────────────────
 \begin{frame}{MBPO and M2AC: Two Earlier Answers}
   \begin{columns}[T]
-    \begin{column}{0.4\textwidth}
+    \begin{column}{0.44\textwidth}
       \textbf{MBPO} (Janner et al., 2019)
       \begin{itemize}\small
-        \item Every imagined trip has the \textbf{same length} $k$. It grows during training by a \textbf{schedule}
-              chosen by hand for each task (Humanoid $1\to25$, Walker 1).
+        \item Every trip has the \textbf{same length} $k$, grown by a hand-made \textbf{schedule} (Humanoid $1\to25$,
+              Walker 1):\\[0.2em]
+              $k=k_{\min}+\frac{t-a}{b-a}(k_{\max}-k_{\min})$\\[0.1em]
+              {\footnotesize clipped to $[k_{\min},k_{\max}]$; $t$ = real step. Mine: $1\to10$ over steps 5k--7.5k.}
         \item \textbf{Every} imagined step is used: the model is never checked.
         \item A \textbf{fixed} number $G$ of SAC updates per real step.
       \end{itemize}
       $\Rightarrow$ It answers \emph{when} to trust the model, not \emph{where}.
     \end{column}
-    \begin{column}{0.56\textwidth}
+    \begin{column}{0.53\textwidth}
       \textbf{M2AC} (Pan et al., 2020): masking by uncertainty
       \begin{itemize}\small
-        \item It measures uncertainty \textbf{one-vs-rest (OvR)}: the network that made the prediction against a
-              Gaussian fitted to the others.
+        \item It measures uncertainty \textbf{one-vs-rest (OvR)}: the network $e$ that made the prediction against a
+              Gaussian fitted to the others, $u=\mathrm{KL}\big(\mathcal{N}_e\,\|\,\mathcal{N}_{\mathrm{rest}}\big)$.
         \item All trips run the full horizon $H$. At step $h$ it keeps only the share $\frac{H-h}{2(H+1)}$ with the
               \textbf{lowest} uncertainty: about 25\% of all steps.
         \item The rule is \textbf{rank-based}: it keeps the same share when all data are bad, and throws data away
@@ -360,32 +418,105 @@
 \end{frame}
 
 % ── I.9 ───────────────────────────────────────────────────────────────────────────────────────────
-\begin{frame}{MACURA Architecture}
+\begin{frame}{One Architecture for All Four Methods}
   \centering
-  \begin{tikzpicture}
-    \node[box, minimum width=2.4cm] (env) at (0,2.8) {Environment $\mathcal{M}$};
-    \node[greenbox, minimum width=2.4cm] (pi) at (10.0,2.8) {Policy $\pi$ (SAC)};
-    \node[bluebox, minimum width=1.9cm] (denv) at (0,0) {$\Denv$\\real data};
-    \node[box, minimum width=2.2cm] (model) at (3.4,0) {Ensemble $\ptil$\\7 networks};
-    \node[orangebox, minimum width=2.6cm] (roll) at (6.9,0) {Imagined trips that\\\textbf{stop at} $\ugjs\ge\kappa$};
-    \node[bluebox, minimum width=1.9cm] (dmod) at (10.0,0) {$\Dmod$\\trusted data};
-    \node[redbox, minimum width=2.6cm] (kappa) at (6.9,-1.95) {$\kappa=\frac{\xi}{K}\sum_k\hat u_{k}$};
-    \draw[arr, myorange] ([yshift=5pt]pi.west) -- node[lab, above] {action $a_t$ + \textbf{pink noise}} ([yshift=5pt]env.east);
-    \draw[arr] ([yshift=-5pt]env.east) -- node[lab, below] {next state $s_{t+1}$, reward $r_t$} ([yshift=-5pt]pi.west);
-    \draw[arr] (env) -- node[lab, right] {$(s,a,r,s')$} (denv);
-    \draw[arr] (denv) -- node[lab, above] {train every\\$R$ steps} (model);
-    \draw[arr] (model) -- node[lab, above] {$\mu_e,\Sigma_e$} (roll);
-    \draw[arr] (roll) -- (dmod);
-    \draw[arr, rounded corners] (denv.south) -- ++(0,-0.7) -| node[lab, below, pos=0.25] {start states $s_0$} ([xshift=-1.0cm]roll.south);
-    \draw[arr, myred] ([xshift=0.1cm]roll.south) -- ([xshift=0.1cm]kappa.north);
-    \draw[arr, myred] ([xshift=0.6cm]kappa.north) -- node[lab, right, text=myred] {first-step $u$ $\to$ $\kappa$} ([xshift=0.6cm]roll.south);
-    \draw[arr, myorange] (dmod) -- node[lab, right, align=left, text=myorange] {$G\propto|\Dmod|$\\SAC updates} (pi);
-    \draw[arr, dashed] (pi.south west) -- node[lab, left, pos=0.45] {actions in\\imagination} (roll.north east);
-  \end{tikzpicture}
+  \begin{tikzpicture}[scale=0.84, every node/.style={transform shape},
+      region/.style={rounded corners=5pt, thick},
+      rtitle/.style={anchor=north west, font=\scriptsize\bfseries},
+      cyl/.style={cylinder, shape border rotate=90, aspect=0.22, draw, thick, minimum width=1.1cm,
+                  minimum height=0.8cm, font=\footnotesize, inner sep=1pt},
+      ob/.style={draw, rounded corners=2pt, fill=white, font=\scriptsize, inner sep=2pt, minimum height=0.42cm, align=center},
+      mbox/.style={rounded corners=3pt, densely dotted, thick},
+      pbox/.style={draw=gray, rounded corners=2pt, fill=white},
+      ax/.style={-{Stealth[length=1.2mm]}, gray!80, line width=0.4pt},
+      fl/.style={font=\scriptsize, inner sep=1pt},
+      kp/.style={circle, inner sep=0pt, minimum size=1.5mm}]
 
-  \footnotesize The loop is the same as MBPO's. What MACURA adds is in \textcolor{myorange}{\textbf{orange}} and
-  \textcolor{myred}{\textbf{red}}: trips stop where the model is uncertain, $\kappa$ tunes itself, the number of
-  updates $G$ adapts, and the agent explores with pink noise.
+    % ── the three parts ──
+    \draw[region, draw=myblue, fill=myblue!5] (0,0) rectangle (2.3,7.0);
+    \draw[region, draw=myorange, fill=myorange!5] (4.5,0) rectangle (12.5,7.0);
+    \draw[region, draw=mygreen, fill=mygreen!5] (12.85,0) rectangle (15.5,7.0);
+    \node[rtitle, text=myblue] at (0.08,6.97) {REAL};
+    \node[rtitle, text=myorange] at (4.58,6.97) {IMAGINATION};
+    \node[rtitle, text=mygreen!60!black] at (12.93,6.97) {LEARNING};
+
+    % ── real part ──
+    \node[greenbox, minimum width=1.5cm, minimum height=0.5cm, font=\footnotesize] (pi) at (1.15,6.0) {policy $\pi$};
+    \node[box, minimum width=1.5cm, minimum height=0.5cm, font=\footnotesize] (env) at (1.15,4.4) {Env $\mathcal{M}$};
+    \draw[arr] (0.9,5.75) -- node[lab, left] {$a$} (0.9,4.65);
+    \draw[arr] (1.4,4.65) -- node[lab, right] {$s',r$} (1.4,5.75);
+    \node[cyl, fill=myblue!15] (denv) at (1.15,2.6) {$\Denv$};
+    \draw[arr] (env.south) -- node[lab, right] {store} (denv.north);
+    \node[font=\scriptsize, align=center, text=gray!60!black] at (1.15,1.1) {MACURA:\\$a$ + pink noise};
+
+    % ── the model, in its own box ──
+    \draw[rounded corners=4pt, thick, draw=gray, fill=yellow!12] (2.55,4.6) rectangle (4.2,6.75);
+    \node[font=\scriptsize\bfseries] at (3.375,6.52) {Ensemble $\ptil$};
+    \pic[scale=1.1] at (3.25,5.55) {nnd};
+    \node[font=\scriptsize] at (3.95,5.55) {$\times7$};
+    \draw[arr, rounded corners] (denv.east) -- (3.375,2.6) -- node[lab, right] {train} (3.375,4.6);
+
+    % ── imagination ──
+    \node[ob, font=\footnotesize] (step) at (8.5,6.2)
+      {$s_0\in\Denv\ \xrightarrow{\ \pi\ }\ a\ \xrightarrow{\ \ptil_{1..7}\ }\ s'_1,\dots,s'_7$};
+    \draw[arr] (4.2,6.2) -- (step.west);
+    \draw[mbox, draw=gray, fill=gray!10]      (4.65,5.2) rectangle (12.35,5.8);
+    \draw[mbox, draw=myred, fill=myred!7]     (4.65,3.55) rectangle (12.35,4.95);
+    \draw[mbox, draw=mygreen, fill=mygreen!7] (4.65,1.9) rectangle (12.35,3.3);
+    \draw[mbox, draw=myblue, fill=myblue!7]   (4.65,0.25) rectangle (12.35,1.65);
+    \node at (5.33,5.5)   {\mtag{gray}{SAC}};
+    \node at (5.33,4.25) {\mtag{myred}{MBPO}};
+    \node at (5.33,2.6) {\mtag{mygreen}{M2AC}};
+    \node at (5.33,0.95) {\mtag{myblue}{MACURA}};
+    % SAC: nothing imagined
+    \node[font=\large, text=gray] at (6.65,5.5) {$\varnothing$};
+    \node[fl] at (8.55,5.5) {$\mathcal{B}=100\%\ \Denv$};
+
+    % the 7 predictions s'_1..s'_7 (same points in every row)
+    \foreach \gy in {4.35,2.70,1.05} \draw[pbox] (6.2,{\gy-0.42}) rectangle (7.1,{\gy+0.46});
+    % MBPO: one random network e, nothing compared
+    \foreach \px/\py in {-0.25/0.2,0/0.28,0.24/0.16,-0.3/-0.06,0.3/-0.12,-0.08/-0.26}
+      \fill[gray!55] ({6.65+\px},{4.35+\py}) circle (0.055);
+    \fill[myred] (6.7,4.37) circle (0.08);
+    \node[fl] at (6.65,3.725) {$s'=s'_e$};
+    % M2AC: network e against the rest
+    \foreach \px/\py in {-0.25/0.2,0.24/0.16,-0.3/-0.06,0.05/0.02,0.3/-0.12,-0.08/-0.26}
+      \draw[mygreen!60, line width=0.4pt] (6.65,2.98) -- ({6.65+\px},{2.70+\py});
+    \foreach \px/\py in {-0.25/0.2,0.24/0.16,-0.3/-0.06,0.05/0.02,0.3/-0.12,-0.08/-0.26}
+      \fill[gray!55] ({6.65+\px},{2.70+\py}) circle (0.055);
+    \fill[mygreen] (6.65,2.98) circle (0.08);
+    \node[fl] at (6.65,2.075) {$u=\mathrm{KL}(\mathcal{N}_e\|\mathcal{N}_{\mathrm{rest}})$};
+    % MACURA: all pairs
+    \foreach \ax/\ay [count=\i] in {-0.25/0.2,0/0.28,0.24/0.16,-0.3/-0.06,0.05/0.02,0.3/-0.12,-0.08/-0.26}
+      \foreach \bx/\by [count=\j] in {-0.25/0.2,0/0.28,0.24/0.16,-0.3/-0.06,0.05/0.02,0.3/-0.12,-0.08/-0.26}
+        {\ifnum\j>\i \draw[myblue!40, line width=0.3pt] ({6.65+\ax},{1.05+\ay}) -- ({6.65+\bx},{1.05+\by}); \fi}
+    \foreach \px/\py in {-0.25/0.2,0/0.28,0.24/0.16,-0.3/-0.06,0.05/0.02,0.3/-0.12,-0.08/-0.26}
+      \fill[myblue] ({6.65+\px},{1.05+\py}) circle (0.055);
+    \node[fl] at (6.65,0.425) {$\ugjs$: all pairs};
+    \foreach \gy in {4.35,2.70,1.05} \draw[arr] (7.2,\gy) -- (7.6,\gy);
+
+    % how each method fills the imagined data: the rule, then its general formula
+    \node[anchor=west, align=left, font=\small] at (7.72,4.35) {%
+      store $s'$ while $h<k$\\[3pt]
+      $k=k_{\min}+\frac{t-a}{b-a}\,(k_{\max}-k_{\min})$};
+    \node[anchor=west, align=left, font=\small] at (7.72,2.70) {%
+      store $s'$ if $u$ in lowest $w(h)$\\[3pt]
+      $w(h)=\frac{H-h}{2(H+1)}$};
+    \node[anchor=west, align=left, font=\small] at (7.72,1.05) {%
+      store $s'$ if $\ugjs<\kappa$, \ else stop\\[3pt]
+      $\kappa=\frac{\xi}{K}\sum_{k}\hat u_{k}$};
+    % kept steps leave the imagination: one line per method into the bus
+    \foreach \gy in {4.35,2.70,1.05} \draw[thick] (12.35,\gy) -- (12.68,\gy);
+
+    % ── learning ──
+    \node[cyl, fill=myorange!20] (dmod) at (14.1,5.3) {$\Dmod$};
+    \draw[thick] (12.68,1.05) -- (12.68,5.3);
+    \draw[arr] (12.68,5.3) -- (dmod.west);
+    \node[box, fill=myred!8, draw=myred!70, minimum width=1.9cm, minimum height=0.75cm, font=\footnotesize] (learn) at (14.1,3.75) {SAC update\\$\times G$ per step};
+    \draw[arr] (dmod.south) -- node[lab, right] {95\%} (learn.north);
+    \node[font=\scriptsize, align=left, anchor=west] at (12.92,1.9) {batch: 95\% $\Dmod$\\+ 5\% $\Denv$\\[4pt]$G$ per real step:\\SAC $1$\\MBPO, M2AC $12$\\MACURA\\\quad $\propto|\Dmod|$};
+    \draw[arr, rounded corners] (learn.east) -- (15.32,3.75) -- (15.32,7.3) -- node[lab, above] {new $\pi$} (1.15,7.3) -- (pi.north);
+  \end{tikzpicture}
 \end{frame}
 
 \section{I \textperiodcentered{} Comparison}
